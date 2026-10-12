@@ -12,9 +12,8 @@
  */
 import { Channel } from "@tauri-apps/api/core";
 
-import { commands, type PaneLink, type TerminalAnchor } from "../../bindings";
+import { type AdoptedSession, commands, type PaneLink, type TerminalAnchor } from "../../bindings";
 import { PAGE_OWNER } from "./pageOwner";
-import { paneAddress } from "./paneAddress";
 import type {
   Anchor,
   Attached,
@@ -100,17 +99,15 @@ export class TauriBackend implements TerminalBackend {
     void commands.terminalDetach(id);
   }
 
-  async adopt(owner: string): Promise<Map<string, SessionId>> {
+  /** Claim the sessions another owner left running, in full: the pane address
+   *  alone cannot say what a pane without a tab should be called or where it
+   *  runs. The backend re-tags what it returns, so a second call answers only
+   *  with sessions that appeared since — which is what lets a late server's be
+   *  adopted without disturbing the panes that already hold theirs. */
+  async adoptSessions(owner: string): Promise<AdoptedSession[]> {
     const result = await commands.terminalAdopt(owner);
     if (result.status === "error") throw new Error(result.error);
-    // Keyed by the pane's address — the surface's `term_key` AND the provider
-    // in it — because that is what a pane coming up knows about itself, and
-    // because one surface can have a pane per provider (a Claude and a Codex
-    // review of the same PR): keyed by label alone, both would adopt the same
-    // session and the other would be stranded. A session nothing claims stays
-    // alive and unattached; it costs a ring and a shell until the app exits,
-    // which is strictly better than killing work the user can still get back to.
-    return new Map(result.data.map((s) => [paneAddress(s.label, s.agentKind), s.id]));
+    return result.data;
   }
 
   write(id: SessionId, data: string) {

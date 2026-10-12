@@ -1,9 +1,9 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { resetSessionTitles, sessionTitles } from "./sessionTitles";
-import { TerminalView } from "./TerminalView";
+import { TerminalView, UNANSWERED_MS } from "./TerminalView";
 import type {
   Anchor,
   Attached,
@@ -94,9 +94,6 @@ class FakeBackend implements TerminalBackend {
   }
   detach(id: SessionId) {
     this.detached.push(id);
-  }
-  async adopt() {
-    return new Map<string, SessionId>();
   }
   write(id: SessionId, data: string) {
     this.writes.push([id, data]);
@@ -237,8 +234,11 @@ describe("adoption", () => {
     // `fresh`, not `unknown`: this xterm was just built, so a full replay
     // cannot duplicate anything already on it.
     expect(backend.attaches[0]).toEqual([42, { kind: "fresh" }]);
+    // Nothing typed into the running agent, and nothing drawn on its screen that
+    // the session itself did not send.
     expect(backend.writes).toEqual([]);
     expect(backend.seeded).toEqual([]);
+    expect(renderer.written).toEqual([]);
   });
 
   /** Keystrokes and output have to reach the adopted session, not a phantom. */
@@ -490,6 +490,178 @@ describe("the pane's link state", () => {
       <TerminalView label="tree:AK-1:tab:t2" backend={backend} createRenderer={() => renderer} />,
     );
     expect(await findByRole("status")).toHaveTextContent("Reconnecting…");
+  });
+
+  describe("the 'aren't responding' hint", () => {
+    const HINT = /Terminals aren't responding/;
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    const SERVER_HINT = "Check the server in Settings → Terminal.";
+    const mount = async (backend: FakeBackend, hint: string | null = SERVER_HINT) => {
+      const utils = render(
+        <TerminalView
+          label="tree:AK-1:tab:t1"
+          backend={backend}
+          unansweredHint={hint ?? undefined}
+          createRenderer={() => new FakeRenderer()}
+        />,
+      );
+      await act(async () => {});
+      return utils;
+    };
+
+    test("a link down for ten seconds says so, without moving focus or touching the PTY", async () => {
+      const backend = new FakeBackend();
+      const { queryByRole, getByRole } = await mount(backend);
+      const before = document.activeElement;
+      act(() => backend.handlers?.onLink?.("reconnecting"));
+      act(() => void vi.advanceTimersByTime(UNANSWERED_MS - 1));
+      expect(getByRole("status")).not.toHaveTextContent(HINT);
+      act(() => void vi.advanceTimersByTime(1));
+      expect(getByRole("status")).toHaveTextContent(HINT);
+      expect(getByRole("status")).toHaveTextContent(SERVER_HINT);
+      expect(document.activeElement).toBe(before);
+      expect(backend.writes).toEqual([]);
+
+      // Live again: the hint goes with the badge.
+      act(() => backend.handlers?.onLink?.("live"));
+      expect(queryByRole("status")).toBeNull();
+    });
+
+    test("a quick reconnect never shows it", async () => {
+      const backend = new FakeBackend();
+      const { queryByRole } = await mount(backend);
+      act(() => backend.handlers?.onLink?.("reconnecting"));
+      act(() => void vi.advanceTimersByTime(UNANSWERED_MS - 1000));
+      act(() => backend.handlers?.onLink?.("live"));
+      act(() => void vi.advanceTimersByTime(UNANSWERED_MS));
+      expect(queryByRole("status")).toBeNull();
+    });
+
+    test("a session that never opens says so after ten seconds", async () => {
+      const backend = new FakeBackend();
+      backend.open = () => new Promise<SessionId>(() => {});
+      const { queryByRole, getByRole } = await mount(backend);
+      expect(queryByRole("status")).toBeNull();
+      act(() => void vi.advanceTimersByTime(UNANSWERED_MS));
+      expect(getByRole("status")).toHaveTextContent(HINT);
+    });
+
+    test("a pane with nowhere to point says only that it is waiting", async () => {
+      const backend = new FakeBackend();
+      backend.open = () => new Promise<SessionId>(() => {});
+      const { getByRole } = await mount(backend, null);
+      act(() => void vi.advanceTimersByTime(UNANSWERED_MS));
+      expect(getByRole("status")).toHaveTextContent("Terminals aren't responding.");
+      expect(getByRole("status")).not.toHaveTextContent(/Settings/);
+    });
+
+    test("an answered pane stays quiet, and a lost one has its own message instead", async () => {
+      const backend = new FakeBackend();
+      const { queryByRole } = await mount(backend);
+      act(() => void vi.advanceTimersByTime(UNANSWERED_MS * 2));
+      expect(queryByRole("status")).toBeNull();
+      act(() => backend.handlers?.onLink?.("reconnecting"));
+      act(() => backend.handlers?.onLink?.("lost"));
+      act(() => void vi.advanceTimersByTime(UNANSWERED_MS * 2));
+      expect(queryByRole("status")).toBeNull();
+    });
+  });
+
+  test("a lost pane says so, offers Close and Resume as clicks, and is never an exit", async () => {
+    const renderer = new FakeRenderer();
+    const backend = new FakeBackend();
+    const onExit = vi.fn();
+    const onClose = vi.fn();
+    const onResume = vi.fn();
+    const { queryByRole, getByRole } = render(
+      <TerminalView
+        label="tree:AK-1:tab:t1"
+        agentKind="Claude"
+        backend={backend}
+        onExit={onExit}
+        onClose={onClose}
+        onResume={onResume}
+        createRenderer={() => renderer}
+      />,
+    );
+    await waitFor(() => expect(backend.handlers).toBeDefined());
+    expect(queryByRole("alert")).toBeNull();
+
+    act(() => backend.handlers?.onLink?.("lost"));
+    // Distinct from reconnecting: it is not a wait, so there is no status badge.
+    expect(queryByRole("status")).toBeNull();
+    expect(getByRole("alert")).toHaveTextContent("This terminal's session is gone");
+
+    // Nothing happens by itself: not an exit, not a resume, not a close.
+    expect(onExit).not.toHaveBeenCalled();
+    expect(onResume).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(backend.closed).toEqual([]);
+    expect(backend.seeded).toEqual([]);
+
+    fireEvent.click(getByRole("button", { name: "Resume this session" }));
+    expect(onResume).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.click(getByRole("button", { name: "Close this terminal" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // Closing the tab is the host's job; the view itself never ends a session.
+    expect(backend.closed).toEqual([]);
+    expect(onExit).not.toHaveBeenCalled();
+  });
+
+  test("a lost pane whose Resume is blocked says why, keeps the button disabled, and reports its link", async () => {
+    const backend = new FakeBackend();
+    const onResume = vi.fn();
+    const onLink = vi.fn();
+    const { getByRole } = render(
+      <TerminalView
+        label="tree:AK-1:tab:t1"
+        agentKind="Claude"
+        backend={backend}
+        onResume={onResume}
+        resumeBlocked="Start the santree server first."
+        onLink={onLink}
+        createRenderer={() => new FakeRenderer()}
+      />,
+    );
+    await waitFor(() => expect(backend.handlers).toBeDefined());
+    act(() => backend.handlers?.onLink?.("lost"));
+    expect(onLink).toHaveBeenLastCalledWith("lost");
+
+    const resume = getByRole("button", { name: "Resume this session" });
+    expect(resume).toBeDisabled();
+    expect(getByRole("alert")).toHaveTextContent("Start the santree server first.");
+    expect(resume.getAttribute("aria-describedby")).toBeTruthy();
+    fireEvent.click(resume);
+    expect(onResume).not.toHaveBeenCalled();
+
+    act(() => backend.handlers?.onLink?.("live"));
+    expect(onLink).toHaveBeenLastCalledWith("live");
+  });
+
+  test("a lost shell offers Close only, and a pane that opens lost shows it from the start", async () => {
+    const renderer = new FakeRenderer();
+    const backend = new FakeBackend();
+    backend.open = async (opts, handlers) => {
+      backend.opened = opts;
+      backend.handlers = handlers;
+      handlers.onLink?.("lost");
+      return 7 as SessionId;
+    };
+    const { findByRole, queryByRole } = render(
+      <TerminalView
+        label="tree:AK-1:tab:t3"
+        backend={backend}
+        onClose={() => {}}
+        createRenderer={() => renderer}
+      />,
+    );
+    expect(await findByRole("alert")).toHaveTextContent("session is gone");
+    expect(queryByRole("button", { name: "Resume this session" })).toBeNull();
+    expect(queryByRole("button", { name: "Close this terminal" })).not.toBeNull();
   });
 
   test("the renderer is built untrusted for a pane whose bytes come from Daedalus", async () => {

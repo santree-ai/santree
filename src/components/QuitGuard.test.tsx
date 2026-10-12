@@ -20,8 +20,15 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => windowMock,
 }));
 
+// What quitting would end, as the backend reports it. The default is the common
+// case the older tests below are about: something that dies with the app.
 const bindingsMock = vi.hoisted(() => ({
   quitApp: vi.fn(async () => ({ status: "ok" as const, data: null })),
+  quitSummary: vi.fn(
+    async (): Promise<{ terminalsEnd: number }> => ({
+      terminalsEnd: 2,
+    }),
+  ),
 }));
 vi.mock("../bindings", () => ({ commands: bindingsMock }));
 
@@ -50,6 +57,7 @@ function handlers() {
 beforeEach(() => {
   vi.clearAllMocks();
   queriesMock.data = undefined;
+  bindingsMock.quitSummary.mockResolvedValue({ terminalsEnd: 2 });
 });
 
 describe("QuitGuard", () => {
@@ -145,5 +153,62 @@ describe("QuitGuard", () => {
 
     await waitFor(() => expect(windowMock.destroy).toHaveBeenCalled());
     expect(queriesMock.mutateAsync).not.toHaveBeenCalled();
+  });
+});
+
+describe("QuitGuard: it asks only about what quitting ends", () => {
+  const closeWindow = () => {
+    render(<QuitGuard />);
+    const preventDefault = vi.fn();
+    act(() => handlers().close({ preventDefault }));
+    return preventDefault;
+  };
+
+  it("counts the terminals that will end", async () => {
+    bindingsMock.quitSummary.mockResolvedValue({ terminalsEnd: 3 });
+    closeWindow();
+    const dialog = await screen.findByRole("dialog", { name: "Quit santree?" });
+    expect(dialog).toHaveTextContent("3 running terminals in this window will be stopped.");
+  });
+
+  it("says 'terminal' for one", async () => {
+    bindingsMock.quitSummary.mockResolvedValue({ terminalsEnd: 1 });
+    closeWindow();
+    expect(await screen.findByRole("dialog")).toHaveTextContent("1 running terminal in this");
+  });
+
+  it("quits without a prompt when nothing ends (a server holds them): window close", async () => {
+    bindingsMock.quitSummary.mockResolvedValue({ terminalsEnd: 0 });
+    const preventDefault = closeWindow();
+
+    await waitFor(() => expect(windowMock.destroy).toHaveBeenCalled());
+    // Held while the summary was read, then finished through destroy().
+    expect(preventDefault).toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(bindingsMock.quitApp).not.toHaveBeenCalled();
+  });
+
+  it("quits without a prompt when nothing ends: ⌘Q exits the process", async () => {
+    bindingsMock.quitSummary.mockResolvedValue({ terminalsEnd: 0 });
+    render(<QuitGuard />);
+    act(() => handlers().quit());
+
+    await waitFor(() => expect(bindingsMock.quitApp).toHaveBeenCalled());
+    expect(windowMock.destroy).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("asks with the general warning when the summary can't be read", async () => {
+    bindingsMock.quitSummary.mockRejectedValue(new Error("no backend"));
+    closeWindow();
+    const dialog = await screen.findByRole("dialog", { name: "Quit santree?" });
+    expect(dialog).toHaveTextContent("Any running agent terminals in this window will be stopped.");
+    expect(windowMock.destroy).not.toHaveBeenCalled();
+  });
+
+  it("never reads the summary when confirm-on-quit is off", () => {
+    queriesMock.data = "false";
+    closeWindow();
+    expect(bindingsMock.quitSummary).not.toHaveBeenCalled();
   });
 });

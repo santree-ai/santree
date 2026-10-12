@@ -23,19 +23,16 @@ use santree_hook::{HookEnv, Invocation, Nudges};
 use santree_remote_client::proto::{HelloResult, HookEvent};
 use santree_remote_client::{
     AgentConnector, ConnectError, Connector, HookDelivery, HookMessage, HostConfig, HostOptions,
-    HostStatus, Refusal, RemoteClient, RemoteHost,
+    HostStatus, Refusal, RemoteClient, RemoteHost, Required,
 };
 
 use super::agents::BoxAgents;
 use super::setup::RemoteRuns;
-use super::terminals::RemoteTerminals;
 use crate::db::Db;
 use crate::session;
 use crate::session_signal::{self, Signal};
+use crate::sessions::{HostKey, IdRegistry, Profile, RemoteTerminals};
 use crate::tabs::validate_term_key;
-
-/// How long a read waits out a link that is still coming up.
-pub const CONNECT_WAIT: Duration = Duration::from_secs(5);
 
 /// Hook events applied between acks at most. Acks are per batch: one round
 /// trip and one cursor write for a burst, not one per event.
@@ -95,6 +92,10 @@ pub struct DaedalusHost {
     owner: String,
     /// Terminals whose shell runs on the box.
     terminals: RemoteTerminals,
+    /// The app's pane ids, for every host: owned here because this is the
+    /// first host the app builds, and handed to the facade and the local
+    /// servers so one id finds its host.
+    ids: Arc<IdRegistry>,
     /// Setup scripts running on the box.
     runs: RemoteRuns,
     /// What santree knows of the agents on the box.
@@ -104,15 +105,33 @@ pub struct DaedalusHost {
 impl Default for DaedalusHost {
     /// A host that reaches Daedalus through the installed agent's socket.
     fn default() -> Self {
-        Self::with_connector(Arc::new(AgentConnector::new()), HostOptions::default())
+        Self::with_connector(
+            Arc::new(AgentConnector::new()),
+            // The connector checks the socket is root's before it hands the
+            // link over; anything less is not the agent.
+            HostOptions {
+                require: Required::Agent,
+                ..HostOptions::default()
+            },
+        )
     }
 }
 
 impl DaedalusHost {
+    /// `options.require` is the trust the link must carry before anything is
+    /// sent over it, the terminals' included (production asks for `Agent`, a
+    /// test's fake link for whatever it carries).
     pub fn with_connector(connector: Arc<dyn Connector>, options: HostOptions) -> Self {
         let host = Arc::new(RemoteHost::new(connector, options));
+        let ids = Arc::new(IdRegistry::default());
         Self {
-            terminals: RemoteTerminals::new(host.clone()),
+            terminals: RemoteTerminals::new(
+                host.clone(),
+                HostKey::Daedalus,
+                ids.clone(),
+                Profile::daedalus(),
+            ),
+            ids,
             runs: RemoteRuns::new(host.clone()),
             agents: BoxAgents::default(),
             host,
@@ -192,6 +211,11 @@ impl DaedalusHost {
         &self.terminals
     }
 
+    /// The app's pane id registry (`sessions::IdRegistry`).
+    pub fn ids(&self) -> &Arc<IdRegistry> {
+        &self.ids
+    }
+
     /// The setup scripts running on the box.
     pub fn runs(&self) -> &RemoteRuns {
         &self.runs
@@ -266,6 +290,7 @@ fn link_of(status: HostStatus) -> DaedalusLink {
             hostname,
             projects_root,
             agent,
+            ..
         } => DaedalusLink::Connected {
             hostname,
             version,
@@ -286,7 +311,11 @@ fn link_of(status: HostStatus) -> DaedalusLink {
             } => DaedalusLink::HostKeyChanged { reason: msg },
             ConnectError::Refused { msg: reason, .. }
             | ConnectError::Untrusted(reason)
+            | ConnectError::Unverified { why: reason, .. }
             | ConnectError::Failed(reason) => DaedalusLink::Unavailable { reason },
+            ConnectError::NotRunning => DaedalusLink::Unavailable {
+                reason: ConnectError::NotRunning.to_string(),
+            },
         },
     }
 }
@@ -540,12 +569,13 @@ async fn save_cursor(db: &Db, boot_id: &str, seq: u64) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::sessions::testkit::fast;
     use std::future::Future;
     use std::path::Path;
 
     use santree_remote_client::fake::FakeDaemon;
     use santree_remote_client::transport::BoxFuture;
-    use santree_remote_client::{ClientOptions, Link};
+    use santree_remote_client::Link;
 
     use super::*;
 
@@ -578,15 +608,6 @@ mod tests {
         .await
         .unwrap();
         (db, path.to_string_lossy().into_owned())
-    }
-
-    fn fast() -> HostOptions {
-        HostOptions {
-            backoff_min: Duration::from_millis(20),
-            backoff_max: Duration::from_millis(100),
-            hello_timeout: Duration::from_secs(5),
-            client: ClientOptions::default(),
-        }
     }
 
     /// Reaches whichever daemon is current: swapping it is a server restart.

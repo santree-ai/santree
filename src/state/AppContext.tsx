@@ -31,6 +31,7 @@ import {
   useRepos,
   useReviewAiWatcher,
   useSaveSettings,
+  useServerStatusWatcher,
   useSessionStates,
   useSessionStateWatcher,
   useSessionUsageWatcher,
@@ -377,6 +378,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useClaudeRateLimitsWatcher();
   // The link to Daedalus changes state on its own (networks, the server).
   useDaedalusLinkWatcher();
+  // ...and so does the local santree server (it stops, restarts, gives up).
+  useServerStatusWatcher();
 
   // The AI review writes its brief and drafts through santree's MCP server — a
   // separate process — so the only way the UI hears about them is this nudge. A

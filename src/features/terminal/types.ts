@@ -112,9 +112,6 @@ export interface TerminalBackend {
   attach(id: SessionId, anchor: Anchor, handlers: OutputHandlers): Promise<Attached>;
   /** Stop receiving a session's output without ending it. */
   detach(id: SessionId): void;
-  /** Claim the sessions a previous page load left running, keyed by their pane
-   *  address (`paneAddress`: the label plus the provider in them). */
-  adopt(owner: string): Promise<Map<string, SessionId>>;
   /** Keystrokes, verbatim. A paste is keystrokes too, so nothing may reshape
    *  what goes through here — see `seed` for the one line santree composes. */
   write(id: SessionId, data: string): void;

@@ -1,6 +1,10 @@
 //! The client against the fake daemon over in-memory links, and through the
 //! fake agent's unix socket: no network, real PTYs and processes.
 
+// Tests type into, open and close terminals directly: clippy.toml's PTY rules
+// hold shipped code to its sanctioned sites.
+#![allow(clippy::disallowed_methods)]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -794,6 +798,8 @@ fn fast_host_options() -> HostOptions {
         backoff_min: Duration::from_millis(20),
         backoff_max: Duration::from_millis(100),
         hello_timeout: Duration::from_secs(5),
+        hooks: true,
+        require: Required::Any,
         client: ClientOptions::default(),
     }
 }
@@ -857,6 +863,7 @@ async fn the_host_retries_reconnects_and_resumes_hooks() {
             hostname: FakeOptions::default().hostname,
             projects_root: FakeOptions::default().projects_root,
             agent: None,
+            peer: PeerTrust::UidOnly,
         }
     );
     let first = tokio::time::timeout(WAIT, reconnected.recv())
@@ -1030,6 +1037,7 @@ async fn the_agents_ok_line_opens_protocol_v1() {
         reader,
         writer,
         agent: ok,
+        peer,
     } = agent.connector().connect().await.unwrap();
     assert_eq!(
         ok,
@@ -1039,6 +1047,8 @@ async fn the_agents_ok_line_opens_protocol_v1() {
             agent: FakeAgent::VERSION.into(),
         })
     );
+    // The agent connector's own check_server is what `Agent` records.
+    assert_eq!(peer, PeerTrust::Agent);
     // Not a byte of the protocol was taken with the first line.
     let client = RemoteClient::new(reader, writer);
     let hello = client.hello("santree/test", "owner-a").await.unwrap();
@@ -1141,6 +1151,249 @@ async fn a_permanent_refusal_waits_at_the_slow_end() {
     assert!(
         matches!(&connected, HostStatus::Connected { agent: Some(v), .. } if v == FakeAgent::VERSION),
         "{connected:?}"
+    );
+    host.stop();
+}
+
+#[test]
+fn the_host_defaults_keep_daedaluss_behaviour() {
+    let o = HostOptions::default();
+    assert!(o.hooks, "Daedalus relays hooks unless a host opts out");
+    assert_eq!(o.backoff_min, Duration::from_secs(1));
+    assert_eq!(o.backoff_max, Duration::from_secs(30));
+    assert_eq!(o.hello_timeout, Duration::from_secs(25));
+    assert_eq!(
+        o.require,
+        Required::Any,
+        "trust is demanded by the embedder, not assumed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_with_hooks_off_never_asks_for_them() {
+    let daemon = FakeDaemon::new();
+    let host = RemoteHost::new(
+        daemon.connector(),
+        HostOptions {
+            hooks: false,
+            require: Required::Any,
+            ..fast_host_options()
+        },
+    );
+    let mut status = host.status();
+    let mut events = host.take_hook_events().expect("the stream is still taken");
+    host.configure(Some(HostConfig {
+        // A cursor from an earlier run: with hooks off there is nothing to re-ack.
+        hook_cursor: Some(4),
+        boot_id: Some(daemon.boot_id().to_string()),
+        ..host_config()
+    }));
+    wait_status(&mut status, |s| matches!(s, HostStatus::Connected { .. })).await;
+
+    // The link is live (a request goes through) and the queue holds an event.
+    daemon.push_hook("Stop", vec![], vec![]);
+    host.client().unwrap().pty_sessions().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), events.recv())
+            .await
+            .is_err(),
+        "nothing is relayed"
+    );
+    assert!(!host.ack_hooks(daemon.boot_id(), 1).await, "nothing to ack");
+
+    let log = daemon.request_log();
+    assert!(log.contains(&m::PtySessions::NAME.to_string()), "{log:?}");
+    assert!(
+        !log.iter()
+            .any(|m| m == m::HooksSubscribe::NAME || m == m::HooksAck::NAME),
+        "no hooks traffic: {log:?}"
+    );
+    host.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_with_hooks_on_subscribes() {
+    let daemon = FakeDaemon::new();
+    let host = RemoteHost::new(daemon.connector(), fast_host_options());
+    let mut status = host.status();
+    host.configure(Some(host_config()));
+    wait_status(&mut status, |s| matches!(s, HostStatus::Connected { .. })).await;
+    assert!(daemon
+        .request_log()
+        .contains(&m::HooksSubscribe::NAME.to_string()));
+    host.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hello_timeout_bounds_a_host_that_never_answers() {
+    // A link whose far end is held open and says nothing.
+    let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let connector: Arc<dyn Connector> = {
+        let held = held.clone();
+        Arc::new(move || -> BoxFuture<'static, Result<Link, ConnectError>> {
+            let (link, server) = memory_link();
+            held.lock().unwrap().push(server);
+            Box::pin(async move { Ok(link) })
+        })
+    };
+    let host = RemoteHost::new(
+        connector,
+        HostOptions {
+            hello_timeout: Duration::from_millis(150),
+            ..fast_host_options()
+        },
+    );
+    let mut status = host.status();
+    let started = std::time::Instant::now();
+    host.configure(Some(host_config()));
+    let down = wait_status(&mut status, |s| matches!(s, HostStatus::Down(_))).await;
+    assert!(
+        matches!(&down, HostStatus::Down(ConnectError::Failed(why)) if why.contains("in time")),
+        "{down:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    host.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_backoff_options_set_the_retry_pace() {
+    async fn attempts_in(window: Duration, min: Duration, max: Duration) -> usize {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let connector: Arc<dyn Connector> = {
+            let calls = calls.clone();
+            Arc::new(move || -> BoxFuture<'static, Result<Link, ConnectError>> {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Err(ConnectError::Failed("no route".into())) })
+            })
+        };
+        let host = RemoteHost::new(
+            connector,
+            HostOptions {
+                backoff_min: min,
+                backoff_max: max,
+                ..fast_host_options()
+            },
+        );
+        host.configure(Some(host_config()));
+        tokio::time::sleep(window).await;
+        host.stop();
+        calls.load(Ordering::SeqCst)
+    }
+    let window = Duration::from_millis(400);
+    let quick = attempts_in(window, Duration::from_millis(10), Duration::from_millis(20)).await;
+    let slow = attempts_in(window, Duration::from_secs(10), Duration::from_secs(10)).await;
+    assert!(quick >= 8, "a short backoff retries often: {quick}");
+    assert_eq!(slow, 1, "a long backoff waits out the window");
+}
+
+#[test]
+fn trust_is_ordered_and_the_agent_is_not_the_server() {
+    let signed = PeerTrust::Signed { team: "T".into() };
+    let all = [
+        Required::Any,
+        Required::Agent,
+        Required::UidOnly,
+        Required::Signed,
+    ];
+    // (trust, what it satisfies)
+    let table = [
+        (PeerTrust::Unverified, vec![Required::Any]),
+        (PeerTrust::Agent, vec![Required::Any, Required::Agent]),
+        (PeerTrust::UidOnly, vec![Required::Any, Required::UidOnly]),
+        // The server's signature says nothing about the Daedalus agent's
+        // root-owned socket: it meets every level but `Agent`.
+        (
+            signed,
+            vec![Required::Any, Required::UidOnly, Required::Signed],
+        ),
+    ];
+    for (trust, meets) in table {
+        for required in all {
+            assert_eq!(
+                trust.satisfies(required),
+                meets.contains(&required),
+                "{trust:?} vs {required:?}"
+            );
+        }
+    }
+    assert_eq!(PeerTrust::default(), PeerTrust::Unverified);
+    assert_eq!(Required::default(), Required::Any);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_link_below_the_required_trust_gets_no_byte_not_even_hello() {
+    for (peer, required) in [
+        (PeerTrust::Unverified, Required::UidOnly),
+        (PeerTrust::Unverified, Required::Agent),
+        (PeerTrust::UidOnly, Required::Signed),
+        (PeerTrust::Agent, Required::UidOnly),
+    ] {
+        let daemon = FakeDaemon::with_options(FakeOptions {
+            peer: peer.clone(),
+            ..FakeOptions::default()
+        });
+        let host = RemoteHost::new(
+            daemon.connector(),
+            HostOptions {
+                require: required,
+                ..fast_host_options()
+            },
+        );
+        let mut status = host.status();
+        host.configure(Some(host_config()));
+        let down = wait_status(&mut status, |s| matches!(s, HostStatus::Down(_))).await;
+        assert!(
+            matches!(&down, HostStatus::Down(ConnectError::Untrusted(why)) if why.contains("untrusted host")),
+            "{peer:?} vs {required:?}: {down:?}"
+        );
+        // Let a few retries run: each is refused the same way.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            daemon.request_log(),
+            Vec::<String>::new(),
+            "{peer:?} vs {required:?}: the daemon was spoken to"
+        );
+        assert!(host.client().is_none());
+        host.stop();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_swapped_socket_is_refused_on_the_reconnect_and_the_status_names_the_trust() {
+    let daemon = FakeDaemon::with_options(FakeOptions {
+        peer: PeerTrust::Signed { team: "T".into() },
+        ..FakeOptions::default()
+    });
+    let host = RemoteHost::new(
+        daemon.connector(),
+        HostOptions {
+            require: Required::Signed,
+            ..fast_host_options()
+        },
+    );
+    let mut status = host.status();
+    host.configure(Some(host_config()));
+    let up = wait_status(&mut status, |s| matches!(s, HostStatus::Connected { .. })).await;
+    assert!(
+        matches!(&up, HostStatus::Connected { peer: PeerTrust::Signed { team }, .. } if team == "T"),
+        "{up:?}"
+    );
+    // The socket is now a stranger's; the live link drops.
+    daemon.set_peer(PeerTrust::Unverified);
+    let before = daemon.request_log().len();
+    daemon.disconnect_all();
+    wait_status(&mut status, |s| {
+        matches!(s, HostStatus::Down(ConnectError::Untrusted(_)))
+    })
+    .await;
+    assert_eq!(
+        daemon.request_log().len(),
+        before,
+        "nothing sent to the swap"
     );
     host.stop();
 }

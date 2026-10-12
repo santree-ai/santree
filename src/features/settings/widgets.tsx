@@ -9,6 +9,7 @@ import {
   useId,
 } from "react";
 
+import { CheckIcon, CloseIcon, RefreshIcon, WarningIcon } from "../../components/icons";
 import { Button, ChevronSelect, Toggle } from "../../components/primitives";
 
 /** A section heading: a bold title over a muted one-line subtitle. One pane is
@@ -178,5 +179,30 @@ export function CardRow({
       </div>
       {children(labelId)}
     </div>
+  );
+}
+
+export type Tone = "ok" | "pending" | "warn" | "error";
+
+const TONE_CLASS: Record<Tone, string> = {
+  ok: "text-status-green",
+  pending: "text-muted-4",
+  warn: "text-status-amber",
+  error: "text-status-red",
+};
+
+/** A status card's state glyph. `name` is what it says to a screen reader, in the
+ *  card's own words for that tone. */
+export function ToneGlyph({ tone, name }: { tone: Tone; name: string }) {
+  const glyph = {
+    ok: <CheckIcon size={12} />,
+    pending: <RefreshIcon size={12} className="animate-spin" />,
+    warn: <WarningIcon size={12} />,
+    error: <CloseIcon size={12} />,
+  }[tone];
+  return (
+    <span role="img" aria-label={name} className={`mt-[3px] flex-none ${TONE_CLASS[tone]}`}>
+      {glyph}
+    </span>
   );
 }

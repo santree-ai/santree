@@ -8,7 +8,8 @@
  *  conversation. When the process exits the tab closes with it (see
  *  {@link useTabSessions}), because a pane with nothing running has nothing to
  *  show; the conversation is still on disk, and Session history reopens it in a
- *  new tab.
+ *  new tab. A pane whose session is *lost* (its server went away) is not an exit:
+ *  it resumes in this tab, on the click (`useLostTabResume`).
  *
  *  Two variants differ from a plain one, and only in what they open with:
  *
@@ -35,6 +36,8 @@ import type { FixCiLaunch } from "../../state/AppContext";
 import { agentProvider } from "../terminal/agentProvider";
 import { remoteControlTab } from "./model";
 import { useAgentTab } from "./useAgentTab";
+import { ResumingState, useLostTabResume } from "./useLostTabResume";
+import { tabRefId } from "./useTabSessions";
 import { useWorkLaunch } from "./useWorkLaunch";
 import { WorktreeTerminal } from "./WorktreeTerminal";
 
@@ -71,9 +74,10 @@ export function AgentTabPane({
   const launch = ready ?? persisted.data ?? undefined;
   const work = useWorkLaunch(repo, worktree, tab.id);
 
-  const { preparing, seed, onExited, agent } = useAgentTab({
+  const refId = tabRefId(worktree.id, tab.id);
+  const { preparing, ended, seed, onExited, agent, resume } = useAgentTab({
     repo,
-    refId: `tree:${worktree.id}:tab:${tab.id}`,
+    refId,
     cwd: worktree.path,
     agent: tab.agentKind ?? "Claude",
     // An agent tab exists to run the agent, so any (re)open is an explicit launch.
@@ -97,6 +101,14 @@ export function AgentTabPane({
     // One tab per worktree claims its Remote Control name — see remoteControlTab.
     remoteControl: remoteControlTab(tabs) === tab.id ? worktree.id : undefined,
   });
+  const { onResume, resuming } = useLostTabResume({
+    repo,
+    owner: worktree.id,
+    tabId: tab.id,
+    refId,
+    ended,
+    resume,
+  });
 
   if (work.initialSetup) {
     return (
@@ -107,6 +119,7 @@ export function AgentTabPane({
       />
     );
   }
+  if (resuming) return <ResumingState />;
   if (preparing) {
     // Say which wait this is, not "please wait". Each line is something the
     // frontend can actually observe — the render command still in flight, the
@@ -143,6 +156,7 @@ export function AgentTabPane({
       agent={agent}
       onLaunched={() => clearAgentLaunch(worktree.id)}
       onExited={onExited}
+      onResume={agent ? onResume : undefined}
     />
   );
 }

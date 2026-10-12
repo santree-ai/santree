@@ -21,7 +21,7 @@ export function GeneralSection() {
       <div className="mb-5 rounded-xl border border-line-2 bg-raised px-4 py-0.5">
         <ToggleRow
           label="Confirm before quitting"
-          hint="Ask for confirmation when closing the app, so you don't lose running agent terminals by accident."
+          hint="Ask before closing the app when that would stop running terminals. Terminals and setup scripts kept by the santree server are not stopped by quitting, so there is nothing to ask."
           on={confirmOnQuit}
           onChange={(next) =>
             setSetting({ scope: "app", key: CONFIRM_ON_QUIT_KEY, value: next ? "true" : "false" })

@@ -1,0 +1,29 @@
+[package]
+name = "santree-server"
+description = "The local santree server: santree-host on a unix socket, launched detached by the app so terminals and agents outlive it."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Built with `--profile server` (root Cargo.toml) and shipped inside the app
+# bundle. Nothing here may depend on santree-core, Tauri or specta: the server
+# is versioned by its own revision (`REVISION`, `revision.lock`), and every
+# crate it links is part of what that revision names.
+
+[dependencies]
+santree-host = { path = "../host" }
+santree-remote-proto = { path = "../remote-proto" }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "time", "sync", "macros"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+# The app's own client, over the real socket — without `fake`: these tests
+# drive the real binary.
+santree-remote-client = { path = "../remote" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
+tempfile = "3"
+# `revision.lock`'s drift test reads Cargo.lock and the manifests.
+toml = "0.9"

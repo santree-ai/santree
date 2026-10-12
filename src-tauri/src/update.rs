@@ -179,11 +179,9 @@ pub async fn install(app: &AppHandle) -> Result<()> {
 
     // `restart` execs straight away: `RunEvent::ExitRequested` — where terminal
     // children are reaped — never fires. Without this, every update orphans the
-    // user's agent terminals and any running setup script.
-    if let Some(pty) = app.try_state::<santree_pty::PtyManager>() {
-        pty.close_all();
-    }
-    crate::stream::RUNS.kill_all();
+    // user's in-app agent terminals (a setup script is one of them). Terminals
+    // on the local server are let go and keep running: an update never ends them.
+    crate::terminal::release(app);
 
     app.restart();
     Ok(())

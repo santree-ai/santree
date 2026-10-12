@@ -151,7 +151,6 @@ function handlerBodies(src: string, name: string): string[] {
 const PTY_WRITES = [
   "backend.write(",
   "backend.seed(",
-  "pane.write(",
   "commands.terminalWrite(",
   "commands.terminalSeed(",
 ];

@@ -4,6 +4,7 @@
  *  every fix is on the agent or in Daedalus, never a field in santree. */
 
 import type { AgentKind, DaedalusLink } from "../bindings";
+import { pathWithin } from "./repo";
 
 export type LinkTone = "ok" | "pending" | "warn" | "error";
 
@@ -126,10 +127,5 @@ export function onDaedalus(
   cwd: string | undefined,
 ): boolean {
   if (!cwd || !repos) return false;
-  return repos.some(
-    (r) =>
-      r.location === "Daedalus" &&
-      r.path !== null &&
-      (cwd === r.path || cwd.startsWith(r.path.endsWith("/") ? r.path : `${r.path}/`)),
-  );
+  return repos.some((r) => r.location === "Daedalus" && r.path !== null && pathWithin(r.path, cwd));
 }

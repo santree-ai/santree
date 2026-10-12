@@ -16,3 +16,6 @@ specta = { workspace = true }
 # `AgentKind`, re-exported from `domain`. Its `specta` feature is on here, and
 # only here, so the domain structs that carry one can derive `Type`.
 santree-agent-kind = { path = "../agent-kind", features = ["specta"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

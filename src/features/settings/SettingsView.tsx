@@ -32,6 +32,7 @@ import {
   TerminalIcon,
 } from "../../components/icons";
 import { Dropdown, Tabs } from "../../components/primitives";
+import { ServerBanner } from "../../components/shell/ServerBanner";
 import { TRAFFIC_LIGHTS_INSET } from "../../components/shell/Sidebar";
 import { useRepos } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
@@ -393,6 +394,9 @@ export function SettingsView() {
           across its whole width, then the one section pane. */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
         <div data-tauri-drag-region className="h-[38px] flex-none" />
+        {/* A login terminal lives in here, so the server that holds terminals
+            speaks from this frame too (it is not under the shell). */}
+        <ServerBanner />
         {active.fullBleed ? (
           <div className="flex min-h-0 min-w-0 flex-1">{active.render(settingsRepo)}</div>
         ) : (

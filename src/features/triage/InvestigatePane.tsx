@@ -195,6 +195,16 @@ export function InvestigatePane({
     if (!canLaunch) onExited();
   }, [dropCachedSession, qc, repo, canLaunch, onExited]);
 
+  // Drop the cached resolution first — the process can die while this pane is
+  // unmounted (onExited never fires then), leaving a stale cached decision.
+  // `resumeRequested` + clearing the `liveSeen` latch re-seed; the resolve allows
+  // a fresh session when the transcript is gone (the stored id is reused either way).
+  const resumeNow = useCallback(() => {
+    dropCachedSession();
+    setResumeRequested(true);
+    setLiveSeen(false);
+  }, [dropCachedSession]);
+
   if (ended) {
     return (
       <SessionEndedPane
@@ -205,16 +215,7 @@ export function InvestigatePane({
             Resume the same conversation whenever you're ready.
           </>
         }
-        onResume={() => {
-          // Drop the cached resolution first — the process can die while this
-          // pane is unmounted (onExited never fires then), leaving a stale
-          // cached decision. `resumeRequested` + clearing the `liveSeen` latch
-          // re-seed; the resolve allows a fresh session when the transcript is
-          // gone (the stored id is reused either way).
-          dropCachedSession();
-          setResumeRequested(true);
-          setLiveSeen(false);
-        }}
+        onResume={resumeNow}
       />
     );
   }
@@ -229,6 +230,9 @@ export function InvestigatePane({
           seed={seed}
           agent={{ kind: resolvedAgent, repo, termKey }}
           onExited={handleExited}
+          // A lost pane's Resume is this one, already clicked: the ended offer
+          // it would otherwise land on does not ask again.
+          onResume={resumeNow}
         />
       ) : (
         <div className="flex h-full items-center justify-center">
@@ -249,6 +253,7 @@ function InvestigateTerminal({
   seed,
   agent,
   onExited,
+  onResume,
 }: {
   ticketId: string;
   /** The surface's `term_key` — the tab's `refId`, the PTY's label, the durable
@@ -258,10 +263,12 @@ function InvestigateTerminal({
   seed?: string;
   agent: AgentTabIdentity;
   onExited: () => void;
+  onResume: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
     spec: { title: ticketId, cwd, source: "triage", refId: termKey, seed, agent },
     onExited,
+    onResume,
   });
   // The TerminalLayer overlays this host with the ticket's live session.
   return <div ref={hostRef} className="h-full w-full" />;

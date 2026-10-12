@@ -8,11 +8,13 @@
  *  settings, and the read-only Codex sandbox the backend derives from the same
  *  prefix. No opening prompt: the user starts the conversation. When the
  *  process exits the tab closes with it (`useTabSessions`, from the strip),
- *  because a pane with nothing running has nothing to show. */
+ *  because a pane with nothing running has nothing to show. A pane whose
+ *  session is *lost* resumes in place instead, on the click (`useLostTabResume`). */
 import type { WorktreeTab } from "../../bindings";
 import { EmptyState } from "../../components/primitives";
 import { agentProvider } from "../terminal/agentProvider";
 import { useAgentTab } from "../trees/useAgentTab";
+import { ResumingState, useLostTabResume } from "../trees/useLostTabResume";
 import { tabRefId } from "../trees/useTabSessions";
 import { triageTermKey } from "./providerSessions";
 import { TriageTerminal } from "./TriageTerminal";
@@ -30,9 +32,10 @@ export function TriageTabPane({
   cwd: string;
   tab: WorktreeTab;
 }) {
-  const refId = tabRefId(triageTermKey(ticketId), tab.id);
+  const owner = triageTermKey(ticketId);
+  const refId = tabRefId(owner, tab.id);
   const agentKind = tab.agentKind ?? "Claude";
-  const { preparing, seed, onExited, agent } = useAgentTab({
+  const { preparing, ended, seed, onExited, agent, resume } = useAgentTab({
     repo,
     surface: "triage",
     refId,
@@ -41,7 +44,16 @@ export function TriageTabPane({
     // An agent tab exists to run the agent, so any (re)open is an explicit launch.
     allowFresh: true,
   });
+  const { onResume, resuming } = useLostTabResume({
+    repo,
+    owner,
+    tabId: tab.id,
+    refId,
+    ended,
+    resume,
+  });
 
+  if (resuming) return <ResumingState />;
   if (preparing) {
     return (
       <EmptyState
@@ -59,6 +71,7 @@ export function TriageTabPane({
       seed={seed}
       agent={agent}
       onExited={onExited}
+      onResume={agent ? onResume : undefined}
     />
   );
 }

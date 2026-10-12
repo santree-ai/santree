@@ -21,12 +21,71 @@ pub struct Link {
     pub writer: Box<dyn AsyncWrite + Send + Unpin>,
     /// The agent's `ok` line, when the link came through the Daedalus agent.
     pub agent: Option<AgentOk>,
+    /// What the connector established about the far end BEFORE it handed the
+    /// link over (nothing has been written to it yet). A connector that
+    /// checked nothing leaves the default, [`PeerTrust::Unverified`].
+    pub peer: PeerTrust,
+}
+
+/// How far the far end of a [`Link`] was verified, by its connector, before a
+/// single byte was written to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PeerTrust {
+    /// Nothing was checked. Only a test's in-memory pipe is this.
+    #[default]
+    Unverified,
+    /// The Daedalus agent's socket: served by root, owned by root.
+    Agent,
+    /// santree's own server, checked by uid and socket ownership only (the
+    /// opt-in, unsigned build).
+    UidOnly,
+    /// santree's own server, whose code signature names Apple team `team`.
+    Signed { team: String },
+}
+
+/// How much trust a profile (or a [`crate::HostOptions`]) demands of a link.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Required {
+    /// Nothing: tests, and a host that has not been wired to a profile.
+    #[default]
+    Any,
+    /// The Daedalus agent's root-owned socket.
+    Agent,
+    /// At least the server's uid and socket owner.
+    UidOnly,
+    /// The server's code signature.
+    Signed,
+}
+
+impl PeerTrust {
+    /// Whether this much verification meets `required`. `Signed` meets
+    /// `Signed`, `UidOnly` and `Any`; `UidOnly` meets itself and `Any`; `Agent`
+    /// meets only `Agent` and `Any`; `Unverified` meets only `Any`.
+    ///
+    /// The two kinds of host are never interchangeable, in either direction: a
+    /// root-owned agent socket says nothing about santree's own server, and the
+    /// server's code signature says nothing about the Daedalus agent — so a
+    /// `Signed` link does **not** satisfy `Agent`. A profile that demands the
+    /// agent must not accept a link someone else's connector verified.
+    pub fn satisfies(&self, required: Required) -> bool {
+        matches!(
+            (self, required),
+            (_, Required::Any)
+                | (
+                    PeerTrust::Signed { .. },
+                    Required::Signed | Required::UidOnly
+                )
+                | (PeerTrust::UidOnly, Required::UidOnly)
+                | (PeerTrust::Agent, Required::Agent)
+        )
+    }
 }
 
 impl std::fmt::Debug for Link {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Link")
             .field("agent", &self.agent)
+            .field("peer", &self.peer)
             .finish_non_exhaustive()
     }
 }
@@ -81,9 +140,20 @@ pub enum ConnectError {
     /// The agent is installed but serves no santree socket: it predates it.
     #[error("the Daedalus agent on this machine is too old to serve santree")]
     AgentOutdated,
-    /// Something other than the agent holds its socket.
+    /// The peer was judged and is not the host it should be (something other
+    /// than the agent holds its socket, or the server's check said no): a
+    /// verdict about who is there.
     #[error("{0}")]
     Untrusted(String),
+    /// The peer could not be judged (the check ran out of time, failed, or
+    /// couldn't read the peer). Fails closed like `Untrusted`, but says nothing
+    /// about who is there. `slow`: the check only ran out of time, and the next
+    /// attempt is expected to pass.
+    #[error("{why}")]
+    Unverified { slow: bool, why: String },
+    /// Nothing listens on the local server's socket: a state, not a failure.
+    #[error("santree server isn't running")]
+    NotRunning,
     /// The agent answered with a refusal; `msg` is its own reason.
     #[error("{msg}")]
     Refused { refusal: Refusal, msg: String },
@@ -98,14 +168,15 @@ impl ConnectError {
     /// into a changed key.
     pub fn permanent(&self) -> bool {
         match self {
-            ConnectError::NoAgent | ConnectError::AgentOutdated | ConnectError::Untrusted(_) => {
-                true
-            }
+            ConnectError::NoAgent
+            | ConnectError::AgentOutdated
+            | ConnectError::Untrusted(_)
+            | ConnectError::Unverified { .. } => true,
             ConnectError::Refused { refusal, .. } => matches!(
                 refusal,
                 Refusal::SantreeOff | Refusal::HostKeyChanged | Refusal::Forbidden
             ),
-            ConnectError::Failed(_) => false,
+            ConnectError::Failed(_) | ConnectError::NotRunning => false,
         }
     }
 }
@@ -134,6 +205,7 @@ pub fn memory_link() -> (Link, DuplexStream) {
             reader: Box::new(reader),
             writer: Box::new(writer),
             agent: None,
+            peer: PeerTrust::Unverified,
         },
         server,
     )
@@ -163,6 +235,10 @@ mod tests {
             ConnectError::NoAgent,
             ConnectError::AgentOutdated,
             ConnectError::Untrusted("x".into()),
+            ConnectError::Unverified {
+                slow: true,
+                why: "x".into(),
+            },
             refused(Refusal::SantreeOff),
             refused(Refusal::HostKeyChanged),
             refused(Refusal::Forbidden),
@@ -173,6 +249,7 @@ mod tests {
             refused(Refusal::Busy),
             refused(Refusal::Unavailable),
             ConnectError::Failed("x".into()),
+            ConnectError::NotRunning,
         ] {
             assert!(!transient.permanent(), "{transient:?}");
         }

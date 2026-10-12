@@ -1,6 +1,6 @@
 //! Claude and Codex in a Daedalus project, run on the box (docs/remote.md,
 //! "Agents on the box"). The launch is the same one a local project gets —
-//! the frontend's seed, typed into a remote pane (`terminals.rs`) — and
+//! the frontend's seed, typed into a remote pane (`sessions/remote.rs`) — and
 //! everything that seed names lives on the box too:
 //!
 //! - **santree's files there**: the hook settings and the rendered prompts go

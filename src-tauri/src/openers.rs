@@ -150,6 +150,26 @@ pub(crate) fn reveal(file: &Path) -> Result<()> {
     }
 }
 
+/// Open `dir` in the OS file browser.
+///
+/// Like [`reveal`], **no IPC value reaches here**: the caller derives the
+/// directory in Rust (the app's own log dir). The checks kept are about argv
+/// and shape, not trust: absolute (a relative one beginning with `-` would be
+/// read as a flag) and an existing directory (`open`/`xdg-open` launch what
+/// they are given, and a file here could be an app or a script).
+pub(crate) fn open_dir(dir: &Path) -> Result<()> {
+    if !dir.is_absolute() {
+        bail!("directory to open must be absolute: {}", dir.display());
+    }
+    if !std::fs::metadata(dir).is_ok_and(|m| m.is_dir()) {
+        bail!("{} is not a directory", dir.display());
+    }
+    let path = dir
+        .to_str()
+        .ok_or_else(|| anyhow!("path is not valid UTF-8: {}", dir.display()))?;
+    open_file_browser(path)
+}
+
 /// Validate an IPC-supplied opener path down to the one domain this command is
 /// ever meant to serve: a worktree directory.
 ///
@@ -319,5 +339,22 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod open_dir_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_absolute_existing_directory_is_opened() {
+        assert!(open_dir(Path::new("-a")).is_err(), "a flag-shaped path");
+        assert!(open_dir(Path::new("relative/dir")).is_err());
+        assert!(open_dir(Path::new("/definitely/not/here")).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        let err = open_dir(&file).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err:#}");
     }
 }

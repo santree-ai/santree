@@ -4269,6 +4269,7 @@ dependencies = [
  "form_urlencoded",
  "futures",
  "keyring",
+ "libc",
  "log",
  "minijinja",
  "notify",
@@ -4280,6 +4281,7 @@ dependencies = [
  "santree-hook",
  "santree-pty",
  "santree-remote-client",
+ "santree-server",
  "serde",
  "serde_json",
  "sha2",
@@ -4316,6 +4318,7 @@ version = "0.1.18"
 dependencies = [
  "santree-agent-kind",
  "serde",
+ "serde_json",
  "specta",
 ]
 
@@ -4327,6 +4330,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tokio",
+]
+
+[[package]]
+name = "santree-host"
+version = "0.1.18"
+dependencies = [
+ "libc",
+ "log",
+ "santree-pty",
+ "santree-remote-proto",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -4345,6 +4362,7 @@ name = "santree-remote-client"
 version = "0.1.18"
 dependencies = [
  "log",
+ "santree-host",
  "santree-pty",
  "santree-remote-proto",
  "serde",
@@ -4374,6 +4392,22 @@ dependencies = [
  "subtle",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "santree-server"
+version = "0.1.18"
+dependencies = [
+ "anyhow",
+ "libc",
+ "log",
+ "santree-host",
+ "santree-remote-client",
+ "santree-remote-proto",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

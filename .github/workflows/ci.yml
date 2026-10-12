@@ -111,21 +111,30 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
-      # tauri.conf.json declares the hook binary as a bundle resource, and Tauri's
-      # build script hard-errors ("resource path ... doesn't exist") when a declared
-      # resource is missing — so every cargo command below needs it staged first.
+      # tauri.conf.json (and, on macOS, tauri.macos.conf.json) declares the hook
+      # and the server binaries as bundle resources, and Tauri's build script
+      # hard-errors ("resource path ... doesn't exist") when a declared resource
+      # is missing — so every cargo command below needs them staged first.
       # The bundle jobs get this for free via `beforeBuildCommand` (`pnpm
-      # bundle:hook`); this job is pure cargo, so do the same build+copy here
+      # bundle:binaries`); this job is pure cargo, so do the same build+copy here
       # rather than pulling node/pnpm into it. Debug is fine — nothing runs the
-      # binary, the build script only checks that the path exists.
-      - name: Stage the hook bundle resource
+      # binaries, the build script only checks that the paths exist. Linux does
+      # not declare the server, but stages it anyway: the step is one list, and
+      # a platform that starts shipping it should not be the thing that breaks.
+      - name: Stage the bundle resources
         run: |
-          cargo build -p santree-hook
+          cargo build -p santree-hook -p santree-server
           mkdir -p target/bundle-resources
-          cp target/debug/santree-hook target/bundle-resources/santree-hook
+          cp target/debug/santree-hook target/debug/santree-server target/bundle-resources/
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # `cargo test --workspace` below runs this too; named on its own so a server
+      # change without a REVISION bump fails with a legible step name. The fix is in
+      # docs/server.md ("Versions and draining").
+      - name: Server revision lock (REVISION matches the server's sources)
+        run: cargo test -p santree-server --test revision
 
       - name: Tests
         run: cargo test --workspace
@@ -202,18 +211,28 @@ jobs:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
         run: pnpm tauri build --bundles ${{ matrix.os == 'macos-latest' && 'app' || 'deb' }}
 
-      # The hook is staged by `pnpm bundle:hook` and copied in as a bundle
-      # resource; when it goes missing, session-state tracking silently dies for
-      # every agent terminal — so assert it actually landed inside the bundle.
+      # The hook and the server are staged by `pnpm bundle:binaries` and copied
+      # in as bundle resources; when the hook goes missing, session-state tracking
+      # silently dies for every agent terminal, and without the server the
+      # terminals never outlive the app — so assert both actually landed inside
+      # the bundle. The server is macOS-only (tauri.macos.conf.json), so the deb
+      # is asserted NOT to carry it: a Linux package shipping an unused binary
+      # would mean the platform conf stopped being platform-specific.
       - name: Assert artifacts
         run: |
           if [ "${{ matrix.os }}" = macos-latest ]; then
             app=target/release/bundle/macos/santree.app
             test -d "$app"
             test -x "$app/Contents/Resources/santree-hook"
+            test -x "$app/Contents/Resources/santree-server"
           else
             deb=$(ls target/release/bundle/deb/*.deb)
             dpkg-deb -c "$deb" | grep -q '/santree-hook$'
+            # (`! cmd` is exempt from `set -e`, so spell the failure out.)
+            if dpkg-deb -c "$deb" | grep '/santree-server$' > /dev/null; then
+              echo "::error::the deb carries santree-server; it is macOS-only"
+              exit 1
+            fi
           fi
 
       # The assertions above prove the bundle's *shape*; this proves it runs.
@@ -226,4 +245,11 @@ jobs:
         timeout-minutes: 5
         env:
           SANTREE_SMOKE: "1"
-        run: target/release/bundle/macos/santree.app/Contents/MacOS/santree
+        run: |
+          target/release/bundle/macos/santree.app/Contents/MacOS/santree
+          # Same bar as release.yml: a smoke launch leaves no detached server.
+          if pgrep -x santree-server > /dev/null; then
+            pgrep -lf santree-server || true
+            echo "::error::a santree-server outlived the smoke launch"
+            exit 1
+          fi

@@ -4,7 +4,9 @@ The source of truth for how terminal emulation works here. If you are about to
 change anything in `crates/pty`, `src-tauri/src/terminal.rs`, or
 `src/features/terminal/`, read this first — the individual pieces are small, but
 the ordering between them is load-bearing and most of the constraints were paid
-for by a bug.
+for by a bug. Where a session's process lives (in the app, on the santree
+server, or on Daedalus) is [docs/server.md](server.md) and
+[docs/remote.md](remote.md).
 
 ---
 
@@ -28,6 +30,12 @@ crates/pty PtyManager       one kernel PTY + one reader thread per session
 the real CLI                claude / codex / zsh, spawned on the pty slave
 ```
 
+In the diagram `PtyManager` is in the app's own process. On a signed build the
+same `PtyManager` runs inside the detached santree server and the adapter reaches
+it over protocol v1 through `sessions::Terminals`
+([The santree server](#the-santree-server)). `Mode::Off` (unsigned, dev and Linux
+builds) keeps `PtyManager` in the app as `Local::InApp`.
+
 Five facts that explain most of the rest:
 
 1. **A session is owned by the Rust process, not by the page or the pane.** A
@@ -39,10 +47,14 @@ Five facts that explain most of the rest:
    the `agent_kind` column).
 3. **Every session records its recent output**, so a client that lost its view
    can be caught up instead of losing the session.
-4. **There is no daemon.** Sessions survive a webview reload; they die when
-   santree quits. This is a deliberate trade — see [No daemon](#no-daemon).
-   (A Daedalus project's terminals are the exception: they run on the box and
-   outlive santree — see [Remote sessions](#remote-sessions).)
+4. **A session can outlive the app, by a process of its own.** Sessions survive
+   a webview reload; on a signed build they also survive a quit, a crash and an
+   update, because the PTYs live in the detached **santree server** — see
+   [The santree server](#the-santree-server) and [docs/server.md](server.md).
+   Where there is no server (an unsigned or dev build without
+   `SANTREE_SERVER=1`) they die when santree quits. A Daedalus project's
+   terminals run on the box and outlive santree too — see
+   [Remote sessions](#remote-sessions).
 5. **santree never reads what the agent prints in order to decide what to
    send.** That rule is what keeps this a terminal emulator rather than a
    harness, and it is enforced by tests (`COMPLIANCE.md`).
@@ -152,10 +164,11 @@ may pin a tokio worker. `resize`/`close`/`detach` are cheap
 and stay inline. Each session has its own writer mutex, so a stuck child
 serializes only itself.
 
-**There is no backpressure today.** The reader thread forwards unconditionally,
-and absorption is left to xterm's internal write queue. The ring bounds Rust-side
-memory; the renderer side is still unbounded. See
-[What is built, and what is not](#what-is-built-and-what-is-not).
+**There is no backpressure toward the renderer.** The app forwards every chunk to
+the webview, and absorption is left to xterm's internal write queue. The ring
+bounds Rust-side memory; the renderer side is unbounded. (Between a server or a
+Daedalus host and the app, the host paces a session whose link drains slowly,
+docs/server.md "The shared host crate".)
 
 ---
 
@@ -165,7 +178,8 @@ memory; the renderer side is still unbounded. See
 |---|---|---|
 | route navigation, tab switch | ✅ | ✅ |
 | **webview reload** (⌘R, HMR, crash recovery) | ✅ **adopted** | ring replay (2 MiB) |
-| app quit | ❌ `close_all()` | ❌ |
+| app quit, in-app PTYs (`Mode::Off`) | ❌ `close_all()` | ❌ |
+| app quit / crash / update, on the santree server | ✅ the server keeps it | ✅ the server's ring |
 
 A terminal in a Daedalus project runs on the box instead, and outlives more —
 see [Remote sessions](#remote-sessions):
@@ -182,9 +196,8 @@ see [Remote sessions](#remote-sessions):
 > **A pane unmounting detaches. Only closing a tab closes.**
 
 `TerminalView`'s cleanup calls `backend.detach(id)`. Every property in this
-document depends on that line: when it called `close(id)`, a reload killed every
-running agent, nothing could be evicted to save memory (disposing an xterm meant
-losing the session), and the orphan reaper existed purely to clean up after it.
+document depends on that line: a `close(id)` there would kill every running agent
+on a reload and make an xterm impossible to dispose without losing its session.
 
 Killing is explicit and lives in `useTerminalTabs.close(key)`, which invokes the
 pane's registered handle **before** dropping the tab — the other order would
@@ -224,11 +237,10 @@ match rather than matching the wrong session.
 
 ### Adoption
 
-`terminal_adopt(owner)` replaced the old `terminal_reap_orphans`. The page-owner
-tag — a per-document UUID in `pageOwner.ts` — went from a kill list to a
-hand-over: sessions belonging to a different page are re-tagged to the current
-one and reported with their labels, and the panes claim them by label as they
-mount.
+`terminal_adopt(owner)` is a hand-over keyed by the page-owner tag, a
+per-document UUID in `pageOwner.ts`: sessions belonging to a different page are
+re-tagged to the current one and reported with their labels, and the panes claim
+them by label as they mount.
 
 Two things about it are easy to get wrong and were both found only by running the
 app:
@@ -251,87 +263,90 @@ a Codex review of one PR), and both survive.
 
 ---
 
-## No daemon
+## The santree server
 
-Both reference implementations run the PTY in a **detached daemon that outlives
-the app**, and this is the single biggest architectural difference.
+On a signed build a detached **`santree-server`** owns this Mac's PTYs
+(docs/server.md is its source of truth), so a quit, a crash or an update of the
+app never ends an agent. The reference implementations do the same: Orca and
+Superset both run the PTY in a detached daemon that outlives the app. What a
+daemon costs, and how santree answers each cost:
 
-- **Orca** forks plain Node with `ELECTRON_RUN_AS_NODE=1`, `detached: true`,
-  `unref`'d. Its shutdown path calls `disconnectDaemon()` and *never*
-  `shutdownDaemon()`, with the note that doing otherwise *"would make orcad's own
-  restart destructive, which is the exact property this whole item exists to
-  buy."* Their ops doc warns that systemd's `KillMode=control-group` would reap
-  the daemon with the app and turn every restart back into data loss.
-- **Superset** spawns a per-organization `pty-daemon`, `detached` and `unref`'d
-  in production (`detached: !isDev` — in development it dies with the parent,
-  exactly like ours). It goes further: a daemon *binary upgrade* passes PTY
-  master fds to its successor through inherited stdio, and their test asserts
-  sessions survive the swap with the same shell PIDs.
+| Cost | Our answer |
+|---|---|
+| A second binary with its own version and upgrade path | One signed artifact through the one updater. The server has a compile-time **revision** pinned by a drift test; a new revision starts beside the old one, which keeps its sessions and drains until idle. Protocol stays v1 with additive features |
+| Endpoint ownership (Orca's design notes record twenty-three defects, and "do not add a sweeper") | A per-revision `flock` held for the server's life is the ownership: only the holder binds, nobody unlinks on exit, the kernel releases the lock on death, and the server rebinds a socket someone removed |
+| A daemon that stops answering | A typed `ServerState`, a banner with Start, a crash budget (5 in 60 s, then `Failing`), panes that read `Reconnecting` or `Lost` rather than exited, and a "terminals aren't responding" hint after 10 s |
+| Shells held for windows nobody has open | Idle retirement: no clients and no sessions for 10 s (120 s if nobody ever connected) and the server exits |
+| fd handoff across a daemon upgrade | Not built; drain-beside-new needs none |
+| A process any local agent could reach | Admits only santree.app, by code signature, and the app admits only the server; unsigned builds don't use it unless opted in |
 
-So yes — quitting those apps leaves your agents running, and relaunching
-reattaches. We are strictly weaker on that axis.
+**What the server does not change.** The ring, `attach`/`detach`/`adopt` and the
+anchor protocol are the same code: the server runs `crates/pty`'s `PtyManager`. A
+pane is still keyed by its `(term_key, provider)` pair and a reload still adopts.
+A **reboot or logout** still ends the process; the conversation is durable in
+`terminal_sessions.session_id`, which `session::resolve` turns back into a
+`--resume` when a human clicks Resume on the tab, never on santree's own
+decision. A session santree can no longer reach reads **Lost**, not exited
+([Remote sessions](#remote-sessions)).
 
-**What it would buy us:** quit santree, reopen it, and an agent is still
-mid-task. That is genuinely the one thing this design cannot do.
+### Two backends, one facade
 
-**What it costs:** a second binary with its own version and upgrade path (hence
-superset's "Update daemon" / "Force restart" buttons — controls that exist to fix
-a problem the daemon creates), plus an endpoint-ownership protocol. Orca's has a
-design note recording *"seven review rounds … produced twenty-three defects"* and
-a section titled **"Do not add a sweeper"** explaining that the last one deleted
-a live listener's only pathname. Neither daemon has an idle timeout, so both hold
-shells indefinitely for windows nobody has open.
-
-**What we skip by not having one:** the daemon's own machinery — a second binary
-with its own version, the fd handoff that carries PTYs across its upgrade,
-endpoint-ownership fencing, crash budgets, and the "terminals aren't responding"
-UI that exists because a daemon can stop answering.
-
-**What we do NOT skip, and an earlier draft of this document got wrong:** the
-ability to restore *after a quit*. That claim — "the PTY dies with the app, so
-there is nothing to restore into" — conflates the shell with the conversation.
-superset's entire post-reboot experience runs with its daemon dead: it persists
-the scrollback, spawns a **fresh** shell under the same terminal id, marks the
-agent's binding `terminal-exited`, and auto-resumes the conversation into it.
-Nothing in that sequence needs the PTY to have survived, and none of it needs a
-daemon. What a quit costs us is the running *process*; the conversation is
-already durable in `terminal_sessions.session_id`, and `session::resolve`
-already turns it back into a `--resume`.
-
-This is an open decision, not a closed one. If it is ever taken, the ring,
-`attach`/`detach`/`adopt` and the anchor protocol all transfer unchanged; they
-were designed against exactly this architecture.
-
-That is not hypothetical: a Daedalus project's terminals already run on such a
-host — the session host on the box, built on this same `crates/pty` — and ride
-the ring and the anchors unchanged. See the next section.
+`sessions::Terminals` (`src-tauri/src/sessions/backend.rs`) is the one handle the
+commands hold. Local panes are either **in-app** (`Mode::Off`, the `PtyManager`
+above) or on the **local server** (`Mode::Signed` for a signed release,
+`Mode::OptIn` for an unsigned build with `SANTREE_SERVER=1`); Daedalus panes are
+the third home. The mode is chosen once by `sessions::server_mode()`. Code outside
+`sessions/` must not branch on which backend a pane has; that is a review rule,
+not a checked one.
 
 ---
 
 ## Remote sessions
 
 A terminal whose cwd is inside a Daedalus project is a PTY on the box, reached
-over the link (docs/remote.md, "Terminals and setup scripts on the box"). The
-frontend knows only what it has to:
+over the link (docs/remote.md, "Terminals and setup scripts on the box"); on a
+signed build every other terminal is a PTY in the local santree server, reached
+over a unix socket. **One piece of code serves both**: `RemoteTerminals`
+(`src-tauri/src/sessions/remote.rs`), one instance per host, parameterised by a
+`Profile` that says what differs: which environment a session inherits, what
+happens to a pane whose session the host no longer has (`Gone::End` for Daedalus,
+`Gone::Lost` for the local server), and whether to adopt every session the host
+holds. The trust a link must carry is the host's (`HostOptions.require`).
+The frontend knows only what it has to:
 
-- **The same backend calls.** `terminal.rs` dispatches on the cwd at open and on
-  the id afterwards (remote ids start at 2³¹, `daedalus::terminals::FIRST_ID`);
+- **The same backend calls.** `sessions::Terminals` dispatches on the route at
+  open (a cwd inside a Daedalus project is `Route::Daedalus`) and on the id
+  afterwards: remote ids come from one counter (`IdRegistry`, from 2³¹) and each
+  host answers whether it `holds(id)`, so several local servers and Daedalus
+  coexist.
   `TerminalView`, the layer and the orchestrator don't branch on where a
   session runs.
 - **One more signal, never an exit.** `terminal_open`/`terminal_attach` take a
-  second channel, `on_link`, which only a remote session sends on: `live` or
-  `reconnecting` (`PaneLink`). `TerminalView` shows "Reconnecting…" over the
-  pane while the link is down; the exit sentinel is still the only thing that
-  closes a tab, and a dropped link never sends it. On reconnect the backend
+  second channel, `on_link`, which only a remote session sends on: `live`,
+  `reconnecting` or `lost` (`PaneLink`). `TerminalView` shows "Reconnecting…" over
+  the pane while the link is down; the exit sentinel is still the only thing that
+  closes a tab, and a dropped link never sends it. `lost` is the local server's
+  one other signal: the host the session lived on was stopped, killed or restarted
+  (the pane remembers the host's `bootId`, and a host numbers its sessions from 1
+  on every boot), so the session is gone but the tab stays, saying why, with a
+  **Resume** for agents, a human click (docs/server.md, "`PaneLink::Lost` and
+  Resume"). On reconnect the backend
   re-attaches from the anchor it kept — every byte it forwarded — and the box
   replays exactly the gap, into the same xterm.
 - **Adoption.** A reload adopts remote panes through the same `terminal_adopt`
   (they live in the app process). After santree itself restarts, a pane that
-  opens finds its session on the box by its address — the pair from
+  opens finds its session on the host by its address — the pair from
   [Identity](#identity-one-pair-three-homes) — and attaches `fresh`, so the tab
-  comes back running; its seed is not typed again.
-- **Untrusted bytes** (design S5): `TerminalLayer` builds a remote pane's
-  renderer with `untrusted` (decided from the tab's cwd, before any byte,
+  comes back running; its seed is not typed again. A host that outlives the app
+  by design (the local server) goes further, **adopting everything**: on the first
+  connect per boot every alive session becomes a pane no view is showing yet, so
+  agents in worktrees nobody has opened are back and their prompts count; and a
+  tab that then opens for the same address *claims* that pane instead of
+  starting a second session. Sessions whose surface is gone are never closed
+  automatically (they are listed in Settings → Terminal). Daedalus does
+  not adopt everything.
+- **Untrusted bytes**: `TerminalLayer` builds a Daedalus pane's renderer with
+  `untrusted` (decided from the tab's cwd, before any byte,
   which is why the layer also waits for the repo registry): OSC 52 is claimed
   and dropped ahead of any clipboard handler, and an OSC 8 link opens only as
   an `http(s)` page through the system browser. Remote text reaches the screen
@@ -341,7 +356,7 @@ frontend knows only what it has to:
 Setup scripts in a Daedalus project run the same way, streamed to the usual
 read-only pane (`daedalus/setup.rs`). So do its agents: an agent tab's pane is
 a remote one carrying `SANTREE_REPO`/`SANTREE_TERM_KEY`, its seed the usual
-one (up to the box's longer line, `MAX_REMOTE_SEED_LINE`), its hooks written
+one (up to the box's longer line, `REMOTE_SEED_CAP`, 2048 bytes), its hooks written
 and fired on the box and relayed back, and which agent is in its foreground
 read from the box's process table (docs/remote.md, "Agents on the box").
 
@@ -467,13 +482,22 @@ reconciliation at all. The registry's `agent_kind` decides; when that join is
 gone, the `rollout-` file-name prefix does.
 
 **Liveness is a join, not a record.** `session_states` takes the set of
-`(term_key, agent_kind)` pairs with a live PTY (`terminal::live_terminals`,
-straight out of the in-memory manager) and no row whose terminal is absent can
-come back live-looking. Because santree has no daemon, a PTY cannot outlive the app —
-so an empty set after a restart is the *correct* answer, not a missing one. This
-is why there is no sweeper, no decay timer and no straggler window: the answer is
-recomputed from live state on every read, so a hook that lands after the process
-died has nothing to win against. Matching is on the row's own identity — `(term_key, agent_kind)` — and never on
+`(term_key, agent_kind)` pairs with a live PTY (`sessions::Terminals::liveness`,
+which asks the in-memory manager, the local server or Daedalus, whichever holds
+the pane) and no row whose terminal is absent from a complete answer can come
+back live-looking. With in-app PTYs a PTY cannot outlive the app, so an empty set after
+a restart is the *correct* answer, not a missing one. With a santree server it is
+**not always correct**: a server santree cannot reach right now may be holding
+agents that are running fine. So the answer carries whether it is complete,
+`sessions::Liveness { live, complete }`, and `complete` is true only when every host that may hold sessions answered
+for its current boot. An incomplete answer means `terminal_liveness` returns `None`,
+the fold below keeps agents as they were, and resuming a conversation is refused
+(it could otherwise be resumed twice): `hooks::session_states`, and
+`session::occupancy` behind `resume_worktree_session` and `check_tab_resume`.
+This is why there is no
+sweeper, no decay timer and no straggler window: the answer is recomputed from
+live state on every read, so a hook that lands after the process died has nothing
+to win against. Matching is on the row's own identity — `(term_key, agent_kind)` — and never on
 `cwd` (path normalization — `/var` vs `/private/var` — would retire every
 session at once); the *write* half, `retire_terminal`, scopes by `cwd` and the
 provider too, because there the failure modes are reversed. A row with no terminal to join
@@ -500,7 +524,7 @@ forever.
 launch via `-c 'hooks.<Event>=[...]'` (`SessionStart`, `UserPromptSubmit`,
 `PostToolUse`, `PermissionRequest`, `Stop`, `SessionEnd` — Codex has no
 `PostToolUseFailure`), and `SessionState.agent_kind` is read off the owning
-terminal's registry row rather than assumed, so a Codex session is no longer
+terminal's registry row rather than assumed, so a Codex session is never
 painted with the Claude mark. Its rows reconcile like Claude's, against the
 rollout rather than a transcript (`codex_rollouts::last_activity_ms`).
 
@@ -524,12 +548,10 @@ Codex also has *history*, reconstructed from rollout files under
 model, subagent counts — read display-only and bounded by a first-line peek plus
 a byte-length-keyed cache.
 
-There is no thread control. santree once owned a `codex app-server` on a private
-Unix socket and started, named and resumed threads over it; that is gone — it
-orphaned processes and held Codex's per-thread writer lock, which surfaced as
-"thread `<id>` already has an active writer" on resume. A Codex session is now
-`codex` (or `codex resume <thread>`) in a PTY, and the surfaces that used the
-protocol ask the CLI: `codex login status`, `codex debug models`, `codex logout`.
+There is no thread control. A Codex session is `codex` (or `codex resume
+<thread>`) in a PTY; a santree-owned `codex app-server` would hold Codex's
+per-thread writer lock ("thread `<id>` already has an active writer" on resume).
+The other surfaces ask the CLI: `codex login status`, `codex debug models`, `codex logout`.
 Subscription usage comes from the `token_count` record in the rollout itself.
 
 ---
@@ -661,7 +683,7 @@ Three things about it are load-bearing:
 The same trap had already been paid for twice, each time with a local
 workaround: `hooks.rs` spills Claude's settings JSON to a `--settings` file, and
 every launch site that would otherwise inline a rendered prompt seeds `Read
-<path> and follow the instructions inside` instead (`useWorktreeAgent`,
+<path> and follow the instructions inside` instead (`useWorkLaunch`,
 `AiReviewSessionPane`, the triage panes). The Codex `-c 'hooks.<Event>=[…]'`
 flags — six of them, each repeating an absolute hook-binary path and an absolute
 db path — then reintroduced it by a third route, at 1.4–2 KB depending on how
@@ -682,15 +704,22 @@ list.
 
 Not every process santree runs is an interactive terminal.
 
-**`stream.rs` — background command runs.** Repo setup scripts and builds, shown
-in a **read-only** pane. It still uses a PTY, because nearly every build tool
-block-buffers its output and turns colour off when stdout is not a TTY. Spawned
-as `/bin/bash -lc <command>`, owned by a process-wide registry keyed by an opaque
-caller string rather than by a tab, with a 60-minute watchdog and a 120×40
-starting grid. Output arrives as a `Channel<StreamEvent>` of
-`Chunk { text } | Done { ok }`, with partial UTF-8 carried across reads.
-A Daedalus project's setup script streams the same events from a PTY on the box
-(`daedalus/setup.rs`, docs/remote.md).
+**`stream.rs` — background command runs.** Repo setup scripts, shown in a
+**read-only** pane. A run is a **pane on the terminal facade** (`stream::RunHost`,
+implemented by `terminal::TerminalRuns`): its PTY is the in-app manager's or the
+local server's like any terminal's, so on a build with the server the script
+outlives the app; it is not followed again after a relaunch, but Settings →
+Terminal lists it and a second run of its key is refused while it lives
+(docs/server.md, "Setup runs"). It still
+uses a PTY, because nearly every build tool block-buffers its output and turns
+colour off when stdout is not a TTY. Spawned as `/bin/bash -lc` around the script
+with a wrapper that leaves the exit code in a status file (there is no
+`pty.exitStatus`), owned by a process-wide registry keyed by an opaque caller
+string rather than by a tab, with a 60-minute deadline while this app follows
+it and a 120×40 starting grid. Output arrives as a
+`Channel<StreamEvent>` of `Chunk { text } | Done { ok }`, with partial UTF-8
+carried across reads. A Daedalus project's setup script streams the same events
+from a PTY on the box (`daedalus/setup.rs`, docs/remote.md).
 
 **`agent.rs` — headless one-shots.** `claude -p` / `codex exec` to draft a commit
 message, a PR body, or an English-tutor analysis. Prompts go over **stdin, never
@@ -707,22 +736,28 @@ browser round trip, so Settings points the user at their own terminal.
 
 ## Compliance
 
-`COMPLIANCE.md` is the governing document and most of it is now executable
+`COMPLIANCE.md` is the governing document. Most of it is enforced by the compiler
+(the input types in `terminal.rs`, the workspace `clippy.toml`) and by tests
 (`src-tauri/src/compliance.rs`, `src/features/terminal/compliance.test.ts`). The
 parts that bear on this layer:
 
 - **The only bytes santree writes to a terminal are the user's keystrokes and the
-  single human-initiated seed prompt.** A test asserts only `terminal.rs` writes
-  into a PTY, and four frontend tests assert nothing decodes PTY output and feeds
-  it back.
+  single human-initiated seed prompt.** The compiler holds it: a terminal takes
+  input only as `terminal::input`'s `Keystrokes` or `LaunchLine`, which exist
+  only as `terminal_write`'s and `terminal_seed`'s IPC arguments, and
+  `clippy.toml` forbids the raw PTY writes beneath them outside their sanctioned
+  sites. Four frontend tests assert nothing decodes PTY output and feeds it back.
 - No credential handling; `resolve_env` is the single env-injection chokepoint,
   with values in the OS keychain and only names in SQLite.
 - **Reading the process table is observation, not a control loop.** It is the
   same passive class as reading a pane's title: nothing derived from `ps` is ever
   written back into a PTY, gates a launch, chooses a prompt, or becomes an
-  argument to a command. `agent_procs.rs` also cannot name a `PtyManager` — the
-  compliance scan's allowlist enforces it — so it has no path to a terminal even
-  in principle.
+  argument to a command. Nor could it: outside `write_pty` nothing can make the
+  input a terminal accepts, so it has no path to a terminal even in principle.
+- **The santree server is session persistence, not a driver.** It relays
+  `pty.write` and nothing else, reads output only to replay terminal modes into a viewer (`crates/pty/src/modes.rs`), and starts, resumes and retries
+  nothing; it admits only santree.app by code signature, and the unsigned-build
+  opt-in is the one named exception (COMPLIANCE.md, docs/server.md "Trust").
 - The deny lists in restricted flows are **best-effort defence-in-depth, not a
   security boundary** — they are text-matched and bypassable. Never build on them
   as a gate.
@@ -734,16 +769,24 @@ parts that bear on this layer:
 ```
 crates/pty/src/lib.rs        PtyManager: spawn, read loop, attach/detach/adopt, close_all
 crates/pty/src/ring.rs       the output ring + the anchor protocol
-crates/hook/src/main.rs      the hook binary: state hooks, status line, MCP mode
-src-tauri/src/terminal.rs    Tauri adapter + the RawBytes channel; pane_roots; the
-                             local/Daedalus dispatch and PaneLink
-src-tauri/src/daedalus/terminals.rs  remote panes: ids, anchors, re-attach, find-again
+crates/hook/src/lib.rs       the hook binary: state hooks, status line, MCP mode
+src-tauri/src/terminal.rs    Tauri adapter + the RawBytes channel; pane_roots, the
+                             inventory and quit-summary commands (dispatch is
+                             sessions/'s)
+src-tauri/src/sessions/      mod.rs (Mode, PaneLink, Liveness, Spec) · backend.rs
+                             (`Terminals`, the facade) · ids.rs (the id registry) ·
+                             remote.rs (`RemoteTerminals`: remote panes, ids,
+                             anchors, re-attach, find-again — local server and
+                             Daedalus) · env.rs (a session's env and baseEnv)
+src-tauri/src/server/        the local server's launcher, connector and supervisor
+crates/host/src/lib.rs       protocol v1 served: what the server and the test daemon run
+crates/server/src/lib.rs     the santree-server binary: serve, lifecycle, peer trust
 src-tauri/src/daedalus/setup.rs      setup scripts in a PTY on the box
 src-tauri/src/proc_table.rs  the one `ps` listing, cached 500ms and shared
 src-tauri/src/agent_procs.rs which agent owns each pane's foreground
 src-tauri/src/hooks.rs       the --settings file every claude launch layers
 src-tauri/src/session.rs     term_key → durable conversation id (resolve/mint/forget)
-src-tauri/src/stream.rs      background runs behind a PTY → read-only panes
+src-tauri/src/stream.rs      setup runs as facade panes (RunHost) → read-only panes
 src-tauri/src/session_signal.rs   the socket the hook nudges to push state changes
 src/features/terminal/
   types.ts                   the two seams: TerminalRenderer, TerminalBackend
@@ -769,30 +812,41 @@ src/features/agents/registry.ts   term_key parsing + the state → bucket fold
 | ✅ ring + anchor protocol + attach/detach | `crates/pty/src/ring.rs` |
 | ✅ adoption across a webview reload | `terminal_adopt` |
 | ✅ session inspector | Settings → Terminal |
-| ⬜ **flood safety** | no backpressure; a renderer that falls behind has an unbounded queue |
+| ✅ **mode restoration** | host-side (`crates/pty/src/modes.rs`, feature `pty.modes`); Daedalus panes get it once the engine adopts this santree-pty |
+| ⬜ **renderer backpressure** | a renderer that falls behind has an unbounded queue |
 | ⬜ **memory eviction** | every xterm stays mounted at 10k scrollback; only WebGL is rationed |
-| ⬜ **mode restoration** | a reattached TUI loses bracketed paste, mouse tracking and kitty keyboard |
 
-The three are ordered by dependency, not by value: flood safety stands alone,
-eviction wants the ring underneath it, and mode restoration is what makes
-eviction and reload *correct* rather than merely A program sets those modes once at startup and the bytes scroll out
-of a 2 MiB ring within minutes, so a restored pane gets paste-as-keystrokes and
-dead mouse reporting on a live TUI. The intended shape is `vte` plus a mode-only
-`Perform` — the same thing zellij ships — chosen by *running* the alternatives:
-`vt100` panics on real input, `avt` emits colon-form truecolor our xterm renders
-as literal text, `termwiz::Surface` takes `Change` not bytes, and `wezterm-term`
-keeps its mode fields private and is unpublished.
+**Why the replay alone is not enough.** A program sets bracketed paste, mouse
+reporting and the like once at startup, and those bytes leave a 2 MiB ring within
+minutes. A reattach is always a fresh xterm, so `TerminalView` attaches with
+`Anchor::Fresh` and the ring answers `Tail`: xterm re-derives a mode only if its
+DECSET is still in the replay. Without restoration a restored pane would get
+paste-as-keystrokes and a dead mouse on a live TUI.
 
-Two gaps a snapshot cannot close, so the mirror must carry them: no version of
-`@xterm/addon-serialize` emits the **scroll region** (DECSTBM — the four-year-old
-cause of broken `vi`/`top` restore) or the **mouse encoding modes**
-(`?1006`/`?1005`/`?1015`, which xterm.js does not expose on its public API at
-all). It also never emits `?1049l`, so a preamble must assert it — in the
-targeted form, never `ESC c`, which clears scrollback outright.
+**The host restores; the pane does nothing.** The ring feeds every chunk it evicts
+to a tracker that keeps the last explicit set or reset of application cursor keys
+and keypad (1, 66), focus reporting (1004), bracketed paste (2004), the mouse
+protocol (9, 1000, 1002, 1003, one state), the mouse encoding (1006, 1016, one
+state) and the alt screen (47/1047/1049, one key); DECSTR and RIS reset. Modes
+xterm.js does not implement (1005/1015, the kitty keyboard protocol) are not
+tracked. A `Tail` replay is prefixed with the DECSETs for the modes in effect
+where the retained tail begins, alt screen first; the tail then moves the viewer
+on exactly as it moved the original terminal. An exited session's preamble is the
+alt screen only, and `Exact`/`Reanchor` replays carry none. The in-app
+`PtyManager` and the santree server both send it, so a remount, a webview reload
+and a relaunch against the server come back with the program's modes. The
+frontend keeps no tracker of its own.
 
-If a mode mirror is built it must be **write-only toward the PTY**: it may never
-emit a reply or answer a query sequence, because the webview's xterm is the
-single query-reply authority. See `COMPLIANCE.md`.
+**Daedalus.** The preamble lives in santree-pty's `Ring`, so a Daedalus box sends
+it once its engine moves to this santree-pty. Until then a Daedalus pane loses
+bracketed paste and mouse reporting after a remount or reload, until the program
+sets them again.
+
+**Compliance.** The preamble is display-side bytes written into the viewer's
+xterm ahead of the replay. It never reaches the PTY write path, answers no query,
+and no mode decides what is typed (`COMPLIANCE.md`). Focus reporting is the one
+mode with an outbound effect, the same bytes xterm would have sent had the
+program's own `?1004h` been in the replay.
 
 ---
 

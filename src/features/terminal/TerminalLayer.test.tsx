@@ -19,11 +19,11 @@
  * a pane that comes back finds the session still running or spawns a second one
  * beside it.
  */
-import { render, waitFor } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import { useLayoutEffect, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import type { TerminalRenderer } from "./types";
+import type { LayerWorld } from "./testing";
 
 /** Session ids and pane refs the mocked backend and the tests must agree on.
  *  Hoisted because the mock factories below are, and they need them. */
@@ -36,72 +36,57 @@ const fixture = vi.hoisted(() => ({
   adoptedId: 42,
 }));
 
-/** The renderers the layer built, in mount order. A pane's `onInput` callback is
- *  registered at the same moment its session id is — so `input` being set is the
- *  signal that the open/attach round-trip finished and the pane is live. */
-const renderers = vi.hoisted(() => ({
-  live: [] as { input?: (data: string) => void; untrusted: boolean }[],
-}));
+/** What the layer's reads answer — among them the registry it reads to tell
+ *  which panes are on Daedalus. */
+const world = vi.hoisted(
+  (): LayerWorld => ({
+    repos: [{ name: "acme/web", location: "Daedalus", path: "/srv/projects/web" }],
+    server: undefined,
+  }),
+);
 
-/** The registry the layer reads to tell which panes are on Daedalus. */
-const registry = vi.hoisted(() => ({
-  repos: [{ name: "acme/web", location: "Daedalus", path: "/srv/projects/web" }],
-}));
+vi.mock("../../lib/queries", async () => (await import("./testing")).layerQueries(world));
 
-vi.mock("../../lib/queries", () => ({
-  useRepos: () => ({ data: registry.repos, isFetched: true }),
-}));
+// Only a lost pane's Resume calls it (covered in `TerminalLayer.lost.test.tsx`),
+// and it needs a router, which none of these tests mount.
+vi.mock("../agents/useOpenAgent", () => ({ useOpenAgent: () => vi.fn() }));
 
-vi.mock("./TauriBackend", () => ({
-  tauriBackend: {
-    // Keyed by pane *address*, both halves — the layer has to ask for the
-    // surface AND the provider in it, or two agents on one surface get each
-    // other's session (or, missing it entirely, a second one each).
-    adopt: vi.fn(
-      async () => new Map([[paneAddress(fixture.adoptedRef, "Codex"), fixture.adoptedId]]),
-    ),
-    open: vi.fn(async () => fixture.openedId),
-    attach: vi.fn(async () => ({ epoch: "e", seq: 0, mode: "tail" })),
-    detach: vi.fn(),
-    write: vi.fn(),
-    seed: vi.fn(),
-    resize: vi.fn(),
-    close: vi.fn(),
-  },
+// The full sessions: the provider keys them by pane *address* (both halves)
+// itself — the layer has to ask for the surface AND the provider in it, or two
+// agents on one surface get each other's session (or, missing it entirely, a
+// second one each).
+vi.mock("./TauriBackend", async () => ({
+  tauriBackend: (await import("./testing")).fakeTauriBackend(
+    () => [
+      {
+        id: fixture.adoptedId,
+        label: fixture.adoptedRef,
+        agentKind: "Codex",
+        cwd: null,
+        command: "",
+      },
+    ],
+    fixture.openedId,
+  ),
 }));
 
 // xterm wants a real canvas and a real WebGL context; neither exists in jsdom,
 // and none of what it draws is under test here.
-vi.mock("./XtermRenderer", () => {
-  class FakeRenderer implements TerminalRenderer {
-    input?: (data: string) => void;
-    untrusted: boolean;
-    constructor(opts: { untrusted?: boolean } = {}) {
-      this.untrusted = !!opts.untrusted;
-      renderers.live.push(this);
-    }
-    mount() {}
-    write() {}
-    reset() {}
-    onInput(cb: (data: string) => void) {
-      this.input = cb;
-    }
-    onTitle() {}
-    resize() {}
-    fit() {
-      return { cols: 80, rows: 24 };
-    }
-    focus() {}
-    dispose() {}
-  }
-  return { XtermRenderer: FakeRenderer };
-});
+vi.mock("./XtermRenderer", async () => ({
+  XtermRenderer: (await import("./testing")).FakeXtermRenderer,
+}));
 
-import { paneAddress } from "./paneAddress";
 import { tauriBackend } from "./TauriBackend";
 import { TerminalLayer } from "./TerminalLayer";
 import { TerminalsProvider, useTerminals } from "./TerminalsContext";
+import { UNANSWERED_MS } from "./TerminalView";
+import { FakeXtermRenderer } from "./testing";
 import { type EmbeddedTerminalSpec, useEmbeddedTerminal } from "./useEmbeddedTerminal";
+
+/** The renderers the layer built, in mount order. A pane's `onInput` callback is
+ *  registered at the same moment its session id is — so `input` being set is the
+ *  signal that the open/attach round-trip finished and the pane is live. */
+const renderers = { live: FakeXtermRenderer.built };
 
 const backend = {
   open: vi.mocked(tauriBackend.open),
@@ -428,5 +413,70 @@ describe("TerminalLayer untrusted panes", () => {
     );
     await waitFor(() => expect(renderers.live).toHaveLength(3));
     expect(renderers.live.map((r) => r.untrusted)).toEqual([true, false, false]);
+  });
+});
+
+/**
+ * A pane kept waiting on its host says where to look — and only where there is
+ * something to look at: a local pane at the server card when a server is in
+ * use, a Daedalus pane at the Daedalus link, and a pane with no server at
+ * nothing.
+ */
+describe("TerminalLayer waiting hint", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    renderers.live.length = 0;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    world.server = undefined;
+  });
+
+  function Pane({ spec }: { spec: EmbeddedTerminalSpec }) {
+    const { hostRef } = useEmbeddedTerminal({ spec });
+    return <div ref={hostRef} />;
+  }
+
+  /** One pane whose session never answers, kept waiting past the threshold. */
+  const waitingPane = async (cwd: string) => {
+    backend.open.mockImplementationOnce(() => new Promise(() => {}));
+    const { container } = render(
+      <TerminalsProvider>
+        <Pane spec={{ title: "t", source: "issue", refId: "tree:AK-9:tab:w", cwd }} />
+        <TerminalLayer />
+      </TerminalsProvider>,
+    );
+    for (let i = 0; i < 5; i++) await act(async () => {});
+    act(() => void vi.advanceTimersByTime(UNANSWERED_MS));
+    const badge = container.querySelector('[role="status"]');
+    expect(badge).toHaveTextContent("Terminals aren't responding.");
+    return badge?.textContent ?? "";
+  };
+
+  test("a local pane points at the server when one is in use", async () => {
+    world.server = {
+      state: {
+        kind: "Running",
+        revision: 1,
+        version: "v",
+        pid: 1,
+        startedAtMs: 0,
+        liveSessions: 1,
+      },
+    };
+    expect(await waitingPane("/Users/me/web")).toContain("Settings → Terminal");
+  });
+
+  test("a Daedalus pane points at the Daedalus link, whatever the local server", async () => {
+    world.server = { state: { kind: "Down", reason: "Stopped." } };
+    const text = await waitingPane("/srv/projects/web");
+    expect(text).toContain("Settings → Daedalus");
+    expect(text).not.toContain("Settings → Terminal");
+  });
+
+  test("a pane with no server to look at names none", async () => {
+    world.server = { state: { kind: "Off" } };
+    expect(await waitingPane("/Users/me/web")).not.toContain("Settings");
   });
 });

@@ -2,9 +2,12 @@
 //!
 //! One host-wide `ps` listing (from the shared [`crate::proc_table`] snapshot,
 //! which agent detection reads too), parsed into a parent→children tree; each
-//! PTY session's root pid (from [`PtyManager::sessions`]) is then summed with all
+//! PTY session's root pid (from [`crate::sessions::Terminals::local_sessions`]) is then summed with all
 //! its descendants, and the app's own process gets whatever is left of its
-//! subtree once the terminals are carved out. Read-only and input-free: nothing
+//! subtree once the terminals are carved out. With a local santree server the
+//! roots are the server's children, not the app's: each is still walked from its
+//! own pid, and the server (found as what the roots hang from) gets a row beside
+//! the app's rather than being lost inside it or outside the accounting. Read-only and input-free: nothing
 //! here takes an IPC value, the `ps` argv is a constant, and no process is
 //! signalled, written to or inspected beyond the columns `ps` prints.
 //!
@@ -36,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use santree_core::domain::{RepoUsage, ResourceUsage, TerminalUsage, WorktreeUsage};
-use santree_pty::{PtyManager, SessionInfo};
+use santree_pty::SessionInfo;
 
 use crate::db::{self, Db};
 use crate::proc_table::{Proc, ProcTree};
@@ -226,8 +229,7 @@ fn canonical(path: &str) -> PathBuf {
 /// the app's own process. Nothing here pins a runtime worker: the `ps` is async
 /// I/O, and both CPU hops — parsing the listing and canonicalising the registry —
 /// run on the blocking pool (see [`crate::proc_table::snapshot`]).
-pub async fn resource_usage(db: &Db, manager: &PtyManager) -> Result<ResourceUsage> {
-    let sessions = manager.sessions();
+pub async fn resource_usage(db: &Db, sessions: Vec<SessionInfo>) -> Result<ResourceUsage> {
     let (repos, links) = registry(db).await?;
     let tree = crate::proc_table::snapshot().await?;
     Ok(assemble(
@@ -255,6 +257,14 @@ fn assemble(
     // children), so the app entry counts only itself and its non-terminal helpers.
     let roots: HashSet<u32> = sessions.iter().filter_map(|s| s.pid).collect();
     let none = HashSet::new();
+    // With a local santree server the roots are *its* children, and it is not
+    // necessarily the app's own (after a relaunch it hangs from launchd). It is
+    // found by what the terminals hang from, never by name: `ps` splits its path
+    // at the space in "Application Support".
+    let servers = server_pids(tree, &roots, app_pid);
+    // What the app's own subtree must not claim: the terminals, and the servers
+    // that host them when the app started those.
+    let carved: HashSet<u32> = roots.union(&servers).copied().collect();
 
     // repo → worktree id → (label, terminals)
     let mut groups: HashMap<String, HashMap<String, (String, Vec<TerminalUsage>)>> = HashMap::new();
@@ -333,36 +343,44 @@ fn assemble(
     // column to join on — there is no sound way to tell ours from another
     // WebKit app's in a process-table scan. Rather than guess, this reports the
     // side it can prove.
-    let app = subtree(tree, app_pid, &roots);
+    let app = subtree(tree, app_pid, &carved);
     let app_name = tree
         .get(app_pid)
         .map(|p| p.name.clone())
         .unwrap_or_else(|| "santree".to_string());
-    let processes: Vec<TerminalUsage> = subtree_procs(tree, app_pid, &roots)
-        .into_iter()
-        .map(|p| TerminalUsage {
-            // `None`: these are processes, not PTY sessions — the frontend keys
-            // its tab labels off a session id and must not find one here.
-            session_id: None,
-            label: p.name.clone(),
-            pid: p.pid,
-            cpu_pct: p.cpu_pct,
-            rss_bytes: p.rss_bytes,
-            live: !p.zombie,
-        })
-        .collect();
-    out.push(RepoUsage {
-        repo: "santree".to_string(),
-        cpu_pct: app.cpu_pct,
-        rss_bytes: app.rss_bytes,
-        worktrees: vec![WorktreeUsage {
-            id: "santree".to_string(),
-            label: app_name,
-            cpu_pct: app.cpu_pct,
-            rss_bytes: app.rss_bytes,
-            terminals: processes,
-        }],
-    });
+    out.push(process_group(
+        "santree",
+        app_name,
+        subtree_procs(tree, app_pid, &carved),
+        &app,
+        |p| p.name.clone(),
+    ));
+
+    // The server(s) beside it: each one's own process and any helper of it, with
+    // the terminals it hosts left to their rows above.
+    if !servers.is_empty() {
+        let mut procs: Vec<&Proc> = Vec::new();
+        let mut total = Subtree::default();
+        for server in &servers {
+            let sub = subtree(tree, *server, &roots);
+            total.cpu_pct += sub.cpu_pct;
+            total.rss_bytes += sub.rss_bytes;
+            procs.extend(subtree_procs(tree, *server, &roots));
+        }
+        out.push(process_group(
+            "santree server",
+            "santree server".to_string(),
+            procs,
+            &total,
+            |p| {
+                if servers.contains(&p.pid) {
+                    SERVER_LABEL.to_string()
+                } else {
+                    p.name.clone()
+                }
+            },
+        ));
+    }
 
     out.sort_by(|a, b| b.rss_bytes.total_cmp(&a.rss_bytes));
     ResourceUsage {
@@ -371,6 +389,60 @@ fn assemble(
         total_rss_bytes: out.iter().map(|r| r.rss_bytes).sum(),
         total_cpu_pct: out.iter().map(|r| r.cpu_pct).sum(),
         repos: out,
+    }
+}
+
+/// What a server's own process is called in the listing, whatever `ps` made of
+/// its path.
+const SERVER_LABEL: &str = "santree-server";
+
+/// The processes the terminals' roots hang from that aren't this app: the local
+/// santree server(s) hosting them. A root hanging from the app is an in-app
+/// terminal; one hanging from launchd (pid 1) names no host.
+fn server_pids(tree: &ProcTree, roots: &HashSet<u32>, app_pid: u32) -> HashSet<u32> {
+    roots
+        .iter()
+        .filter_map(|root| tree.get(*root))
+        .map(|p| p.ppid)
+        .filter(|parent| *parent != app_pid && *parent > 1)
+        .filter(|parent| tree.get(*parent).is_some())
+        .collect()
+}
+
+/// A synthetic repo group of one worktree listing processes (not PTY sessions),
+/// one row each: how the app and the server are shown, so a helper that has run
+/// away is visible instead of hidden inside a total.
+fn process_group(
+    repo: &str,
+    label: String,
+    procs: Vec<&Proc>,
+    total: &Subtree,
+    name: impl Fn(&Proc) -> String,
+) -> RepoUsage {
+    RepoUsage {
+        repo: repo.to_string(),
+        cpu_pct: total.cpu_pct,
+        rss_bytes: total.rss_bytes,
+        worktrees: vec![WorktreeUsage {
+            id: repo.to_string(),
+            label,
+            cpu_pct: total.cpu_pct,
+            rss_bytes: total.rss_bytes,
+            terminals: procs
+                .into_iter()
+                .map(|p| TerminalUsage {
+                    // `None`: these are processes, not PTY sessions — the
+                    // frontend keys its tab labels off a session id and must not
+                    // find one here.
+                    session_id: None,
+                    label: name(p),
+                    pid: p.pid,
+                    cpu_pct: p.cpu_pct,
+                    rss_bytes: p.rss_bytes,
+                    live: !p.zombie,
+                })
+                .collect(),
+        }],
     }
 }
 
@@ -587,6 +659,152 @@ mod tests {
 
         assert_eq!(usage.total_rss_bytes, app.rss_bytes + santree.rss_bytes);
         assert_eq!(usage.total_cpu_pct, 13.0 + 3.5);
+    }
+
+    /// With a local server the terminals' processes are the server's children,
+    /// not the app's — after a relaunch the server is not even the app's
+    /// descendant. Each terminal is still accounted by walking down from its own
+    /// pid, the app's row never absorbs the server, and the server gets a row of
+    /// its own (it is a process santree owns and a cost the user pays).
+    #[test]
+    fn terminals_on_a_server_are_accounted_where_they_are_and_the_server_has_its_own_row() {
+        let sessions = || {
+            vec![
+                SessionInfo {
+                    id: 0,
+                    pid: Some(250),
+                    cwd: Some("/code/app-worktrees/AK-1".into()),
+                    command: "/bin/zsh".into(),
+                    owner: "page".into(),
+                    ..Default::default()
+                },
+                SessionInfo {
+                    id: 1,
+                    pid: Some(260),
+                    cwd: Some("/code/app".into()),
+                    command: "/bin/zsh".into(),
+                    owner: "page".into(),
+                    ..Default::default()
+                },
+            ]
+        };
+        let repos = vec![RepoRef {
+            name: "acme/app".into(),
+            root: PathBuf::from("/code/app"),
+        }];
+        let links = vec![LinkRef {
+            repo_root: PathBuf::from("/code/app"),
+            issue_id: "AK-1".into(),
+            title: "Fix login".into(),
+            path: PathBuf::from("/code/app-worktrees/AK-1"),
+        }];
+        // `ps` splits a program path at its spaces, so the server (which lives
+        // under "Application Support") is named "Application" here: it can't be
+        // found by name, only by being what the terminals hang from.
+        let listing = |server_parent: u32| {
+            format!(
+                "\
+    1     0   0.0  24688 Ss   /sbin/launchd
+  100     1   1.5  50000 S    /Applications/santree.app/Contents/MacOS/santree
+  400   100   2.0  10000 S    /opt/homebrew/bin/codex
+  150 {server_parent:5}   0.2   9000 S    /Users/me/Library/Application Support/com.santree.desktop/server/r1/santree-server
+  250   150   0.0   4000 Ss   /bin/zsh
+  251   250  12.5 300000 R+   /opt/homebrew/bin/claude
+  252   251   0.5  20000 S    /usr/local/bin/node
+  260   150   0.0   3000 S    /bin/zsh
+"
+            )
+        };
+
+        // Detached and reparented to launchd (after a relaunch), and still the
+        // app's child (the run that started it): the same accounting.
+        for server_parent in [1, 100] {
+            let tree = ProcTree::new(parse_ps(&listing(server_parent)));
+            let usage = assemble(&tree, sessions(), 100, &repos, &links, 1.0, 8);
+
+            let names: Vec<&str> = usage.repos.iter().map(|r| r.repo.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["acme/app", "santree", "santree server"],
+                "server_parent {server_parent}: heaviest first"
+            );
+
+            let app = &usage.repos[0];
+            assert_eq!(
+                app.rss_bytes,
+                (4000.0 + 300_000.0 + 20_000.0 + 3000.0) * 1024.0,
+                "each terminal's subtree is summed from its own pid"
+            );
+            let claude = &app.worktrees[0].terminals[0];
+            assert_eq!(
+                (
+                    claude.session_id,
+                    claude.pid,
+                    claude.label.as_str(),
+                    claude.live
+                ),
+                (Some(0), 250, "claude", true)
+            );
+
+            let santree = &usage.repos[1];
+            let own: Vec<u32> = santree.worktrees[0]
+                .terminals
+                .iter()
+                .map(|t| t.pid)
+                .collect();
+            assert_eq!(
+                own,
+                vec![100, 400],
+                "server_parent {server_parent}: the app's row has the app and its helper, \
+                 not the server or what the server hosts"
+            );
+            assert_eq!(santree.cpu_pct, 3.5);
+
+            let server = &usage.repos[2];
+            let rows: Vec<(Option<u32>, u32, &str)> = server.worktrees[0]
+                .terminals
+                .iter()
+                .map(|t| (t.session_id, t.pid, t.label.as_str()))
+                .collect();
+            assert_eq!(
+                rows,
+                vec![(None, 150, "santree-server")],
+                "just the server: its terminals are the terminals' rows, once"
+            );
+            assert_eq!(server.rss_bytes, 9000.0 * 1024.0);
+            assert_eq!(
+                usage.total_rss_bytes,
+                app.rss_bytes + santree.rss_bytes + server.rss_bytes
+            );
+        }
+    }
+
+    /// A terminal whose root hangs from launchd (it was orphaned) or from the app
+    /// itself (in-app) names no server.
+    #[test]
+    fn only_terminals_hanging_from_another_process_name_a_server() {
+        let tree = ProcTree::new(parse_ps(LISTING));
+        let sessions = vec![
+            SessionInfo {
+                id: 0,
+                pid: Some(200),
+                cwd: Some("/x".into()),
+                ..Default::default()
+            },
+            SessionInfo {
+                id: 1,
+                pid: Some(300),
+                cwd: Some("/x".into()),
+                ..Default::default()
+            },
+        ];
+        // 200's parent is the app; 300's is launchd.
+        let usage = assemble(&tree, sessions, 100, &[], &[], 1.0, 8);
+        assert!(
+            usage.repos.iter().all(|r| r.repo != "santree server"),
+            "{:?}",
+            usage.repos.iter().map(|r| &r.repo).collect::<Vec<_>>()
+        );
     }
 
     /// The denominator has to be real and non-zero, or dividing by it turns a

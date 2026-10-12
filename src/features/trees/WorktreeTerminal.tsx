@@ -23,6 +23,7 @@ export function WorktreeTerminal({
   attach = true,
   onLaunched,
   onExited,
+  onResume,
 }: {
   id: string;
   branch: string;
@@ -38,11 +39,14 @@ export function WorktreeTerminal({
   onLaunched?: () => void;
   /** Fired once when the hosted process exits (its tab is removed). */
   onExited?: () => void;
+  /** The tab's own Resume, for a pane whose session is lost. */
+  onResume?: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
     spec: { title: branch, cwd, source: "issue", refId: `tree:${id}`, seed, agent },
     onExited,
     attach,
+    onResume,
   });
 
   const consumed = useRef(false);

@@ -20,6 +20,7 @@ use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use santree_agent_kind::AgentKind;
 
+mod modes;
 mod ring;
 use ring::Ring;
 pub use ring::{Anchor, Replay, ReplayMode, RING_CAP_BYTES};
@@ -27,8 +28,21 @@ pub use ring::{Anchor, Replay, ReplayMode, RING_CAP_BYTES};
 /// Opaque handle to a live terminal session.
 pub type SessionId = u32;
 
+/// What a `Debug` of anything carrying an environment shows of it: the NAMES
+/// only. An environment holds secrets, and a `{:?}` in a log has no business
+/// printing them.
+pub struct EnvNames<'a>(pub &'a [(String, String)]);
+
+impl std::fmt::Debug for EnvNames<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(name, _)| name))
+            .finish()
+    }
+}
+
 /// How to spawn a session. An empty `command` means "the user's login shell".
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct OpenOpts {
     pub cwd: Option<String>,
     pub command: String,
@@ -42,6 +56,17 @@ pub struct OpenOpts {
     /// environment. This is NOT a channel for an agent CLI's own auth tokens —
     /// those are never read, stored, or forwarded here.
     pub env: Vec<(String, String)>,
+    /// The environment the session would have inherited, had it been spawned by
+    /// the caller rather than by this process — the user's `PATH`, `SHELL`,
+    /// `LANG` as santree sees them, when this manager runs in a server started
+    /// with a minimal environment. When non-empty it **replaces** the ambient
+    /// env (none of this process's own variables reach the session); empty,
+    /// the ambient env is inherited as is. Applied *before* the
+    /// [`INHERITED_SESSION_MARKERS`] strip, so a marker the caller itself
+    /// inherited (santree launched from a Claude pane) is dropped like any
+    /// other inherited one; [`OpenOpts::env`] goes on top of the strip. `SHELL`
+    /// and `HOME` here also pick the login shell and the fallback cwd.
+    pub base_env: Vec<(String, String)>,
     /// Who asked for this session — an opaque tag the caller compares against
     /// itself later (see [`PtyManager::adopt_others`]). This crate never
     /// interprets it; it only stores and matches it.
@@ -65,10 +90,32 @@ pub struct OpenOpts {
     pub agent_kind: Option<AgentKind>,
 }
 
+impl std::fmt::Debug for OpenOpts {
+    /// `env` and `base_env` by name only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenOpts")
+            .field("cwd", &self.cwd)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .field("env", &EnvNames(&self.env))
+            .field("base_env", &EnvNames(&self.base_env))
+            .field("owner", &self.owner)
+            .field("label", &self.label)
+            .field("agent_kind", &self.agent_kind)
+            .finish()
+    }
+}
+
 /// Where a session's output goes right now. `None` while detached — the pump
 /// keeps reading and the ring keeps filling, because the process does not care
 /// that nobody is watching.
-type OutputSink = Box<dyn Fn(Vec<u8>) + Send>;
+///
+/// An `Arc` so the reader can call it *outside* the lock: a sink may block (a
+/// server pacing a session to a slow reader), and holding the lock through
+/// that would stall every `sessions()` and `attach()` behind one session.
+type OutputSink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 
 struct Session {
     master: Box<dyn MasterPty + Send>,
@@ -165,7 +212,7 @@ impl PtyManager {
     pub fn open(
         &self,
         opts: OpenOpts,
-        on_output: impl Fn(Vec<u8>) + Send + 'static,
+        on_output: impl Fn(Vec<u8>) + Send + Sync + 'static,
     ) -> Result<SessionId> {
         let size = PtySize {
             rows: opts.rows.max(1),
@@ -211,7 +258,7 @@ impl PtyManager {
         };
 
         let ring = Arc::new(Mutex::new(Ring::default()));
-        let sink: Arc<Mutex<Option<OutputSink>>> = Arc::new(Mutex::new(Some(Box::new(on_output))));
+        let sink: Arc<Mutex<Option<OutputSink>>> = Arc::new(Mutex::new(Some(Arc::new(on_output))));
 
         // Mint the id and register the session in a *single* critical section, and
         // refuse outright once `close_all()` has run. Registering across two locks
@@ -354,32 +401,42 @@ impl PtyManager {
     /// the old page's channel is dead, the new page's is not, and the session
     /// never noticed. `anchor` says what the client already has — see
     /// [`Anchor`] — and the returned [`Replay`] is the catch-up for it.
+    ///
+    /// Every chunk reaches the new receiver exactly once, in the replay or
+    /// through `on_output`; the old sink gets nothing recorded after the swap
+    /// (it may still be finishing a chunk it was handed before). A session
+    /// whose process already ended sends `on_output` its exit sentinel from
+    /// here, on the attaching thread and so before the caller has written the
+    /// replay: a caller that must write the replay first holds output back
+    /// until it has.
     pub fn attach(
         &self,
         id: SessionId,
         anchor: &Anchor,
-        on_output: impl Fn(Vec<u8>) + Send + 'static,
+        on_output: impl Fn(Vec<u8>) + Send + Sync + 'static,
     ) -> Result<Replay> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let session = inner
             .sessions
             .get(&id)
             .ok_or_else(|| anyhow!("no terminal session {id}"))?;
-        // Read the ring and install the sink under the manager lock, so a chunk
-        // arriving mid-attach either lands in the replay or goes to the new sink
-        // — never both (a duplicated repaint) and never neither (a lost one).
-        let replay = session
-            .ring
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .replay_for(&session.info.epoch, anchor);
-        *session.sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(on_output));
+        let (replay, owed_exit) = attach_sink(
+            &session.ring,
+            &session.sink,
+            &session.info.epoch,
+            anchor,
+            Arc::new(on_output),
+        );
         log::info!(
             "attached pty session {id} ({:?}, {} byte(s) replayed, label: {})",
             replay.mode,
             replay.bytes.len(),
             session.info.label
         );
+        drop(inner);
+        if let Some(sink) = owed_exit {
+            sink(Vec::new());
+        }
         Ok(replay)
     }
 
@@ -483,15 +540,10 @@ impl PtyManager {
             .unwrap_or_else(|e| e.into_inner())
             .sessions
             .remove(&id);
-        if let Some(mut session) = session {
-            let _ = session.child.kill();
-            // Reap on a detached thread: a process slow to die after the kill must
-            // not block this command thread. Dropping master/writer at the end of
-            // this block closes the pty, so the reader still sees EOF.
-            let mut child = session.child;
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
+        if let Some(session) = session {
+            // On a detached thread: listing the terminal's processes and a
+            // process slow to die must not block this command thread.
+            std::thread::spawn(move || end(session));
             log::info!("closed pty session {id}");
         }
         Ok(())
@@ -528,22 +580,7 @@ impl PtyManager {
         for session in drained {
             let done_tx = done_tx.clone();
             std::thread::spawn(move || {
-                let Session {
-                    master,
-                    writer,
-                    mut child,
-                    size: _,
-                    ring: _,
-                    sink: _,
-                    info: _,
-                } = session;
-                // Drop the pty master/writer before signalling: closing our end
-                // of the pty delivers EOF/HUP to the child immediately, even if
-                // it ignores or traps the kill signal below.
-                drop(writer);
-                drop(master);
-                let _ = child.kill();
-                let _ = child.wait();
+                end(session);
                 let _ = done_tx.send(());
             });
         }
@@ -563,6 +600,73 @@ impl PtyManager {
             reaped += 1;
         }
         log::info!("closed all {total} pty session(s)");
+    }
+}
+
+/// End a session's processes and free its pty; blocks until the child is
+/// reaped.
+fn end(session: Session) {
+    let Session {
+        master,
+        writer,
+        mut child,
+        size: _,
+        ring: _,
+        sink: _,
+        info: _,
+    } = session;
+    hang_up(&*master);
+    // Closing our end of the pty delivers EOF/HUP to the child even if it
+    // ignores or traps the kill signal below.
+    drop(writer);
+    drop(master);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// SIGHUP every process whose controlling terminal is this pty, while it still
+/// is. The kernel's hangup on close reaches only the foreground process group,
+/// so a background job a job-control shell put in a group of its own would
+/// outlive the tab, and with the server, the app. A process that left the
+/// session (`setsid`, a daemon) is not the tab's to end.
+fn hang_up(master: &dyn MasterPty) {
+    let Some(tty) = master.tty_name() else {
+        return;
+    };
+    // `ps` names a terminal without its `/dev/`: `ttys012`, `pts/3`.
+    let Some(tty) = tty.to_str().and_then(|t| t.strip_prefix("/dev/")) else {
+        return;
+    };
+    // Absolute paths: the server runs with a cleared environment.
+    let table = match std::process::Command::new("/bin/ps")
+        .args(["-A", "-o", "pid=,tty="])
+        .output()
+    {
+        Ok(out) => out.stdout,
+        Err(e) => {
+            log::warn!("listing the processes on {tty}: {e}");
+            return;
+        }
+    };
+    let table = String::from_utf8_lossy(&table);
+    let pids: Vec<&str> = table
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?;
+            (fields.next()? == tty).then_some(pid)
+        })
+        .collect();
+    if pids.is_empty() {
+        return;
+    }
+    if let Err(e) = std::process::Command::new("/bin/kill")
+        .arg("-HUP")
+        .args(&pids)
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        log::warn!("hanging up the processes on {tty}: {e}");
     }
 }
 
@@ -594,20 +698,32 @@ fn mint_epoch(id: SessionId) -> String {
 /// The ring is written **before** the sink, and a `None` sink is not an error:
 /// a detached pane, or a page that reloaded out from under this session, must
 /// not stop the process or lose what it prints in the meantime. That is the
-/// property the whole reattach design rests on.
+/// property the whole reattach design rests on. The exit is recorded in the
+/// ring too, so a receiver that attaches after it still hears of it
+/// ([`attach_sink`]).
 fn pump(
     mut reader: Box<dyn Read + Send>,
     ring: Arc<Mutex<Ring>>,
     sink: Arc<Mutex<Option<OutputSink>>>,
 ) {
     let emit = |bytes: Vec<u8>| {
-        if !bytes.is_empty() {
-            ring.lock().unwrap_or_else(|e| e.into_inner()).push(&bytes);
-        }
-        // Held only for the forward itself. The sink writes to a Tauri channel,
-        // which does not block on the webview, so this cannot stall the read
-        // loop behind a slow renderer.
-        if let Some(sink) = sink.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        // Recorded and routed in one hold of the ring lock, which an attach
+        // holds across its replay and its sink swap (`attach_sink`): a chunk
+        // recorded before the swap is in the new receiver's replay and goes to
+        // the sink it replaced; one after goes to the new sink. Either way the
+        // new receiver gets it exactly once. The same cut decides the exit.
+        let current = {
+            let mut ring = ring.lock().unwrap_or_else(|e| e.into_inner());
+            if bytes.is_empty() {
+                ring.mark_exited();
+            } else {
+                ring.push(&bytes);
+            }
+            sink.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        };
+        // Called outside both locks: a sink may block (pacing a slow reader),
+        // and only this session's reader may wait on it.
+        if let Some(sink) = current {
             sink(bytes);
         }
     };
@@ -629,6 +745,30 @@ fn pump(
         }
     }
     emit(Vec::new());
+}
+
+/// Read a session's catch-up for `anchor` and make `on_output` its sink, as
+/// one step against the reader: the ring lock is held across both, as `pump`
+/// holds it across recording a chunk and taking the sink (lock order: ring,
+/// then sink). So each chunk reaches the new receiver exactly once — in this
+/// replay, or through `on_output` — and the old sink receives nothing
+/// recorded after the swap.
+///
+/// The exit reaches the newest receiver too: if the process had already
+/// ended when `on_output` went in, the reader handed its sentinel to an older
+/// sink (or to none), and `on_output` is returned as owed one — for the caller
+/// to send once every lock is released.
+fn attach_sink(
+    ring: &Mutex<Ring>,
+    sink: &Mutex<Option<OutputSink>>,
+    epoch: &str,
+    anchor: &Anchor,
+    on_output: OutputSink,
+) -> (Replay, Option<OutputSink>) {
+    let ring = ring.lock().unwrap_or_else(|e| e.into_inner());
+    *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(on_output.clone());
+    let replay = ring.replay_for(epoch, anchor);
+    (replay, ring.exited().then_some(on_output))
 }
 
 /// Environment markers an agent CLI stamps onto the processes it spawns to say
@@ -697,28 +837,47 @@ pub fn strip_inherited_session_markers(cmd: &mut CommandBuilder) {
 /// unlike `std::env::vars()`, which panics on one.
 ///
 /// That inherited env is then cleaned and layered, in this order:
-/// 1. [`INHERITED_SESSION_MARKERS`] are dropped, so the session starts as its
-///    own top-level session rather than a leaked child of santree's launcher;
-/// 2. the user's own configured project env (`opts.env`, resolved by
+/// 1. the caller's inherited env (`opts.base_env`), standing in for the one
+///    this process has when it is a server and not the app. When non-empty it
+///    *replaces* this process's env (cleared first), so nothing of the
+///    server's own environment reaches the session; empty, this process's env
+///    is the inheritance;
+/// 2. [`INHERITED_SESSION_MARKERS`] are dropped — from both — so the session
+///    starts as its own top-level session rather than a leaked child of
+///    santree's launcher;
+/// 3. the user's own configured project env (`opts.env`, resolved by
 ///    `src-tauri` from the Environment settings — see COMPLIANCE.md's
 ///    "user-configured project environment" carve-out). It is applied *after*
 ///    the strip on purpose: a name the user set explicitly is their call, and
 ///    their value must win over our removal;
-/// 3. a sane `TERM` last so it can't be clobbered.
+/// 4. a sane `TERM` last so it can't be clobbered.
 ///
-/// Steps 2 and 3 are the *only* env override channel, and step 2 carries the
+/// Steps 3 and 4 are the *only* env override channel, and step 3 carries the
 /// user's own variables — it is never used to read, store, or forward an agent
 /// CLI's auth tokens.
 fn build_command(opts: &OpenOpts) -> CommandBuilder {
+    let base = |name: &str| {
+        opts.base_env
+            .iter()
+            .rev()
+            .find(|(k, v)| k == name && !v.is_empty())
+            .map(|(_, v)| v.clone())
+    };
     // Spawn the *trimmed* command: emptiness is judged on it, so a padded exec path
     // would otherwise pass the "not empty" check and then fail exec on the padding.
     let command = opts.command.trim();
     let (program, default_args) = if command.is_empty() {
-        (default_shell(), vec!["-l".to_string()])
+        (
+            base("SHELL").unwrap_or_else(default_shell),
+            vec!["-l".to_string()],
+        )
     } else {
         (command.to_string(), Vec::new())
     };
 
+    // The one spawn site (clippy.toml): everything below strips the inherited
+    // session markers before the user's own variables are applied.
+    #[allow(clippy::disallowed_methods)]
     let mut cmd = CommandBuilder::new(program);
     let args = if opts.args.is_empty() {
         &default_args
@@ -727,8 +886,18 @@ fn build_command(opts: &OpenOpts) -> CommandBuilder {
     };
     cmd.args(args);
 
-    // Before anything is layered on: drop the nested-session markers santree
-    // inherited from whatever launched it, so this session is nobody's child.
+    // A forwarded inheritance replaces this process's rather than layering
+    // over it: in a server, this process's env is the server's, and a name
+    // the caller doesn't have must not show through from it.
+    if !opts.base_env.is_empty() {
+        cmd.env_clear();
+    }
+    for (name, value) in &opts.base_env {
+        cmd.env(name, value);
+    }
+    // Before anything else is layered on: drop the nested-session markers
+    // santree inherited from whatever launched it, so this session is nobody's
+    // child.
     strip_inherited_session_markers(&mut cmd);
 
     // The user's own variables come after the strip, so an explicit setting of
@@ -739,27 +908,28 @@ fn build_command(opts: &OpenOpts) -> CommandBuilder {
     // TERM last so a stray user-set TERM can't break xterm rendering.
     cmd.env("TERM", "xterm-256color");
 
-    if let Some(cwd) = effective_cwd(opts.cwd.as_deref()) {
+    if let Some(cwd) = effective_cwd(opts.cwd.as_deref(), base("HOME")) {
         cmd.cwd(cwd);
     }
     cmd
 }
 
-/// Use the requested cwd when it exists, otherwise fall back to $HOME so a stale
-/// or missing path never fails the spawn.
+/// Use the requested cwd when it exists, otherwise fall back to $HOME (the
+/// caller's, when it passed one) so a stale or missing path never fails the
+/// spawn.
 ///
 /// The fallback is deliberate but consequential: a "worktree terminal" whose
 /// directory has been deleted underneath it then runs git/claude against $HOME
 /// instead. That's still better than failing the spawn, but it must not be silent —
 /// the mismatch between the pane's label and its actual cwd is otherwise invisible.
-fn effective_cwd(cwd: Option<&str>) -> Option<String> {
+fn effective_cwd(cwd: Option<&str>, home: Option<String>) -> Option<String> {
     if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
         if Path::new(cwd).is_dir() {
             return Some(cwd.to_string());
         }
         log::warn!("pty cwd {cwd:?} is not a directory; falling back to $HOME");
     }
-    std::env::var("HOME").ok()
+    home.or_else(|| std::env::var("HOME").ok())
 }
 
 fn default_shell() -> String {
@@ -776,6 +946,7 @@ fn default_shell() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests drive PTYs directly
 mod tests {
     use super::*;
 
@@ -1206,6 +1377,196 @@ mod tests {
         );
     }
 
+    /// The exit belongs to the newest receiver. The reader takes the sink and
+    /// calls it outside the lock, so an attach can land while the old sink is
+    /// still being handed the exit; the new receiver must hear it too, or a
+    /// pane reattached at the wrong moment shows a dead session forever.
+    #[test]
+    fn an_exit_racing_a_reattach_reaches_the_new_receiver() {
+        let _serial = pty_guard();
+        let mgr = PtyManager::new();
+        let (reached, reached_rx) = mpsc::channel::<()>();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let id = mgr
+            .open(
+                OpenOpts {
+                    command: "true".into(),
+                    cols: 80,
+                    rows: 24,
+                    ..Default::default()
+                },
+                move |bytes| {
+                    if bytes.is_empty() {
+                        let _ = reached.send(());
+                        // Hold the old receiver's exit until the new one attached.
+                        let _ = release_rx
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(10));
+                    }
+                },
+            )
+            .expect("open session");
+        reached_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the process exits");
+
+        let (tx, rx) = mpsc::channel();
+        mgr.attach(id, &Anchor::Unknown, move |bytes| {
+            let _ = tx.send(bytes);
+        })
+        .expect("attach");
+        let _ = release.send(());
+        assert!(
+            recv_sentinel(&rx, Instant::now() + Duration::from_secs(5)),
+            "the receiver attached during the exit never heard of it"
+        );
+        mgr.close(id).expect("close");
+    }
+
+    /// The same, long after: a session that ended while nobody was attached
+    /// reports its exit to whoever attaches next — once.
+    #[test]
+    fn a_session_that_ended_while_detached_reports_its_exit_on_reattach() {
+        let _serial = pty_guard();
+        let mgr = PtyManager::new();
+        let (id, _rx) = open_silent_shell(&mgr);
+        mgr.detach(id);
+        mgr.write(id, b"exit\n").expect("write");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while mgr.sessions().iter().any(|s| s.id == id && s.alive) {
+            assert!(Instant::now() < deadline, "the shell never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The reader may still be on its way to the sentinel: wait for it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let rx = loop {
+            let (tx, rx) = mpsc::channel();
+            mgr.attach(id, &Anchor::Unknown, move |bytes| {
+                let _ = tx.send(bytes);
+            })
+            .expect("attach");
+            if recv_sentinel(&rx, Instant::now() + Duration::from_millis(200)) {
+                break rx;
+            }
+            assert!(Instant::now() < deadline, "no exit on reattach");
+        };
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the exit is reported once per receiver, and nothing follows it"
+        );
+        mgr.close(id).expect("close");
+    }
+
+    /// A reader the test feeds chunk by chunk; EOF once the feeder is gone.
+    struct Fed(mpsc::Receiver<Vec<u8>>);
+
+    impl Read for Fed {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.recv() {
+                Ok(chunk) => {
+                    buf[..chunk.len()].copy_from_slice(&chunk);
+                    Ok(chunk.len())
+                }
+                Err(_) => Ok(0),
+            }
+        }
+    }
+
+    /// The hand-over between receivers, against the real reader loop: every
+    /// chunk is in an attach's replay or reaches that attach's sink — never
+    /// both (a repaint printed twice), never neither (one lost). Attaching in
+    /// a tight loop while the reader runs is what lands an attach between the
+    /// reader's ring write and its sink lookup; it is probabilistic by nature,
+    /// so it runs enough rounds to hit that window many times over.
+    #[test]
+    fn every_chunk_reaches_each_receiver_exactly_once_across_attaches() {
+        type Got = Arc<Mutex<Vec<u8>>>;
+        // Few, large chunks, so a replay's skip-walk stays short; the feeder
+        // is paced below so the gap since the last attach is still in it.
+        let ring = Arc::new(Mutex::new(Ring::with_cap(256 * 1024)));
+        let sink: Arc<Mutex<Option<OutputSink>>> = Arc::new(Mutex::new(None));
+        let (feed, fed) = mpsc::sync_channel::<Vec<u8>>(64);
+        let reader = {
+            let (ring, sink) = (ring.clone(), sink.clone());
+            std::thread::spawn(move || pump(Box::new(Fed(fed)), ring, sink))
+        };
+        // Counted by the attacher. The feeder waits for a new attach every 16
+        // chunks, so no more than a few dozen arrive between two attaches: an
+        // attacher descheduled long enough for the ring to evict its gap would
+        // reanchor, which says nothing about the hand-over and failed this
+        // test on a loaded machine.
+        let attaches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let feeder = std::thread::spawn({
+            let attaches = attaches.clone();
+            move || {
+                let mut all = Vec::new();
+                let mut seen = 0;
+                for i in 0..20_000u32 {
+                    if i % 16 == 0 {
+                        let now = loop {
+                            let now = attaches.load(std::sync::atomic::Ordering::Acquire);
+                            if now != seen {
+                                break now;
+                            }
+                            std::thread::yield_now();
+                        };
+                        seen = now;
+                    }
+                    let chunk = format!("<{i:>1000}>").into_bytes();
+                    all.extend_from_slice(&chunk);
+                    feed.send(chunk).expect("the reader is running");
+                }
+                all
+            }
+        });
+
+        // Each attach anchored where the previous one left off, so a replay
+        // is exactly what reached nobody since — and must be exactly what the
+        // previous sink received.
+        let mut rounds: Vec<(Vec<u8>, Got)> = Vec::new();
+        let mut anchor = Anchor::Fresh;
+        while !feeder.is_finished() {
+            let got: Got = Arc::default();
+            let into = got.clone();
+            let (replay, _) = attach_sink(
+                &ring,
+                &sink,
+                "e",
+                &anchor,
+                Arc::new(move |bytes: Vec<u8>| into.lock().unwrap().extend(bytes)),
+            );
+            assert_ne!(replay.mode, ReplayMode::Reanchor);
+            attaches.fetch_add(1, std::sync::atomic::Ordering::Release);
+            anchor = Anchor::At {
+                epoch: "e".into(),
+                seq: replay.seq,
+            };
+            rounds.push((replay.bytes, got));
+        }
+        let all = feeder.join().expect("feeder");
+        reader.join().expect("reader");
+
+        assert!(rounds.len() > 100, "only {} attaches raced", rounds.len());
+        for (k, pair) in rounds.windows(2).enumerate() {
+            assert!(
+                *pair[0].1.lock().unwrap() == pair[1].0,
+                "attach {k}'s sink did not receive exactly what attach {} replays",
+                k + 1
+            );
+        }
+        let mut whole: Vec<u8> = rounds
+            .iter()
+            .flat_map(|(replay, _)| replay.clone())
+            .collect();
+        whole.extend(rounds.last().expect("rounds").1.lock().unwrap().iter());
+        assert!(
+            whole == all,
+            "the receivers did not see the whole stream exactly once between them"
+        );
+    }
+
     /// What a reload leans on. A session opened under a previous owner has
     /// nothing left that can reach it, so coming back under a new one must hand
     /// it over — re-tagged so a second reload doesn't adopt it again, and with
@@ -1487,6 +1848,86 @@ mod tests {
         }
     }
 
+    /// A caller that forwards its own inheritance gets exactly that: the
+    /// spawning process's environment — a server's, which no pane should see —
+    /// does not show through around it. A caller that forwards nothing (the
+    /// app's own PTYs) still inherits this process's environment.
+    #[test]
+    fn a_forwarded_base_env_replaces_the_spawning_process_env() {
+        let _serial = env_guard();
+        const ONLY_HERE: &str = "SANTREE_PTY_TEST_SPAWNER_ONLY";
+        std::env::set_var(ONLY_HERE, "the-server-s-own");
+
+        let forwarded = build_command(&OpenOpts {
+            command: "sh".into(),
+            base_env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            env: vec![("DATABASE_URL".into(), "postgres://local".into())],
+            ..Default::default()
+        });
+        let inherited = build_command(&OpenOpts {
+            command: "sh".into(),
+            ..Default::default()
+        });
+        std::env::remove_var(ONLY_HERE);
+
+        assert_eq!(
+            forwarded.get_env(ONLY_HERE),
+            None,
+            "the spawning process's env leaked around a forwarded base_env"
+        );
+        let mut names: Vec<String> = forwarded
+            .iter_extra_env_as_str()
+            .map(|(k, _)| k.to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["DATABASE_URL", "PATH", "TERM"]);
+        assert_eq!(
+            inherited.get_env(ONLY_HERE),
+            Some(std::ffi::OsStr::new("the-server-s-own")),
+            "with nothing forwarded, the session inherits this process's env"
+        );
+    }
+
+    /// A server spawns sessions for an app that was itself launched from a
+    /// Claude pane: the app forwards the env it inherited as `base_env`, and
+    /// the markers in it are as much an inheritance as the server's own. Only
+    /// `env` — the user's explicit settings — outranks the strip.
+    #[test]
+    fn a_forwarded_base_env_is_stripped_like_an_inherited_one() {
+        let cmd = build_command(&OpenOpts {
+            base_env: vec![
+                ("PATH".into(), "/opt/caller/bin:/usr/bin".into()),
+                ("SHELL".into(), "/bin/caller-sh".into()),
+                ("HOME".into(), "/nonexistent/caller-home".into()),
+                ("CLAUDECODE".into(), "1".into()),
+                ("CLAUDE_CODE_CHILD_SESSION".into(), "1".into()),
+            ],
+            env: vec![("CLAUDE_CODE_CHILD_SESSION".into(), "user-said-so".into())],
+            ..Default::default()
+        });
+
+        assert_eq!(cmd.get_env("CLAUDECODE"), None);
+        assert_eq!(
+            cmd.get_env("CLAUDE_CODE_CHILD_SESSION"),
+            Some(std::ffi::OsStr::new("user-said-so")),
+            "the user's explicit value still outranks the removal"
+        );
+        assert_eq!(
+            cmd.get_env("PATH"),
+            Some(std::ffi::OsStr::new("/opt/caller/bin:/usr/bin")),
+            "the caller's PATH replaces the server's"
+        );
+        assert_eq!(
+            cmd.get_argv()[0],
+            "/bin/caller-sh",
+            "a blank command is the caller's login shell, not the server's"
+        );
+        assert_eq!(
+            cmd.get_cwd().map(|c| c.to_os_string()),
+            Some("/nonexistent/caller-home".into())
+        );
+    }
+
     /// The same property one level down, where it actually bites: not "the
     /// builder's map is right" but "the process on the pty cannot see the
     /// marker". A real shell is asked what it inherited, because that is the
@@ -1576,7 +2017,7 @@ mod tests {
     fn existing_cwd_is_used() {
         let tmp = std::env::temp_dir();
         let tmp = tmp.to_str().unwrap();
-        assert_eq!(effective_cwd(Some(tmp)), Some(tmp.to_string()));
+        assert_eq!(effective_cwd(Some(tmp), None), Some(tmp.to_string()));
     }
 
     /// A stale worktree path must not silently run the session in `$HOME` — that
@@ -1586,13 +2027,18 @@ mod tests {
     fn missing_cwd_falls_back_to_home() {
         let home = std::env::var("HOME").ok();
         assert_eq!(
-            effective_cwd(Some("/nonexistent/santree/worktree")),
+            effective_cwd(Some("/nonexistent/santree/worktree"), None),
             home,
             "a vanished worktree falls back to $HOME"
         );
         // No cwd requested at all is the ordinary case, not a stale path.
-        assert_eq!(effective_cwd(None), home);
-        assert_eq!(effective_cwd(Some("")), home);
+        assert_eq!(effective_cwd(None, None), home);
+        assert_eq!(effective_cwd(Some(""), None), home);
+        // The caller's own HOME, when it passed one, wins over this process's.
+        assert_eq!(
+            effective_cwd(None, Some("/Users/caller".into())),
+            Some("/Users/caller".into())
+        );
     }
 
     /// A cwd that exists but is a *file* is not a usable working directory.
@@ -1601,7 +2047,7 @@ mod tests {
         let file = std::env::temp_dir().join("santree-pty-cwd-probe");
         std::fs::write(&file, b"x").unwrap();
         assert_eq!(
-            effective_cwd(Some(file.to_str().unwrap())),
+            effective_cwd(Some(file.to_str().unwrap()), None),
             std::env::var("HOME").ok()
         );
         let _ = std::fs::remove_file(&file);
@@ -1674,6 +2120,98 @@ mod tests {
                 recv_sentinel(&rx, deadline),
                 "expected exit sentinel for session {id} after close_all()"
             );
+        }
+    }
+
+    #[test]
+    fn debug_names_the_environment_and_never_shows_a_value() {
+        const SECRET: &str = "s3cr3t-value-0x42";
+        let env = || vec![("SOME_TOKEN".to_string(), SECRET.to_string())];
+        let opts = OpenOpts {
+            env: env(),
+            base_env: env(),
+            ..OpenOpts::default()
+        };
+        for shown in [format!("{opts:?}"), format!("{opts:#?}")] {
+            assert!(!shown.contains(SECRET), "a value leaked: {shown}");
+            assert!(shown.contains("SOME_TOKEN"), "{shown}");
+        }
+    }
+
+    /// The pids a script printed as `NAME:<pid>`, once every name has one.
+    fn printed_pids(rx: &mpsc::Receiver<Vec<u8>>, names: &[&str]) -> Vec<u32> {
+        let mut out = String::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let pids: Vec<Option<u32>> = names
+                .iter()
+                .map(|name| {
+                    let at = out.find(&format!("{name}:"))? + name.len() + 1;
+                    let digits: String =
+                        out[at..].chars().take_while(char::is_ascii_digit).collect();
+                    out[at + digits.len()..]
+                        .starts_with(['\r', '\n'])
+                        .then(|| digits.parse().ok())?
+                })
+                .collect();
+            if let Some(pids) = pids.into_iter().collect::<Option<Vec<_>>>() {
+                return pids;
+            }
+            assert!(Instant::now() < deadline, "no pids in {out:?}");
+            if let Ok(bytes) = rx.recv_timeout(Duration::from_millis(200)) {
+                out.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+    }
+
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// The server outlives the app, so a closed tab's background jobs must not
+    /// outlive the tab: one in the shell's own process group, and one a
+    /// job-control shell put in a group of its own.
+    #[test]
+    fn closing_a_session_ends_its_background_descendants() {
+        let _serial = pty_guard();
+        let mgr = PtyManager::new();
+        let (tx, rx) = mpsc::channel();
+        let script = "sleep 300 & echo SAME:$!; set -m; sleep 300 & echo OWN:$!; wait";
+        let id = mgr
+            .open(
+                OpenOpts {
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), script.into()],
+                    cols: 80,
+                    rows: 24,
+                    ..Default::default()
+                },
+                move |bytes| {
+                    let _ = tx.send(bytes);
+                },
+            )
+            .expect("open session");
+        let pids = printed_pids(&rx, &["SAME", "OWN"]);
+        assert!(pids.iter().all(|pid| alive(*pid)), "{pids:?}");
+
+        mgr.close(id).expect("close");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pids.iter().any(|pid| alive(*pid)) {
+            if Instant::now() > deadline {
+                let left: Vec<_> = pids.iter().filter(|pid| alive(**pid)).collect();
+                for pid in &left {
+                    let _ = std::process::Command::new("kill")
+                        .args(["-9", &pid.to_string()])
+                        .status();
+                }
+                panic!("still running after close: {left:?} of {pids:?}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }

@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail, Result};
 
 use santree_core::domain::{Repo, RepoLocation, TicketProvider};
 
-use crate::daedalus::host::{self, DaedalusHost};
+use crate::daedalus::host::DaedalusHost;
 use crate::db::Db;
 use crate::git::{self, Checkout};
 use crate::jira;
@@ -170,9 +170,12 @@ pub async fn checkout(db: &Db, daedalus: &DaedalusHost, name: &str) -> Result<Op
     };
     Ok(Some(match RepoLocation::from_db(&location) {
         RepoLocation::Local => Checkout::local(path),
-        RepoLocation::Daedalus => {
-            Checkout::daedalus(daedalus.client_within(host::CONNECT_WAIT).await?, path)
-        }
+        RepoLocation::Daedalus => Checkout::daedalus(
+            daedalus
+                .client_within(crate::sessions::CONNECT_WAIT)
+                .await?,
+            path,
+        ),
     }))
 }
 

@@ -17,3 +17,10 @@ export function splitRepoPath(repo: string): { folder: string; label: string } {
     ? { folder: repo, label: repo }
     : { folder: repo.slice(0, i), label: repo.slice(i + 1) };
 }
+
+/** Whether `path` is `root` or lies inside it, component-wise like
+ *  `Path::starts_with`: a sibling that merely shares a prefix (`/a/web` vs
+ *  `/a/webby`) is not inside. */
+export function pathWithin(root: string, path: string): boolean {
+  return path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+}

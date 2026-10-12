@@ -10,6 +10,8 @@
 //! Fallible commands return [`CmdResult`] and use `?`; the backend error is
 //! flattened to the `string` the frontend expects (see [`crate::error`]).
 
+use std::sync::Arc;
+
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tauri_specta::Event;
@@ -62,13 +64,14 @@ use crate::review_drafts;
 use crate::review_work_items;
 use crate::reviewed;
 use crate::reviews;
+use crate::server::LocalServers;
 use crate::session;
+use crate::sessions::Terminals;
 use crate::settings;
 use crate::tabs::{self, validate_term_key};
 use crate::tracker;
 use crate::usage;
 use crate::worktree;
-use santree_pty::PtyManager;
 
 /// Connected repositories.
 #[tauri::command]
@@ -480,8 +483,9 @@ pub async fn run_worktree_setup_streamed(
     on_event: Channel<crate::stream::StreamEvent>,
     db: State<'_, Db>,
     daedalus: State<'_, DaedalusHost>,
+    runs: State<'_, Arc<dyn crate::stream::RunHost>>,
 ) -> CmdResult<()> {
-    Ok(worktree::run_setup_streamed(&db, &daedalus, &repo, &issue_id, on_event).await?)
+    Ok(worktree::run_setup_streamed(&db, &daedalus, &runs, &repo, &issue_id, on_event).await?)
 }
 
 /// Stop a running setup script (the Setup tab's Stop button). Killing the child
@@ -708,18 +712,17 @@ pub async fn resume_worktree_session(
     agent_kind: AgentKind,
     db: State<'_, Db>,
     link: State<'_, DaedalusHost>,
-    manager: State<'_, PtyManager>,
+    terminals: State<'_, Arc<Terminals>>,
 ) -> CmdResult<()> {
     validate_tab_id(&tab_id)?;
     let term_key = format!("tree:{issue_id}:tab:{tab_id}");
     validate_term_key(&term_key)?;
     // Still running in another tab: opening it again would bind it to two
-    // surfaces, and the CLI refuses a second copy anyway.
-    let mut live = crate::terminal::live_terminals(&manager);
-    live.extend(link.terminals().live());
-    if crate::session::is_running(&db, &repo, &session_id, agent_kind, &live).await? {
-        return Err(anyhow::anyhow!("That session is still running in another tab.").into());
-    }
+    // surfaces, and the CLI refuses a second copy anyway. And when the terminals
+    // can't all be asked (a relaunch, the local server not adopted yet), "not
+    // seen" isn't "not running": the same conversation would start twice.
+    let live = terminals.liveness().await;
+    refuse_occupied(session::occupancy(&db, &repo, &session_id, agent_kind, &live).await?)?;
     // Also the `issue_id` gate: this errors unless the id names a worktree the
     // repo actually tracks, before anything is written under the key.
     Ok(worktree::resume_session(
@@ -732,6 +735,56 @@ pub async fn resume_worktree_session(
         agent_kind,
     )
     .await?)
+}
+
+/// A resume refused unless nothing can still be running the session.
+fn refuse_occupied(occupancy: session::Occupancy) -> Result<(), String> {
+    match occupancy {
+        session::Occupancy::Running => Err("That session is still running in another tab.".into()),
+        session::Occupancy::Unknown => Err(
+            "Terminals are still reconnecting, so santree can't tell whether that session is \
+             still running. Try again in a moment."
+                .into(),
+        ),
+        session::Occupancy::Free => Ok(()),
+    }
+}
+
+/// May a lost agent tab be relaunched where it is? A lost pane's Resume asks
+/// this before its surface reopens the tab, whose launch (`agent_session`) then
+/// resumes the tab's own stored conversation — on a triage tab, on the main
+/// checkout `validate_agent_cwd` holds it to. The tab keeps its row, so the
+/// conversation keeps its binding: closing the row first would forget it.
+///
+/// `owner` and `tab_id` name the row; the key is derived from the row santree
+/// holds, never taken from IPC.
+#[tauri::command]
+#[specta::specta]
+pub async fn check_tab_resume(
+    repo: String,
+    owner: String,
+    tab_id: String,
+    db: State<'_, Db>,
+    terminals: State<'_, Arc<Terminals>>,
+) -> CmdResult<()> {
+    let term_key = agent_tab_key(&db, &repo, &owner, &tab_id).await?;
+    let live = terminals.liveness().await;
+    Ok(refuse_occupied(
+        session::tab_occupancy(&db, &repo, &term_key, &live).await?,
+    )?)
+}
+
+/// The terminal key of `owner`'s agent tab `tab_id` in `repo`, from its row.
+async fn agent_tab_key(db: &Db, repo: &str, owner: &str, tab_id: &str) -> Result<String, String> {
+    validate_tab_id(tab_id)?;
+    let tab = tabs::get(db, repo, tab_id)
+        .await
+        .map_err(|e| format!("{e:#}"))?
+        .filter(|tab| tab.worktree_id == owner && tab.agent_kind.is_some())
+        .ok_or("no such agent tab")?;
+    let term_key = tabs::term_key(&tab.worktree_id, &tab.id);
+    validate_term_key(&term_key)?;
+    Ok(term_key)
 }
 
 /// A worktree tab's id, as the Trees model mints it (a UUID). Validated because
@@ -2422,8 +2475,20 @@ pub async fn set_keep_awake(
     on: bool,
     awake: State<'_, KeepAwake>,
     db: State<'_, Db>,
+    servers: State<'_, Arc<LocalServers>>,
 ) -> CmdResult<KeepAwakeStatus> {
-    Ok(awake::set(&db, &awake, on).await?)
+    let status = awake::set(&db, &awake, on).await?;
+    if !matches!(*awake, KeepAwake::Server { .. }) {
+        return Ok(status);
+    }
+    // The local server holds the machine awake for panes that outlive the app
+    // (docs/server.md): the toggle answers with what it confirmed. A server that
+    // is down or doesn't offer it is no failure of the toggle — it reads off,
+    // and the wish is told to the server when it connects.
+    if let Err(e) = servers.apply_keep_awake().await {
+        log::warn!("telling the santree server about keep-awake: {e:#}");
+    }
+    Ok(awake.status())
 }
 
 /// User settings, persisted in the database (seeded from defaults on first run).
@@ -2689,9 +2754,9 @@ pub async fn set_claude_global_capture(
 #[specta::specta]
 pub async fn resource_usage(
     db: State<'_, Db>,
-    manager: State<'_, santree_pty::PtyManager>,
+    terminals: State<'_, Arc<Terminals>>,
 ) -> CmdResult<ResourceUsage> {
-    Ok(crate::resources::resource_usage(&db, &manager).await?)
+    Ok(crate::resources::resource_usage(&db, terminals.local_sessions().await).await?)
 }
 
 /// Which coding agent is running in each terminal pane right now, observed in
@@ -2705,12 +2770,12 @@ pub async fn resource_usage(
 #[tauri::command]
 #[specta::specta]
 pub async fn agent_processes(
-    manager: State<'_, santree_pty::PtyManager>,
+    terminals: State<'_, Arc<Terminals>>,
     daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<AgentProcess>> {
     // A Daedalus project's panes run on the box, so their process table is the
     // box's (`exec.run ps`, the same parse); both answers are identity only.
-    let roots = crate::terminal::pane_roots(&manager);
+    let roots = crate::terminal::pane_roots(&terminals.local_sessions().await);
     let (mut found, remote) = tokio::join!(
         crate::agent_procs::detect(&roots),
         daedalus.agents().detect(&daedalus),
@@ -2730,13 +2795,12 @@ pub async fn agent_processes(
 #[specta::specta]
 pub async fn session_states(
     db: State<'_, Db>,
-    manager: State<'_, PtyManager>,
-    daedalus: State<'_, DaedalusHost>,
+    terminals: State<'_, Arc<Terminals>>,
 ) -> CmdResult<Vec<SessionState>> {
     // A Daedalus pane's process runs on the box and outlives a dropped link;
-    // it is live until the box says it ended.
-    let mut live = crate::terminal::live_terminals(&manager);
-    live.extend(daedalus.terminals().live());
+    // it is live until the box says it ended. `liveness` answers for every host,
+    // and says when it couldn't: the join then keeps every agent as it was.
+    let live = terminals.liveness().await;
     Ok(crate::hooks::session_states(&db, live).await?)
 }
 
@@ -3004,7 +3068,10 @@ pub async fn linear_list_issues(repo: String, db: State<'_, Db>) -> CmdResult<Ve
 /// the returned path is what the UI shows them instead.
 #[tauri::command]
 #[specta::specta]
-pub async fn export_logs(app: AppHandle) -> CmdResult<LogExport> {
+pub async fn export_logs(
+    app: AppHandle,
+    servers: State<'_, Arc<LocalServers>>,
+) -> CmdResult<LogExport> {
     let log_dir = app
         .path()
         .app_log_dir()
@@ -3020,6 +3087,9 @@ pub async fn export_logs(app: AppHandle) -> CmdResult<LogExport> {
         .map_err(|_| anyhow::anyhow!("no folder to save into"))?;
     let version = app.package_info().version.to_string();
     let now = chrono::Local::now().to_rfc3339();
+    // Asked here, before the blocking write: each question is bounded, and a
+    // server that is wedged is itself something the report says.
+    let server_report = servers.report().await;
 
     let export = tokio::task::spawn_blocking(move || {
         let dest = dest_dir.join(diagnostics::file_name(&now));
@@ -3027,6 +3097,7 @@ pub async fn export_logs(app: AppHandle) -> CmdResult<LogExport> {
             &dest,
             &version,
             &now,
+            &server_report,
             &diagnostics::log_paths(&log_dir, &data_dir),
         )
     })
@@ -3043,6 +3114,27 @@ pub async fn export_logs(app: AppHandle) -> CmdResult<LogExport> {
         bytes: export.bytes as f64,
         files: export.files,
     })
+}
+
+/// Open the app's log directory in the file browser, where `santree.log`, the
+/// server's log and the rotated files live. Takes no argument: the directory is
+/// the app's own, resolved here, and nothing from the frontend reaches the
+/// opener.
+#[tauri::command]
+#[specta::specta]
+pub async fn reveal_logs(app: AppHandle) -> CmdResult<()> {
+    let dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|_| anyhow::anyhow!("the log directory is unavailable"))?;
+    tokio::task::spawn_blocking(move || {
+        // Absent until something has logged; opening nothing would be a failure
+        // to explain.
+        std::fs::create_dir_all(&dir)?;
+        openers::open_dir(&dir)
+    })
+    .await??;
+    Ok(())
 }
 
 /// Forget every Linear read cache, so the refetch the frontend issues right
@@ -3178,6 +3270,81 @@ mod tests {
         ] {
             assert!(validate_tab_id(bad).is_err(), "accepted {bad:?}");
         }
+    }
+
+    /// A lost tab's Resume names its row by owner and id: the key comes from the
+    /// row santree holds, so a caller can name only an agent tab that exists on
+    /// the surface it says — never a shell, another surface's tab, or a key.
+    #[tokio::test]
+    async fn a_resumed_tab_is_keyed_by_its_own_agent_row() {
+        let (base, db) = test_db("agent-tab-key").await;
+        sqlx::query(
+            "INSERT INTO worktree_tabs
+             (id, repo, worktree_id, kind, agent_kind, title, position)
+             VALUES ('t1', 'repo-a', 'triage:AK-1', 'agent', 'Claude', 'Claude Code', 0),
+                    ('sh', 'repo-a', 'triage:AK-1', 'terminal', NULL, 'Terminal', 1),
+                    ('w1', 'repo-a', 'AK-2', 'agent', 'Codex', 'Codex', 0)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            agent_tab_key(&db, "repo-a", "triage:AK-1", "t1").await,
+            Ok("triage:AK-1:tab:t1".to_string())
+        );
+        assert_eq!(
+            agent_tab_key(&db, "repo-a", "AK-2", "w1").await,
+            Ok("tree:AK-2:tab:w1".to_string())
+        );
+        for (repo, owner, id) in [
+            ("repo-a", "triage:AK-1", "sh"),       // a shell has no session
+            ("repo-a", "triage:AK-9", "t1"),       // another ticket's surface
+            ("repo-a", "AK-1", "t1"),              // a worktree that isn't its owner
+            ("repo-b", "triage:AK-1", "t1"),       // another repo's
+            ("repo-a", "triage:AK-1", "nope"),     // no such row
+            ("repo-a", "triage:AK-1", "t1:tab:x"), // a key, not an id
+        ] {
+            assert!(
+                agent_tab_key(&db, repo, owner, id).await.is_err(),
+                "accepted {repo} {owner} {id}"
+            );
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A triage session, the tab's as much as the investigation's, runs on the
+    /// registered root and nowhere else.
+    #[tokio::test]
+    async fn a_triage_tab_runs_on_the_main_checkout_only() {
+        let (base, db) = test_db("triage-tab-cwd").await;
+        let repo = base.join("repo");
+        let worktree = repo.join(".santree/worktrees/AK-1");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let root = std::fs::canonicalize(&repo).unwrap();
+        let check = |cwd: std::path::PathBuf| {
+            let (db, root, repo) = (&db, root.clone(), repo.clone());
+            async move {
+                validate_agent_cwd(
+                    db,
+                    "registered",
+                    "triage:AK-1:tab:t1",
+                    &cwd,
+                    &root,
+                    repo.to_str().unwrap(),
+                    false,
+                )
+                .await
+            }
+        };
+        assert!(check(root.clone()).await.is_ok());
+        assert_eq!(
+            check(std::fs::canonicalize(&worktree).unwrap())
+                .await
+                .unwrap_err(),
+            "triage sessions must use the registered repository root"
+        );
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// A scratch `mcp` directory, named for the case that owns it.

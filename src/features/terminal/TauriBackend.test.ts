@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { commands } from "../../bindings";
+import { adoptedMap } from "./adoptedTabs";
 import { paneAddress } from "./paneAddress";
 import { TauriBackend } from "./TauriBackend";
 import type { OpenOpts, OutputHandlers } from "./types";
@@ -209,7 +210,7 @@ describe("TauriBackend", () => {
           { id: 4, label: "tree:b", agentKind: null, cwd: "/repo", command: "/bin/zsh" },
         ],
       });
-      const adopted = await new TauriBackend().adopt("page-2");
+      const adopted = adoptedMap(await new TauriBackend().adoptSessions("page-2"));
       expect(adopted).toEqual(
         new Map([
           [paneAddress("tree:a", "Claude"), 3],
@@ -242,15 +243,31 @@ describe("TauriBackend", () => {
           },
         ],
       });
-      const adopted = await new TauriBackend().adopt("page-2");
+      const adopted = adoptedMap(await new TauriBackend().adoptSessions("page-2"));
       expect(adopted.size).toBe(2);
       expect(adopted.get(paneAddress("ai-review:acme/app#7", "Claude"))).toBe(5);
       expect(adopted.get(paneAddress("ai-review:acme/app#7", "Codex"))).toBe(6);
     });
 
+    /** The tab an unvisited surface gets needs what the address alone can't say:
+     *  where the session runs, and its provider. */
+    it("hands the sessions over in full for the panes that have no tab yet", async () => {
+      const data = [
+        { id: 3, label: "tree:a", agentKind: "Claude" as const, cwd: "/repo", command: "claude" },
+      ];
+      terminalAdopt.mockResolvedValue({ status: "ok", data });
+      expect(await new TauriBackend().adoptSessions("page-2")).toEqual(data);
+      expect(terminalAdopt).toHaveBeenCalledWith("page-2");
+    });
+
+    it("surfaces a refused adoption as an error rather than as nothing", async () => {
+      terminalAdopt.mockResolvedValue({ status: "error", error: "no server" });
+      await expect(new TauriBackend().adoptSessions("page-2")).rejects.toThrow("no server");
+    });
+
     it("is empty on a first load", async () => {
       terminalAdopt.mockResolvedValue({ status: "ok", data: [] });
-      expect((await new TauriBackend().adopt("page-1")).size).toBe(0);
+      expect(adoptedMap(await new TauriBackend().adoptSessions("page-1")).size).toBe(0);
     });
   });
 

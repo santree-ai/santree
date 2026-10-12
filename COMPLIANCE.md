@@ -3,8 +3,9 @@
 santree runs **real, unmodified CLI binaries in a real terminal**. A kernel PTY
 hosts the vendor's own process and we stream raw bytes to and from it. The user
 is a human driving their own session, as in iTerm or VS Code's integrated
-terminal. santree is **not** a terminal server, an agent harness, or an
-automation driver.
+terminal. santree is **not** an agent harness or an automation driver. Its one
+server (below) is session persistence, as tmux is: it keeps the user's own
+terminals alive and relays their keystrokes, and decides nothing.
 
 Each agent CLI has its own terms of service. Staying a plain terminal emulator
 keeps us clearly on the right side of them. The moment the app handles tokens,
@@ -15,10 +16,15 @@ and the user's vendor account carries the consequence.
 > **If a change introduces output parsing that influences input, token handling,
 > or an unattended loop, it violates these constraints and must not be merged.**
 
-Most of this file is now executable. `src-tauri/src/compliance.rs` and
+Most of this file is enforced by the build. Where a rule is about who may call what —
+bytes into a terminal, a terminal spawned, a pane opened — the compiler holds
+it: the input types in `src-tauri/src/terminal.rs` (`terminal::input`) and the
+`disallowed-methods` rules in the workspace's `clippy.toml`, which CI's
+`cargo clippy --workspace --all-targets -- -D warnings` turns into build
+failures. `src-tauri/src/compliance.rs` and
 `src/features/terminal/compliance.test.ts` hold the tests named below; each was
 verified to fail on a real violation, not merely to pass. What stays in prose is
-what a test cannot judge.
+what neither can judge.
 
 ---
 
@@ -29,13 +35,27 @@ transcript reconciliation, or the status line is ever written back to a PTY.
 **The only bytes santree writes to a terminal are the user's keystrokes and the
 single human-initiated seed prompt.** Orchestration stops at: choose a cwd,
 place the pane, send one seed.
-→ `only_the_terminal_adapter_writes_bytes_into_a_pty`, and four frontend tests
-that no PTY output is decoded and fed back.
+→ Compiler-enforced. A terminal takes input only as `Keystrokes` or a
+`LaunchLine` (`terminal::input`). They have private fields and no constructor
+function: `Keystrokes` and `LaunchRequest` exist only as the deserialized
+arguments of `terminal_write` and `terminal_seed`, and a `LaunchLine` only by
+consuming a `LaunchRequest`. The
+facade, a remote pane's input queue (so its output pump cannot answer the
+program) and the in-app write all take one of them or a `PtyInput` made from
+one; none is `Clone`, so a launch line is typed at most once per request (the
+frontend latches a pane's repeats). Beneath them,
+`clippy.toml` forbids `PtyManager::write` and `RemoteClient::pty_write`
+everywhere but the facade's in-app write and a pane's writer. The exceptions are
+pinned by `the_lint_exceptions_are_exactly_the_sanctioned_sites`, the raw
+`call::<m::PtyWrite>` by `only_the_client_and_the_host_name_the_pty_write_method`,
+and four frontend tests pin that no PTY output is decoded and fed back.
 
 **No unattended loop.** No auto-responders, no retry or "keep going" loops, no
 always-on drivers. santree never starts, resumes, retries, or continues a
 session on the user's behalf. A `--resume` seed is built only when a human opens
-the tab.
+the tab. Closing a tab hangs up every process on its terminal (a tty `SIGHUP`,
+`crates/pty` `hang_up`): that is the user's close, not control of the vendor
+CLI's loop.
 
 **No harness behavior.** Do not wrap, re-implement, or spoof any agent's control
 loop or SDK. No outbound request may claim to be a vendor CLI.
@@ -87,7 +107,7 @@ tree with real consequences: Claude Code reads an inherited
 off**, so the session becomes unresumable and invisible to Session History. Two
 of the markers are worse than misleading — `CLAUDE_CODE_MESSAGING_SOCKET` and
 `CLAUDE_CODE_MESSAGING_TOKEN` are the launching session's IPC channel and its
-bearer token, which santree was forwarding into every agent PTY it spawned.
+bearer token, which santree would otherwise forward into every agent PTY.
 `crates/pty`'s `INHERITED_SESSION_MARKERS` removes them from the inherited env
 before a session is built. The list is narrow by design — only what a parent
 agent process writes into a child's env, never a knob a user sets for themselves
@@ -99,15 +119,18 @@ name still wins. Removal is the fix: santree does not set
 marker it could simply decline to pass on. Codex has no equivalent: it writes
 `CODEX_SESSION_ID` / `CODEX_THREAD_ID` but never reads them back, so nothing is
 stripped for it.
-The strip belongs to *spawning*, not to one module: santree runs a process
-behind a PTY in two places, and background runs (setup scripts, builds) go
-through the second one. Both call the same exported helper with the same list —
-a copied list is a list that drifts.
+The strip belongs to *spawning*, not to one module, and there is one place
+that spawns behind a PTY: `crates/pty`, which the in-app manager and the santree
+server's host both use. `clippy.toml` holds it there (`CommandBuilder::new` is
+forbidden everywhere but crates/pty's command builder), and setup scripts are
+panes on the terminal facade, so they spawn where terminals do; a run on the
+local server gets its environment through `base_env`, whose deny-list is built
+from the same exported list. A copied list is a list that drifts.
 → `inherited_session_markers_are_stripped_but_a_user_set_value_wins`,
 `a_spawned_process_does_not_inherit_the_nested_session_marker`,
 `a_users_own_persistence_setting_is_not_stripped`,
-`a_background_run_does_not_inherit_the_launching_sessions_markers`,
-`every_pty_spawn_site_strips_the_inherited_session_markers`
+`every_inherited_session_marker_is_denied`,
+`the_inherited_session_markers_are_listed_once`
 
 **Claude subscription usage.** `claude_usage.rs` reads Claude Code's own OAuth
 token — from the keychain, else its credentials file, via a fixed argv with the
@@ -228,10 +251,12 @@ cap. There is deliberately **no login command**: starting a ChatGPT login was a
 protocol call, the CLI's own is an interactive browser flow, and santree points
 the user at `codex login` in a terminal rather than reimplementing it.
 
-Removing it removed a real cost as well as a rule to keep: the server outlived
-the app that started it (87 orphans on one developer machine, the oldest four
-days old), and it held Codex's per-thread writer lock, which is what made a
-resumed thread fail with "already has an active writer".
+Removing it removed a real cost as well as a rule to keep: that `codex
+app-server` process outlived the app that started it with nothing to retire it
+(87 orphans on one developer machine, the oldest four days old), and it held
+Codex's per-thread writer lock, which is what made a resumed thread fail with
+"already has an active writer". (The santree server below outlives the app on
+purpose, holds only sessions the user opened, and retires when it has none.)
 
 **Never credential material**, before or after: Codex owns its auth storage, and
 santree does not read `~/.codex/auth.json` or any other credential file. Nothing
@@ -324,7 +349,7 @@ Both wideners are inert on the read-only surfaces, which stay pinned to
 `the_work_surface_does_not_override_the_users_own_sandbox`,
 `nothing_asks_codex_to_bypass_its_sandbox`,
 `network_access_is_opt_in_and_never_reaches_a_read_only_surface`,
-`a_review_session_never_gets_the_network_even_when_the_user_opted_in`,
+`address_review_never_gets_the_network_even_when_the_user_opted_in`,
 `an_unresolvable_git_directory_drops_the_grant_rather_than_widening_it`
 
 **A draft becomes a comment only on a click.** `review_drafts::publish` is the
@@ -347,8 +372,9 @@ never status** — the state ladder is still the hooks, then the title — and
 nothing derived from it is written back into a PTY, gates a launch, chooses a
 prompt, or becomes an argument to a command. It reaches the sidebar as a provider
 mark and stops. The `ps` argv is a constant, so no IPC value reaches it. The
-inability to write is structural rather than a promise: `agent_procs.rs` may not
-name a `PtyManager` at all, so it holds no handle on a terminal.
+inability to write is structural rather than a promise: whatever handle it held,
+nothing outside `write_pty` can make the input a terminal accepts, and the raw
+writes beneath it are lint errors outside their sanctioned sites.
 
 The listing selects `ps`'s `command` column, so the read *transits* every host
 process's full argv — which on any machine can carry a secret somebody put on a
@@ -365,21 +391,109 @@ is read there — the same constant `ps` argv through `exec.run`, the same parse
 the same foreground walk (`daedalus/agents.rs`), identity only. The full listing
 crosses the link once per read and is parsed here the way the local one is: only
 `argv[0]` basenames survive it.
-→ `only_the_terminal_adapter_writes_bytes_into_a_pty` (its allowlist is what
-keeps that module away from the PTY)
+→ the input types and `clippy.toml` (above)
+
+**Hook binary freshness.** The `santree-hook` that agents' hooks run is a copy in
+the user's data dir (`<app_data>/bin`), because the bundle path moves on every
+update. A process with the user's uid can write there as it can write the bundle,
+so the copy is re-compared with the bundle byte for byte, and healed, every time a
+hook path is about to be written. That is a freshness check, **not integrity**:
+nothing checks what the bundle itself is, and a swap between two such checks
+stands until the next — the same window as a swapped bundle's, documented in
+docs/server.md, "Hooks". The release asserts the shipped hook is signed by the
+team with the hardened runtime. A launch line queued for a terminal that cannot
+be reached is dropped after 45 s instead of being typed on a later
+reconnect, so a command the user asked for long ago is not run unattended.
+→ `a_tampered_stable_copy_is_healed_at_the_next_emission`,
+`a_launch_line_queued_across_a_long_outage_is_not_typed_when_the_link_returns`
 
 **Terminal reattach.** A session survives a webview reload: the PTY lives in the
-Rust process and keeps a bounded ring of its recent output
-(`docs/terminals.md`). The ring is written by the reader
-thread and read only by the attach path; nothing inspects it, and its only
-consumer is an xterm that would have received the same bytes live.
+Rust process (or, on a signed build and under `SANTREE_SERVER=1`, in the detached
+santree server, below) and keeps a bounded ring of its recent output
+(`docs/terminals.md`, `docs/server.md`). The ring is written by the reader
+thread and read by the attach path (the app's, or the server's `pty.attach`) and
+by the mode tracker below; nothing else inspects it, and its only consumer is an
+xterm that would have received the same bytes live.
 
-> **If a mode mirror is ever built** — parsing output to restore terminal modes
-> on reattach, as Phase 5 of that document proposes — it must extract a fixed,
-> enumerated set of modes and nothing else, must never emit a reply toward the
-> PTY, and must answer no query sequence: the webview's xterm is the single
-> query-reply authority. It does not exist today, and this paragraph grants
-> nothing until it does.
+**Mode restoration reads output, within a fixed bound.** The ring's mode tracker
+(`crates/pty/src/modes.rs`) follows a fixed, enumerated set of display modes and
+nothing else, writes nothing toward the PTY, and answers no query: the webview's
+xterm is the single query-reply authority. Its only product is a preamble of
+DECSETs written into a viewer ahead of a replay. Widening the set, or giving it
+any other consumer, is a change to this paragraph.
+
+**The santree server is session persistence, like tmux.** `santree-server`
+(`crates/server`, serving `crates/host`) holds the PTYs the user opened so a
+terminal and the agent in it survive a quit, a crash or an update of the app.
+It is the same PTY as before, one process further: it relays the bytes of a
+`pty.write` request and nothing else, and **starts, resumes and retries
+nothing** — it opens a session when the app asks, which is when a human opened
+the tab, and it never decides to. It reads output for exactly one purpose: the
+tracker (`crates/pty/src/modes.rs`) lives in the PTY ring (`crates/pty` `Ring`), so
+the in-app manager does it too, and follows the last state of a fixed list of
+display modes (bracketed paste, mouse protocol and encoding, focus reporting,
+application cursor keys and keypad, alt screen) so a viewer that attaches after
+the DECSET scrolled out can be handed a short preamble of the same sequences *before the replay*. The tracker
+reads output only to replay display modes: it answers no query and writes nothing
+to the PTY. Restored modes do change how the emulator encodes the user's own
+keystrokes (a bracketed paste, a mouse report), but as the program asked for them
+and exactly as its own DECSET would have; the emulator encodes the user's input as
+the program requested, and santree sources and types nothing. Everything else about
+the output is uninspected. It
+retires when it holds no session and no client. It is not a second way into a
+terminal: `clippy.toml` forbids `PtyManager::write` in the host everywhere but
+its sessions' input thread, that thread is fed only by `Host::pty_input`, and
+`pty_input` is forbidden everywhere but the `pty.write` handler — so a write
+through any handle on the PTY table, `Host::pty()` included, fails the build.
+Spawning is held the same way: `PtyManager::open` only in the `pty.open`
+handler (and the app's in-app arm). (`server.keepAwake` runs
+`caffeinate` and touches no session; the app's Restart, Stop and End-now
+commands send `server.stop`, which closes sessions and writes nothing to one,
+each behind a user click.)
+
+Every agent in a santree PTY runs as the user's own uid, so a socket that
+admitted by uid would let one agent type into another's terminal. The server
+therefore admits **santree.app alone, by code signature** (the app's identifier
+and the release's Team ID, read from the peer's audit token, never its pid), and
+the app expects the same of the server. A signed server also serves only when
+santree.app launched it, which it asks over its ready socket — and a ready
+socket is accepted only as an unnamed socketpair end, because on macOS a client
+connected to a *named* socket answers with the listener's identity, which would
+let an agent hand a server a socket santree.app listens on. A session's
+environment is the one the app forwards (`baseEnv`, required of the server): the
+server's own environment, which is whatever launched it, never becomes one.
+`baseEnv` is a name-blind pass-through of the app's ambient environment minus the
+`SANTREE_`/`TAURI_`/`WEBKIT_`/`DYLD_`/`LD_` deny-list and the nested-session
+markers (parity with how in-app terminals inherit it, and never a selection of
+any vendor's variables), and the project secrets `resolve_env` reads travel only
+in `env`. It is a **relay** of values the app process already inherited, read when a
+session opens and written nowhere; no variable is looked up by name and no
+credential file is read to build it. A same-user process connecting in a loop can
+only delay the app: signature checks run four at a time, at most 32 connections
+wait for one, and the rest are closed at once.
+
+**The bound is the signature.** Unsigned, dev and Linux builds do not use the
+server by default. Opting into it there is the documented exception: admission
+is by uid alone, so **any agent in any of that user's sessions could drive
+another's terminal.** That is the cost of a dev build, not something the app
+does on the user's behalf, and a signed release never runs that way (a build with
+its Team ID baked in refuses to serve unless it can confirm its own signature).
+→ the input types and `clippy.toml` (above), which also hold that a pane is
+opened, attached, adopted and closed by the adapter alone (`Terminals`' and
+`RemoteTerminals`' `open`, `attach`, `adopt` and `close` are forbidden outside
+`terminal.rs` and the facade's own arms);
+`the_lint_exceptions_are_exactly_the_sanctioned_sites`,
+`only_the_client_and_the_host_name_the_pty_write_method`,
+`the_session_environment_builder_names_no_vendor_variable`,
+`a_signed_server_serves_only_for_santree_app`,
+`a_ready_fd_connected_to_a_named_listener_is_refused`,
+`a_named_ready_socket_is_refused_signed_or_not`,
+`a_release_build_serves_only_as_its_own_team`,
+`a_refused_peer_is_closed_unanswered`,
+`connections_waiting_for_a_check_are_capped_and_logged_once_per_burst`,
+`a_host_requiring_a_base_env_refuses_an_open_without_one`,
+`an_open_without_a_base_env_is_refused`,
+`a_forwarded_base_env_is_the_whole_inheritance`
 
 ---
 

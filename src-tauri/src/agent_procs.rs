@@ -234,6 +234,53 @@ mod tests {
         assert_eq!(agent(600), None, "a zombie is nobody's foreground");
     }
 
+    /// With a local santree server the panes' roots are the server's children,
+    /// outside the app's subtree entirely (it hangs from launchd after a
+    /// relaunch). The walk starts from each pane's own root pid
+    /// (`SessionInfo.pid`), so it finds the agent wherever the pane lives, and
+    /// still answers identity only.
+    #[test]
+    fn panes_hosted_by_a_server_outside_the_apps_subtree_are_attributed() {
+        let listing = "\
+    1     0   0.0  24688 Ss   /sbin/launchd
+  100     1   1.5  50000 S    /Applications/santree.app/Contents/MacOS/santree
+  150     1   0.2   9000 S    /Users/me/Library/Application Support/com.santree.desktop/server/r1/santree-server
+  250   150   0.0   4000 Ss   /bin/zsh -l
+  251   250  12.5 300000 S+   /opt/homebrew/bin/claude --settings /tmp/h.json
+  260   150   1.0  70000 Ss+  /opt/homebrew/bin/codex
+  270   150   0.0   4000 Ss+  /bin/zsh -l
+";
+        let tree = ProcTree::new(parse_ps(listing));
+        let pane = |key: &str| crate::terminal::LiveTerminal {
+            term_key: key.to_string(),
+            agent_kind: None,
+        };
+        let found = attribute(
+            &tree,
+            &[
+                (pane("tree:A"), 250),
+                (pane("tree:B"), 260),
+                (pane("tree:C"), 270),
+            ],
+        );
+        let by_key = |key: &str| {
+            found
+                .iter()
+                .find(|p| p.term_key == key)
+                .map(|p| p.agent_kind)
+        };
+        assert_eq!(by_key("tree:A"), Some(AgentKind::Claude));
+        assert_eq!(by_key("tree:B"), Some(AgentKind::Codex));
+        assert_eq!(
+            by_key("tree:C"),
+            None,
+            "a plain shell is unknown, not defaulted"
+        );
+        // …and the walk stays inside each pane: the server above it, whose
+        // other children are other panes, claims nothing for this one.
+        assert_eq!(attribute(&tree, &[(pane("tree:C"), 270)]), Vec::new());
+    }
+
     /// The scan over the real thing: no panes means no `ps` at all, and this
     /// process's own pane-less pid attributes to nothing.
     #[tokio::test]

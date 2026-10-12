@@ -48,7 +48,10 @@ const REAL_ALLOWED: Partial<Commands> = {
   listRepos: async () => ({ status: "ok", data: [] }),
   sessionStates: async () => ({ status: "ok", data: [] }),
   agentProcesses: async () => ({ status: "ok", data: [] }),
-  terminalSessions: async () => ({ status: "ok", data: [] }),
+  terminalInventory: async () => ({
+    status: "ok",
+    data: { sessions: [], complete: true, orphans: [] },
+  }),
 };
 const realCalls: string[] = [];
 /** Records every real call; anything outside `REAL_ALLOWED` throws, so a

@@ -4,7 +4,10 @@
  * and lets the nav tab show a live count. The sessions are rendered once, in a
  * persistent layer (see `TerminalLayer`), regardless of the active route.
  */
-import { createContext, type ReactNode, useContext, useEffect, useState } from "react";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
+
+import type { AdoptedSession } from "../../bindings";
+import { adoptedMap } from "./adoptedTabs";
 import { fixtureTerminalSpecs } from "./fixtureSeam";
 import { type TerminalTabs, useTerminalTabs } from "./orchestrator";
 import { PAGE_OWNER } from "./pageOwner";
@@ -28,49 +31,46 @@ const TerminalsContext = createContext<TerminalTabs | null>(null);
  */
 interface Adopted {
   sessions: Map<string, SessionId>;
+  /** Every session adopted so far, in full, for the tabs they have not got yet
+   *  (see `adoptedTabs`). Grows when a server that came up late is adopted. */
+  panes: AdoptedSession[];
   ready: boolean;
 }
 
-const EMPTY: Adopted = { sessions: new Map(), ready: false };
+const EMPTY: Adopted = { sessions: new Map(), panes: [], ready: false };
 
 const AdoptedContext = createContext<Adopted>(EMPTY);
+const AdoptAgainContext = createContext<() => Promise<void>>(async () => {});
 
 export function TerminalsProvider({ children }: { children: ReactNode }) {
   // Empty outside the dev screenshot fixture mode — see `fixtureSeam.ts`.
   const value = useTerminalTabs(fixtureTerminalSpecs());
-  const adopted = useAdoptSessions();
+  const { adopted, adoptAgain } = useAdoptSessions();
   return (
     <AdoptedContext.Provider value={adopted}>
-      <TerminalsContext.Provider value={value}>{children}</TerminalsContext.Provider>
+      <AdoptAgainContext.Provider value={adoptAgain}>
+        <TerminalsContext.Provider value={value}>{children}</TerminalsContext.Provider>
+      </AdoptAgainContext.Provider>
     </AdoptedContext.Provider>
   );
 }
 
 /**
- * Claim the sessions a previous page load left running.
- *
- * Runs here because this provider is mounted once, at the root, for the life of
- * the document — the same lifetime the owner tag describes. It only ever claims
- * sessions tagged with a *different* owner, so a terminal this page opened can't
- * be caught by it, and re-tagging happens in the backend, which makes it safe to
- * run twice (StrictMode's double-mount does exactly that).
- *
- * A session nobody claims is deliberately left alone rather than reaped. The
- * only way to reach that state is a surface that vanished across a reload —
- * which cannot happen from the reload itself, since it changes nothing on disk —
- * so the cost is a shell that idles until the app exits, and the alternative is
- * killing work on a guess.
- */
-/**
- * The adoption, run once per document.
+ * The adoption of a previous page load's sessions, run once per document — and
+ * again, on request, when a server that was not up yet comes up.
  *
  * Module scope for the same reason `PAGE_OWNER` is: this is a property of the
- * page load, not of a component, and it must happen exactly once. Adoption is
- * also *not* idempotent from the caller's side — it re-tags what it returns, so
- * a second call finds every session already claimed and answers with nothing.
- * Run from an effect, React's double-invoke would do exactly that and hand the
- * empty second answer to the panes, which would then each spawn a duplicate of
- * the session still running behind it.
+ * page load, not of a component, and the first run must happen exactly once.
+ * Adoption is also *not* idempotent from the caller's side — it re-tags what it
+ * returns, so a second call finds every session already claimed and answers with
+ * nothing. Run from an effect, React's double-invoke would do exactly that and
+ * hand the empty second answer to the panes, which would then each spawn a
+ * duplicate of the session still running behind it.
+ *
+ * That same property is what makes the *later* runs safe: a re-run answers only
+ * with sessions this page has not claimed, so it can neither steal a held pane
+ * nor adopt one twice. They are queued behind each other and the first, though,
+ * because two in flight at once could both see the same session as unclaimed.
  *
  * Best effort, and deliberately silent on failure: the worst outcome is the
  * status quo before this existed (panes spawn fresh sessions), which is never
@@ -78,25 +78,55 @@ export function TerminalsProvider({ children }: { children: ReactNode }) {
  * outside Tauri — tests, a browser preview — so this must tolerate the binding
  * rejecting outright.
  */
-let adoption: Promise<Map<string, SessionId>> | null = null;
+let adoption: Promise<AdoptedSession[]> | null = null;
+let adoptChain: Promise<unknown> = Promise.resolve();
 
-function adoptOnce(): Promise<Map<string, SessionId>> {
-  adoption ??= tauriBackend.adopt(PAGE_OWNER).catch(() => new Map<string, SessionId>());
+function enqueueAdoption(): Promise<AdoptedSession[]> {
+  const run = adoptChain.then(() => tauriBackend.adoptSessions(PAGE_OWNER).catch(() => []));
+  adoptChain = run;
+  return run;
+}
+
+function adoptOnce(): Promise<AdoptedSession[]> {
+  adoption ??= enqueueAdoption();
   return adoption;
 }
 
-function useAdoptSessions(): Adopted {
+/** Forget the per-document adoption, so a test can play a page load again. */
+export function resetAdoption(): void {
+  adoption = null;
+  adoptChain = Promise.resolve();
+}
+
+/** Fold newly adopted sessions into what is held. Idempotent per session id. */
+function merge(held: Adopted, found: AdoptedSession[]): Adopted {
+  const fresh = found.filter((s) => !held.panes.some((p) => p.id === s.id));
+  if (fresh.length === 0 && held.ready) return held;
+  return {
+    sessions: new Map([...held.sessions, ...adoptedMap(fresh)]),
+    panes: [...held.panes, ...fresh],
+    ready: true,
+  };
+}
+
+function useAdoptSessions(): { adopted: Adopted; adoptAgain: () => Promise<void> } {
   const [adopted, setAdopted] = useState<Adopted>(EMPTY);
   useEffect(() => {
     let cancelled = false;
-    adoptOnce().then((sessions) => {
-      if (!cancelled) setAdopted({ sessions, ready: true });
+    adoptOnce().then((found) => {
+      if (!cancelled) setAdopted((held) => merge(held, found));
     });
     return () => {
       cancelled = true;
     };
   }, []);
-  return adopted;
+  // Not cancellable by an unmount: the provider lives for the document, and a
+  // claim already made in the backend must reach the panes that will want it.
+  const adoptAgain = useCallback(async () => {
+    const found = await enqueueAdoption();
+    setAdopted((held) => merge(held, found));
+  }, []);
+  return { adopted, adoptAgain };
 }
 
 export function useTerminals(): TerminalTabs {
@@ -108,4 +138,10 @@ export function useTerminals(): TerminalTabs {
 /** The inherited sessions for this page load, and whether that is settled yet. */
 export function useAdoptedSessions(): Adopted {
   return useContext(AdoptedContext);
+}
+
+/** Adopt again: for a server that came up after the page-load adoption gave up
+ *  waiting for it. Never closes or replaces anything — see {@link adoptOnce}. */
+export function useAdoptAgain(): () => Promise<void> {
+  return useContext(AdoptAgainContext);
 }

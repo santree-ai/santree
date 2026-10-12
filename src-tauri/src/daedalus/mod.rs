@@ -15,7 +15,6 @@ pub mod host;
 pub mod icons;
 pub mod settings;
 pub mod setup;
-pub mod terminals;
 
 #[cfg(test)]
 mod agent_tests;
@@ -87,7 +86,7 @@ async fn list(link: &DaedalusHost) -> Result<WorkspacesResult, DaedalusWorkspace
         workspaces: vec![],
     };
     let client = link
-        .client_within(host::CONNECT_WAIT)
+        .client_within(crate::sessions::CONNECT_WAIT)
         .await
         .map_err(|NotConnected { link }| unlisted(link, false))?;
     if !link
@@ -182,11 +181,11 @@ fn validate_server_path(path: &str, name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::sessions::testkit::fast;
     use std::sync::Arc;
 
     use santree_remote_client::fake::{FakeAgent, FakeDaemon, FakeOptions};
     use santree_remote_client::proto::WorkspaceSync;
-    use santree_remote_client::{ClientOptions, HostOptions};
 
     use super::*;
 
@@ -258,15 +257,6 @@ mod tests {
         assert_eq!(bare.name, "notes");
 
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    fn fast() -> HostOptions {
-        HostOptions {
-            backoff_min: Duration::from_millis(20),
-            backoff_max: Duration::from_millis(200),
-            hello_timeout: Duration::from_secs(5),
-            client: ClientOptions::default(),
-        }
     }
 
     fn row(name: &str) -> Workspace {

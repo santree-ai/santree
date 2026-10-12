@@ -8,6 +8,8 @@ members = [
     "crates/remote-proto",
     "crates/remote-tls",
     "crates/remote",
+    "crates/host",
+    "crates/server",
 ]
 resolver = "2"
 
@@ -46,3 +48,12 @@ debug = 1
 strip = false
 panic = "abort"
 opt-level = "s"
+
+# The santree server (`cargo build --profile server -p santree-server`): the
+# release profile, except that a panic unwinds. Under the workspace's `abort` a
+# panic in any request handler would take the whole server down, and with it
+# every terminal it holds (each shell gets SIGHUP). Unwinding, santree-host
+# catches it at the request, answers `io` and serves on.
+[profile.server]
+inherits = "release"
+panic = "unwind"

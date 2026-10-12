@@ -85,16 +85,19 @@ export interface TerminalEmbed {
    *  the layer, not inside its host, so a host that cares where the user is
    *  working (a split group taking focus) can't see that press itself. */
   onActivate?: () => void;
+  /** The surface's own Resume, for a pane whose session is lost. A surface that
+   *  shows a "session ended" offer once its pane closes (an investigation, an AI
+   *  review) takes the lost pane's click here, so it resumes once rather than
+   *  asking for a second click. Absent, the layer reopens the agent the way the
+   *  sidebar does. */
+  onResume?: () => void;
 }
 
-/** A live pane's imperative surface, registered by the render layer.
- *
- *  `write` is how a session is typed into from outside its own pane (the Agents
- *  panel's reply box); `end` is how its process is stopped. Both are held here
- *  rather than in the view so a caller that only has a tab key — a closing tab
- *  bar, a worktree being deleted — can reach the session behind it. */
+/** A live pane's imperative surface, registered by the render layer: how its
+ *  process is stopped. Held here rather than in the view so a caller that only
+ *  has a tab key — a closing tab bar, a worktree being deleted — can reach the
+ *  session behind it. */
 export interface PaneHandle {
-  write: (data: string) => void;
   end: () => void;
 }
 
@@ -122,6 +125,14 @@ export interface TerminalTabs {
    *  detaches — see `TerminalView` — so closing has to be said explicitly here,
    *  and it happens before the tab goes away while the handle still exists. */
   close: (key: string) => void;
+  /** Tab rows, by `refId`, whose pane is closed to be opened again in place (a
+   *  lost agent tab's Resume). The row must outlive the gap: `useTabSessions`
+   *  would read the closed pane as an exit and delete the row, and with it the
+   *  binding to the conversation being resumed. A new pane on the `refId`, or
+   *  `releaseRow`, ends the hold. */
+  heldRows: ReadonlySet<string>;
+  holdRow: (refId: string) => void;
+  releaseRow: (refId: string) => void;
   /** Every session embedded inline right now — one per session, its newest
    *  claim, oldest claim first. Several at once when the main area is split. */
   embeds: TerminalEmbed[];
@@ -139,13 +150,6 @@ export interface TerminalTabs {
   /** Register a live pane's imperative handle. Called by the render layer once
    *  the PTY is open; returns an unregister fn. */
   registerPane: (key: string, handle: PaneHandle) => () => void;
-  /** Type `data` into a live session as if the user typed it there — used by the
-   *  Agents panel's reply box. Returns false when the session has no live PTY.
-   *
-   *  Placement + human-initiated input only (see COMPLIANCE.md): the text is
-   *  whatever the user wrote, nothing here reads the agent's output or decides
-   *  what to send. */
-  send: (key: string, data: string) => boolean;
 }
 
 export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
@@ -169,6 +173,19 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
 
+  const [heldRows, setHeldRows] = useState<ReadonlySet<string>>(new Set());
+  const holdRow = useCallback((refId: string) => {
+    setHeldRows((prev) => (prev.has(refId) ? prev : new Set(prev).add(refId)));
+  }, []);
+  const releaseRow = useCallback((refId: string) => {
+    setHeldRows((prev) => {
+      if (!prev.has(refId)) return prev;
+      const next = new Set(prev);
+      next.delete(refId);
+      return next;
+    });
+  }, []);
+
   const open = useCallback((spec: TerminalSpec) => {
     const tab = withKey(spec);
     tabsRef.current = [...tabsRef.current, tab];
@@ -185,25 +202,29 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
   // one session per provider (the pair `terminal_sessions` is keyed by), so a
   // Codex and a Claude investigation of one ticket are two panes — while two
   // calls naming the same provider are always the same pane.
-  const ensure = useCallback((spec: TerminalSpec & { refId: string }) => {
-    const source = spec.source ?? "shell";
-    // An agent pane's surface key is the `term_key` it launched with, taken from
-    // the identity itself rather than from a second argument that could disagree
-    // with it. That is the whole of what went wrong before: a launch site keyed
-    // its PTY by a decorated ref (`AK-1::codex`), the durable row was still keyed
-    // by `triage:AK-1`, and the liveness join matched nothing — so a working
-    // agent read as exited. Deriving it here makes that unrepresentable at the
-    // one call every agent pane goes through.
-    const refId = spec.agent?.termKey ?? spec.refId;
-    const found = tabsRef.current.find(
-      (t) => t.source === source && t.refId === refId && t.agent?.kind === spec.agent?.kind,
-    );
-    if (found) return found.key;
-    const tab = withKey({ ...spec, refId });
-    tabsRef.current = [...tabsRef.current, tab];
-    setTabs(tabsRef.current);
-    return tab.key;
-  }, []);
+  const ensure = useCallback(
+    (spec: TerminalSpec & { refId: string }) => {
+      const source = spec.source ?? "shell";
+      // An agent pane's surface key is the `term_key` it launched with, taken from
+      // the identity itself rather than from a second argument that could disagree
+      // with it. That is the whole of what went wrong before: a launch site keyed
+      // its PTY by a decorated ref (`AK-1::codex`), the durable row was still keyed
+      // by `triage:AK-1`, and the liveness join matched nothing — so a working
+      // agent read as exited. Deriving it here makes that unrepresentable at the
+      // one call every agent pane goes through.
+      const refId = spec.agent?.termKey ?? spec.refId;
+      const found = tabsRef.current.find(
+        (t) => t.source === source && t.refId === refId && t.agent?.kind === spec.agent?.kind,
+      );
+      if (found) return found.key;
+      const tab = withKey({ ...spec, refId });
+      tabsRef.current = [...tabsRef.current, tab];
+      setTabs(tabsRef.current);
+      releaseRow(refId);
+      return tab.key;
+    },
+    [releaseRow],
+  );
 
   // Closing the active tab falls back to the tab before it.
   const close = useCallback((key: string) => {
@@ -234,13 +255,6 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
     };
   }, []);
 
-  const send = useCallback((key: string, data: string) => {
-    const pane = panes.current.get(key);
-    if (!pane) return false;
-    pane.write(data);
-    return true;
-  }, []);
-
   const attachEmbed = useCallback((next: TerminalEmbed) => {
     const id = embedSeq++;
     setClaims((prev) => [...prev, { id, embed: next }]);
@@ -261,12 +275,14 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
       open,
       ensure,
       close,
+      heldRows,
+      holdRow,
+      releaseRow,
       embeds,
       embed,
       attachEmbed,
       detachEmbeds,
       registerPane,
-      send,
     }),
     [
       tabs,
@@ -274,12 +290,14 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
       open,
       ensure,
       close,
+      heldRows,
+      holdRow,
+      releaseRow,
       embeds,
       embed,
       attachEmbed,
       detachEmbeds,
       registerPane,
-      send,
     ],
   );
 }

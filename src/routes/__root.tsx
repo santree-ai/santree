@@ -3,6 +3,7 @@ import { CommandPalette } from "../components/CommandPalette";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { AppShell } from "../components/shell/AppShell";
 import { WelcomeScreen } from "../components/WelcomeScreen";
+import { TerminalAdoption } from "../features/terminal/TerminalAdoption";
 import { TerminalLayer } from "../features/terminal/TerminalLayer";
 import { AgentRunHost } from "../features/trees/AgentRunHost";
 import {
@@ -91,6 +92,9 @@ function RootLayout() {
             </div>
             {/* Always mounted so terminal sessions persist across view switches. */}
             <TerminalLayer />
+            {/* Gives every adopted session its tab, and adopts again when the
+                santree server comes up after the page did. */}
+            <TerminalAdoption />
             {/* Always mounted so an agent launch — a "Run in background" from the
               ticket list, or one queued behind a setup run the user navigated away
               from — actually runs. It used to live under the Trees route, which

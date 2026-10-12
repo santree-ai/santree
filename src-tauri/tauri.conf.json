@@ -4,9 +4,9 @@
   "version": "0.1.18",
   "identifier": "com.santree.desktop",
   "build": {
-    "beforeDevCommand": "pnpm bundle:hook && pnpm dev:vite",
+    "beforeDevCommand": "pnpm bundle:binaries && pnpm dev:vite",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm bundle:hook && pnpm build && pnpm stash:sourcemaps",
+    "beforeBuildCommand": "pnpm bundle:binaries && pnpm build && pnpm stash:sourcemaps",
     "beforeBundleCommand": "pnpm eject:stale-dmg && pnpm sign:resources",
     "frontendDist": "../dist"
   },

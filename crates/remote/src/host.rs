@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 
 use crate::client::{ClientOptions, HookMessage, RemoteClient, RemoteError};
 use crate::proto::{ErrorCode, HelloResult, PROTOCOL_VERSION};
-use crate::transport::{ConnectError, Connector, Link};
+use crate::transport::{ConnectError, Connector, Link, PeerTrust, Required};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostStatus {
@@ -36,6 +36,8 @@ pub enum HostStatus {
         projects_root: String,
         /// The agent's version, when the link came through it.
         agent: Option<String>,
+        /// How far the far end was verified before anything was sent to it.
+        peer: PeerTrust,
     },
     /// No link: why, as the connect (or the handshake after it) said.
     Down(ConnectError),
@@ -66,6 +68,17 @@ pub struct HostOptions {
     pub backoff_max: Duration,
     /// Bounds one attempt from opening the link to `hello`'s answer.
     pub hello_timeout: Duration,
+    /// Subscribe to the host's hook queue and relay it. A host that serves
+    /// only PTYs (santree's own local server) rejects `hooks.subscribe`, so
+    /// it turns this off and the host never asks.
+    pub hooks: bool,
+    /// The least trust a link must carry for this host to speak to it. A link
+    /// that falls short is dropped UNREAD AND UNWRITTEN — not even `hello` is
+    /// sent — and the attempt fails as [`ConnectError::Untrusted`]. The
+    /// connector's contract is that verification happens before it returns the
+    /// link, so a host with `require` above `Any` never puts a byte on a
+    /// stranger's socket.
+    pub require: Required,
     pub client: ClientOptions,
 }
 
@@ -77,6 +90,8 @@ impl Default for HostOptions {
             // Past the agent's own first-line wait (its dial to the host
             // included), plus the handshake.
             hello_timeout: Duration::from_secs(25),
+            hooks: true,
+            require: Required::Any,
             client: ClientOptions::default(),
         }
     }
@@ -111,12 +126,16 @@ struct HookCursor {
     forwarded: Option<u64>,
 }
 
+/// The live link: its client, the `hello` it was answered and the trust its
+/// connector established, set together.
+type Live = (Arc<RemoteClient>, Arc<HelloResult>, PeerTrust);
+
 struct Inner {
     connector: Arc<dyn Connector>,
     options: HostOptions,
     status: watch::Sender<HostStatus>,
     /// The live client and the `hello` it was answered, set together.
-    live: Mutex<Option<(Arc<RemoteClient>, Arc<HelloResult>)>>,
+    live: Mutex<Option<Live>>,
     reconnected: broadcast::Sender<Reconnected>,
     hooks_tx: mpsc::UnboundedSender<HookDelivery>,
     hooks_rx: Mutex<Option<mpsc::UnboundedReceiver<HookDelivery>>>,
@@ -133,11 +152,11 @@ impl Inner {
         });
     }
 
-    fn set_live(&self, live: Option<(Arc<RemoteClient>, Arc<HelloResult>)>) {
+    fn set_live(&self, live: Option<Live>) {
         *self.live() = live;
     }
 
-    fn live(&self) -> std::sync::MutexGuard<'_, Option<(Arc<RemoteClient>, Arc<HelloResult>)>> {
+    fn live(&self) -> std::sync::MutexGuard<'_, Option<Live>> {
         self.live.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -229,13 +248,25 @@ impl RemoteHost {
     /// The live client, when connected. Don't hold it across a reconnect:
     /// ask again after a [`Reconnected`].
     pub fn client(&self) -> Option<Arc<RemoteClient>> {
-        self.inner.live().as_ref().map(|(client, _)| client.clone())
+        self.inner
+            .live()
+            .as_ref()
+            .map(|(client, ..)| client.clone())
     }
 
     /// What the host answered `hello` on the live link — its `features`,
     /// say — when connected.
     pub fn hello(&self) -> Option<Arc<HelloResult>> {
-        self.inner.live().as_ref().map(|(_, hello)| hello.clone())
+        self.inner
+            .live()
+            .as_ref()
+            .map(|(_, hello, _)| hello.clone())
+    }
+
+    /// How far the live link's far end was verified before anything was sent
+    /// to it, when connected.
+    pub fn peer(&self) -> Option<PeerTrust> {
+        self.inner.live().as_ref().map(|(.., peer)| peer.clone())
     }
 
     /// How many links this host has brought up, the one now live included —
@@ -266,8 +297,13 @@ impl RemoteHost {
     ///
     /// `false` when `boot_id` is no longer the daemon's boot: the daemon
     /// restarted since, its seqs start over, and this ack means nothing there.
-    /// Nothing is recorded, and the caller must not persist it.
+    /// Nothing is recorded, and the caller must not persist it. Also `false`
+    /// for a host with `hooks: false`, which delivers nothing.
     pub async fn ack_hooks(&self, boot_id: &str, up_to: u64) -> bool {
+        if !self.inner.options.hooks {
+            // Nothing was ever delivered, so there is nothing to acknowledge.
+            return false;
+        }
         {
             let mut cursor = self.inner.cursor();
             if cursor.boot_id.as_deref() != Some(boot_id) {
@@ -294,6 +330,7 @@ struct Connection {
     hello: Arc<HelloResult>,
     /// The agent's version, when the link came through it.
     agent: Option<String>,
+    peer: PeerTrust,
 }
 
 async fn attempt(inner: &Inner, config: &HostConfig) -> Result<Connection, AttemptError> {
@@ -303,28 +340,39 @@ async fn attempt(inner: &Inner, config: &HostConfig) -> Result<Connection, Attem
             reader,
             writer,
             agent,
+            peer,
         } = inner
             .connector
             .connect()
             .await
             .map_err(AttemptError::Down)?;
+        // Before the first byte, `hello` included: a link below the required
+        // trust is dropped as it came, so what the app sends next (env, secrets,
+        // keystrokes) can never reach a host nobody vouched for.
+        if !peer.satisfies(inner.options.require) {
+            return Err(AttemptError::Down(ConnectError::Untrusted(format!(
+                "untrusted host: the link is {peer:?}, this host requires {:?}",
+                inner.options.require
+            ))));
+        }
         let client = Arc::new(RemoteClient::with_options(
             reader,
             writer,
             inner.options.client.clone(),
         ));
         let hello = client.hello(&config.client, &config.owner).await;
-        Ok::<_, AttemptError>((client, agent, hello))
+        Ok::<_, AttemptError>((client, agent, peer, hello))
     })
     .await
     .map_err(|_| failed("the session host didn't answer in time"))??;
 
-    let (client, agent, hello) = opened;
+    let (client, agent, peer, hello) = opened;
     match hello {
         Ok(hello) if hello.protocol == PROTOCOL_VERSION => Ok(Connection {
             client,
             hello: Arc::new(hello),
             agent: agent.map(|a| a.agent),
+            peer,
         }),
         Ok(hello) => Err(AttemptError::Version(Some(hello.protocol))),
         Err(RemoteError::Remote(e)) if e.code == ErrorCode::Version => {
@@ -393,31 +441,42 @@ async fn serve(inner: &Inner, connection: Connection) {
         }
         cursor.acked
     };
-    if let Some(seq) = acked {
-        // An ack made while the link was down (or by a previous run).
-        if let Err(e) = client.hooks_ack(seq).await {
-            log::warn!("remote: re-sending hook ack failed: {e}");
+    // A host that serves no hooks (`hooks: false`) is never asked: it would
+    // answer `bad_request` to both calls, on every connect.
+    let mut hooks = if inner.options.hooks {
+        if let Some(seq) = acked {
+            // An ack made while the link was down (or by a previous run).
+            if let Err(e) = client.hooks_ack(seq).await {
+                log::warn!("remote: re-sending hook ack failed: {e}");
+            }
         }
-    }
-    let mut hooks = match client.hooks_subscribe(acked).await {
-        Ok(hooks) => Some(hooks),
-        Err(e) if e.is_disconnected() => return,
-        Err(e) => {
-            log::warn!("remote: hooks subscribe failed: {e}");
-            None
+        match client.hooks_subscribe(acked).await {
+            Ok(hooks) => Some(hooks),
+            Err(e) if e.is_disconnected() => return,
+            Err(e) => {
+                log::warn!("remote: hooks subscribe failed: {e}");
+                None
+            }
         }
+    } else {
+        None
     };
 
     // Counted before the link is handed out, so whoever sees this link's
     // client or hello also sees its generation.
     let generation = inner.generation.fetch_add(1, Ordering::Relaxed) + 1;
     let hello = &connection.hello;
-    inner.set_live(Some((client.clone(), hello.clone())));
+    inner.set_live(Some((
+        client.clone(),
+        hello.clone(),
+        connection.peer.clone(),
+    )));
     inner.set_status(HostStatus::Connected {
         version: hello.version.clone(),
         hostname: hello.hostname.clone(),
         projects_root: hello.projects_root.clone(),
         agent: connection.agent.clone(),
+        peer: connection.peer.clone(),
     });
     log::info!("remote: connected (generation {generation})");
     let _ = inner.reconnected.send(Reconnected { generation });

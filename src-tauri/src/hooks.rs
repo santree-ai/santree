@@ -10,7 +10,7 @@
 //! [`crate::english_tutor`] — because it's the one place every santree `claude`
 //! launch already passes through.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 use crate::db::Db;
-use crate::terminal::LiveTerminal;
+use crate::sessions::Liveness;
 
 /// The session-state events we inject. The CLI (`santree-hook`) owns the
 /// event→state mapping; this list only decides which events fire our binary.
@@ -67,20 +67,6 @@ const EVENTS: &[&str] = &[
     "Stop",
     "SessionEnd",
 ];
-
-/// Resolve the absolute path to the bundled `santree-hook` binary: the resource
-/// dir in a bundled build, else a sibling of the running executable in dev (both
-/// land in `target/debug`). `None` if neither exists.
-pub(crate) fn hook_bin(app: &AppHandle) -> Option<PathBuf> {
-    if let Ok(res) = app.path().resource_dir() {
-        let p = res.join("santree-hook");
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    let sib = std::env::current_exe().ok()?.parent()?.join("santree-hook");
-    sib.exists().then_some(sib)
-}
 
 /// The sqlite db path — recomputed from `app_data_dir` (the setup path isn't
 /// retained), matching `lib.rs`'s `db::init(data_dir.join("santree.db"))`.
@@ -168,7 +154,7 @@ fn base_settings_map(app: &AppHandle, tutor: Option<&str>) -> Option<Map<String,
 /// app_data_dir always has a space ("Application Support") and a home directory
 /// may contain `$`/backtick/quote characters too.
 fn local_prefix(app: &AppHandle) -> Option<String> {
-    let (bin, db) = (hook_bin(app)?, db_path(app)?);
+    let (bin, db) = (crate::hook_bin::resolve(app)?, db_path(app)?);
     Some(format!(
         "{} --db {}",
         sh_quote(bin.to_str()?),
@@ -605,7 +591,7 @@ pub fn mcp_config_ai_review(
     head_sha: &str,
     diff_index: &Path,
 ) -> Result<String> {
-    let bin = hook_bin(app).ok_or_else(|| {
+    let bin = crate::hook_bin::resolve(app).ok_or_else(|| {
         anyhow::anyhow!(
             "santree's helper binary is missing, so the review tools can't start. \
              In a dev build, run `pnpm bundle:hook`."
@@ -805,27 +791,30 @@ pub async fn claude_rate_limits(db: &Db) -> Result<Vec<ClaudeRateLimitWindow>> {
 /// — *is this session still alive* and *what is it doing*. Conflating them is how
 /// both of this module's historical bugs happened.
 ///
-/// **Alive** is a join, never a stored record. `live_terminals` is the set of
+/// **Alive** is a join, never a stored record. `terminals.live` is the set of
 /// `(term_key, agent_kind)` pairs that have a live PTY *right now* — the same
-/// pair `terminal_sessions` is keyed by — straight out of the in-memory
-/// [`santree_pty::PtyManager`]. A row whose terminal is not in that set cannot be
-/// running, whatever it last stored — so a dead agent is unrepresentable as a
-/// live-looking state, no matter how its terminal died (a kill -9, a crash, the
-/// app quitting). santree is unusually well placed to do this: the seed is
-/// `exec <cli>`, so the PTY *is* the agent process, and there is no daemon — a
-/// PTY cannot outlive the app. That is why this needs no sweeper, no decay timer
-/// and no background poll, and why a straggling hook write cannot defeat it: the
-/// join is re-evaluated from live state on every read, so there is nothing for a
-/// late write to win against.
+/// pair `terminal_sessions` is keyed by — as the terminal facade reports them
+/// (`sessions::Terminals::liveness`). A row whose terminal is not in that set
+/// cannot be running, whatever it last stored — so a dead agent is
+/// unrepresentable as a live-looking state, no matter how its terminal died (a
+/// kill -9, a crash, the app quitting). The seed is `exec <cli>`, so the PTY *is*
+/// the agent process. That is why this needs no sweeper, no decay timer and no
+/// background poll, and why a straggling hook write cannot defeat it: the join
+/// is re-evaluated from live state on every read, so there is nothing for a late
+/// write to win against.
+///
+/// "Absent" only means "dead" when the answer is `complete`. A PTY can outlive
+/// the app now (the local santree server holds them, docs/server.md), so a
+/// server santree can't reach right now may be holding agents that run fine: an
+/// incomplete answer is "unknown", and every row keeps the state it had rather
+/// than being declared exited. In-app terminals and Daedalus's are always
+/// complete, so with no server this is the join it always was.
 ///
 /// **Doing** is reconciled against the transcript (see [`reconcile_live_state`]):
 /// the "needs-you" states are set by a hook, but the user *resolving* the prompt
 /// in the terminal (accept / reject a permission, or type a reply) fires no hook,
 /// so a stored row can be stale.
-pub async fn session_states(
-    db: &Db,
-    live_terminals: HashSet<LiveTerminal>,
-) -> Result<Vec<SessionState>> {
+pub async fn session_states(db: &Db, terminals: Liveness) -> Result<Vec<SessionState>> {
     let now_ms = now_ms();
     if let Err(e) = prune_stale_sessions(db, now_ms).await {
         log::warn!("pruning stale session rows failed: {e}");
@@ -855,7 +844,7 @@ pub async fn session_states(
     // `metadata` call per entry — and this runs on a ~10s poll. One batch hop off
     // the async runtime, not one task per row.
     Ok(tokio::task::spawn_blocking(move || {
-        one_per_session(reconcile_rows(rows, now_ms, &live_terminals))
+        one_per_session(reconcile_rows(rows, now_ms, &terminals))
     })
     .await?)
 }
@@ -909,11 +898,7 @@ type StateRow = (
 
 /// Parse + reconcile a batch of stored rows. Blocking (transcript fs reads) —
 /// always call from `spawn_blocking`.
-fn reconcile_rows(
-    rows: Vec<StateRow>,
-    now_ms: i64,
-    live_terminals: &HashSet<LiveTerminal>,
-) -> Vec<SessionState> {
+fn reconcile_rows(rows: Vec<StateRow>, now_ms: i64, terminals: &Liveness) -> Vec<SessionState> {
     rows.into_iter()
         .filter_map(
             |(
@@ -959,13 +944,8 @@ fn reconcile_rows(
                 // because it is the only one derived from live state rather than a
                 // record: see [`session_states`].
                 if state != AgentState::Exited
-                    && terminal_liveness(
-                        term_key.as_deref(),
-                        kind,
-                        heartbeat_ms,
-                        now_ms,
-                        live_terminals,
-                    ) == Some(false)
+                    && terminal_liveness(term_key.as_deref(), kind, heartbeat_ms, now_ms, terminals)
+                        == Some(false)
                 {
                     state = AgentState::Exited;
                     message = None;
@@ -1007,7 +987,7 @@ fn now_ms() -> i64 {
 /// [`terminal_liveness`]); four missed renders at
 /// [`STATUSLINE_REFRESH_SECS`], which is slack enough for a machine that slept or
 /// a status line that lost a render to a busy turn.
-const HEARTBEAT_DEAD_MS: i64 = STATUSLINE_REFRESH_SECS as i64 * 1_000 * 4;
+pub(crate) const HEARTBEAT_DEAD_MS: i64 = STATUSLINE_REFRESH_SECS as i64 * 1_000 * 4;
 
 /// Is the terminal hosting this session still alive? `None` = no evidence either
 /// way, and the caller must leave the row alone.
@@ -1018,14 +998,16 @@ const HEARTBEAT_DEAD_MS: i64 = STATUSLINE_REFRESH_SECS as i64 * 1_000 * 4;
 /// answers `Some(false)` only on positive evidence of death, and shrugs
 /// otherwise.
 ///
-/// - **`term_key` present** — decisive, both ways. `live_terminals` comes from
-///   the in-memory PTY manager, which is the whole truth about what runs on this
-///   Mac: there is no local daemon, so a local session with no live PTY has no
-///   process. This is also what makes an app restart correct for free — nothing
-///   is live, so every stored row retires instead of sitting at "active" until a
-///   timer notices. Sessions on a Daedalus server (docs/remote.md) do outlive the
-///   app, in `santree-remote`'s own PTY manager, but aren't in this set yet, so
-///   their rows read as exited here until remote terminals are counted as live.
+/// - **`term_key` present** — decisive, both ways, *when the answer is
+///   complete*. `terminals` comes from the terminal facade
+///   (`sessions::Terminals::liveness`), which asks wherever a pane's process
+///   lives: this app's PTY manager, the local santree server, or Daedalus. With
+///   in-app terminals it is the whole truth about what runs on this Mac, which
+///   is what makes an app restart correct for free — nothing is live, so every
+///   stored row retires instead of sitting at "active" until a timer notices.
+///   With a local server, processes outlive the app, so an absence means
+///   "exited" only if the server could be asked about everything it holds
+///   (`complete`); otherwise the answer is `None` and the row is left alone.
 ///
 ///   Matched on the row's own identity — `(term_key, agent_kind)`, the pair its
 ///   primary key is — and never on `cwd`. Both halves, because a surface hosts
@@ -1053,12 +1035,12 @@ fn terminal_liveness(
     agent_kind: Option<AgentKind>,
     heartbeat_ms: Option<i64>,
     now_ms: i64,
-    live_terminals: &HashSet<LiveTerminal>,
+    terminals: &Liveness,
 ) -> Option<bool> {
     match term_key {
-        Some(key) => Some(live_terminals.iter().any(|live| {
+        Some(key) => terminals.knows(|live| {
             live.term_key == key && (agent_kind.is_none() || live.agent_kind == agent_kind)
-        })),
+        }),
         None => heartbeat_ms.map(|ms| now_ms - ms < HEARTBEAT_DEAD_MS),
     }
 }
@@ -1452,11 +1434,23 @@ mod tests {
     }
 
     /// The set of `term_key`s the PTY manager would report as alive.
-    fn live<const N: usize>(panes: [(&str, Option<AgentKind>); N]) -> HashSet<LiveTerminal> {
-        panes
-            .into_iter()
-            .map(|(key, kind)| pane(key, kind))
-            .collect()
+    fn live<const N: usize>(panes: [(&str, Option<AgentKind>); N]) -> Liveness {
+        Liveness {
+            live: panes
+                .into_iter()
+                .map(|(key, kind)| pane(key, kind))
+                .collect(),
+            complete: true,
+        }
+    }
+
+    /// The same panes, as a host that couldn't be asked right now would report
+    /// them: what is known, and not the whole of it.
+    fn unsure<const N: usize>(panes: [(&str, Option<AgentKind>); N]) -> Liveness {
+        Liveness {
+            complete: false,
+            ..live(panes)
+        }
     }
 
     /// The pane a Claude row of these fixtures would be running in.
@@ -1464,8 +1458,8 @@ mod tests {
 
     /// One live pane, addressed the way the manager reports it: the surface and
     /// the provider santree launched in it.
-    fn pane(term_key: &str, agent_kind: Option<AgentKind>) -> LiveTerminal {
-        LiveTerminal {
+    fn pane(term_key: &str, agent_kind: Option<AgentKind>) -> crate::sessions::LiveTerminal {
+        crate::sessions::LiveTerminal {
             term_key: term_key.to_string(),
             agent_kind,
         }
@@ -1930,11 +1924,66 @@ mod tests {
             assert_eq!(out[0].message, None, "{state} keeps no stale prompt text");
         }
 
-        // An app restart leaves no live terminals at all, which is the correct
-        // answer rather than a missing one: there is no local daemon, so a local
-        // pty cannot outlive the process that opened it.
+        // An app restart with in-app terminals leaves none live, which is the
+        // correct answer rather than a missing one: that pty could not outlive
+        // the process that opened it. (With a local server the answer is only
+        // "none" when it is complete: see the test below.)
         let out = reconcile_rows(vec![row("active")], now_ms(), &live([]));
         assert_eq!(out[0].state, AgentState::Exited);
+    }
+
+    /// An incomplete answer is "unknown", never "exited": a local server santree
+    /// can't reach may be holding agents that are working. Every row keeps the
+    /// state it had — the prompt text a blocked one shows included — and a pane
+    /// that *is* known live is still live.
+    #[test]
+    fn an_incomplete_liveness_answer_keeps_every_agent_as_it_was() {
+        let row = |term_key: &str, state: &str| {
+            (
+                format!("s-{term_key}"),
+                state.to_string(),
+                "UserPromptSubmit".to_string(),
+                "/w".to_string(),
+                Some("Allow Bash?".to_string()),
+                None,
+                now_ms(),
+                Some("repo".to_string()),
+                Some(term_key.to_string()),
+                Some("Claude".to_string()),
+                None,
+            )
+        };
+        for state in ["active", "delegating", "permission", "waiting"] {
+            // Absent from an answer that couldn't see everything: unknown.
+            let out = reconcile_rows(
+                vec![row("tree:AK-1", state)],
+                now_ms(),
+                &unsure([("tree:OTHER", CLAUDE)]),
+            );
+            assert_ne!(
+                out[0].state,
+                AgentState::Exited,
+                "{state} was declared exited on a partial answer"
+            );
+            // Nothing at all known (the server is down or not yet adopted).
+            let out = reconcile_rows(vec![row("tree:AK-1", state)], now_ms(), &unsure([]));
+            assert_ne!(out[0].state, AgentState::Exited, "{state}, nothing known");
+        }
+        // The prompt a blocked agent shows survives: the row was left alone.
+        let out = reconcile_rows(vec![row("tree:AK-1", "permission")], now_ms(), &unsure([]));
+        assert_eq!(out[0].state, AgentState::Permission);
+        assert_eq!(out[0].message.as_deref(), Some("Allow Bash?"));
+        // Positive evidence still counts, complete or not.
+        let out = reconcile_rows(
+            vec![row("tree:AK-1", "active")],
+            now_ms(),
+            &unsure([("tree:AK-1", CLAUDE)]),
+        );
+        assert_eq!(out[0].state, AgentState::Active);
+        // And a complete answer is the join it always was.
+        let out = reconcile_rows(vec![row("tree:AK-1", "active")], now_ms(), &live([]));
+        assert_eq!(out[0].state, AgentState::Exited);
+        assert_eq!(out[0].message, None);
     }
 
     /// The bug this join was rebuilt for. A triage investigation and an AI review

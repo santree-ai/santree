@@ -10,6 +10,10 @@
 //! children get that home and `PATH`, as the real host's get its unit's. Every
 //! wait is on a condition, never a guessed interval.
 
+// Tests type into, open and close terminals directly: clippy.toml's PTY rules
+// hold shipped code to its sanctioned sites.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,9 +26,10 @@ use santree_remote_client::fake::{FakeAgent, FakeDaemon, FakeOptions};
 
 use super::agents;
 use super::host::{describe, DaedalusHost};
-use super::terminal_tests::{fast, registered, server, until, Screen, Server, WAIT};
+use super::terminal_tests::{fast, in_app, registered, server, until, Screen, Server, WAIT};
 use crate::db::Db;
 use crate::provider::{SessionRequest, SessionSurface};
+use crate::sessions::Terminals;
 use crate::terminal::{self, LiveTerminal, PaneLink, TerminalOpenOpts};
 use crate::worktree;
 
@@ -127,9 +132,8 @@ async fn resolve(
 /// An agent pane in `cwd` under `label`, as a launch opens one: a shell whose
 /// seed then `exec`s the agent.
 async fn agent_pane(
-    manager: &PtyManager,
+    terminals: &Terminals,
     db: &Db,
-    link: &DaedalusHost,
     cwd: &Path,
     label: &str,
 ) -> (santree_pty::SessionId, Screen) {
@@ -145,7 +149,7 @@ async fn agent_pane(
         label: label.into(),
         agent_kind: Some(AgentKind::Claude),
     };
-    let id = terminal::open(manager, db, link, opts, output, links)
+    let id = terminal::open(terminals, db, opts, output, links)
         .await
         .unwrap();
     screen
@@ -263,12 +267,18 @@ async fn launching_an_agent_writes_its_hooks_on_the_box_and_runs_it_there() {
     // into it is the frontend's (`agentSessionSeed`), minus the `env` words —
     // the pane's own env carries the pair the hooks bind by.
     let manager = PtyManager::new();
-    let (pane, screen) = agent_pane(&manager, &db, &link, &server.worktree, "tree:AK-1").await;
+    let terminals = in_app(&manager, &link);
+    let (pane, screen) = agent_pane(&terminals, &db, &server.worktree, "tree:AK-1").await;
     let seed = format!(
         "exec 'claude' --settings '{}' --session-id '{id}'",
         hooks.claude_settings
     );
-    link.terminals().seed(pane, format!("{seed}\r")).unwrap();
+    link.terminals()
+        .seed(
+            pane,
+            crate::terminal::LaunchLine::typed(format!("{seed}\r")),
+        )
+        .unwrap();
     let argv = format!(
         "ARGV:--settings|{}|--session-id|{id}|",
         hooks.claude_settings
@@ -496,7 +506,8 @@ async fn relayed_hooks_from_the_box_drive_the_panes_agent_state() {
         panic!("{session:?}");
     };
     let manager = PtyManager::new();
-    let (pane, _screen) = agent_pane(&manager, &db, &link, &server.worktree, "tree:AK-1").await;
+    let terminals = in_app(&manager, &link);
+    let (pane, _screen) = agent_pane(&terminals, &db, &server.worktree, "tree:AK-1").await;
     let address = LiveTerminal {
         term_key: "tree:AK-1".into(),
         agent_kind: Some(AgentKind::Claude),
@@ -521,6 +532,10 @@ async fn relayed_hooks_from_the_box_drive_the_panes_agent_state() {
     };
     let states = || {
         let (db, live) = (db.clone(), link.terminals().live());
+        let live = crate::sessions::Liveness {
+            live,
+            complete: true,
+        };
         async move { crate::hooks::session_states(&db, live).await.unwrap() }
     };
     let drained = || daemon.queued_hooks().is_empty();
@@ -645,9 +660,12 @@ async fn which_agent_runs_in_a_daedalus_pane_is_read_from_the_boxs_process_table
     let link = connected(&agent).await;
 
     let manager = PtyManager::new();
+    let terminals = in_app(&manager, &link);
     let label = "tree:AK-1:tab:d1";
-    let (pane, _screen) = agent_pane(&manager, &db, &link, &server.worktree, label).await;
-    link.terminals().seed(pane, "exec claude\r".into()).unwrap();
+    let (pane, _screen) = agent_pane(&terminals, &db, &server.worktree, label).await;
+    link.terminals()
+        .seed(pane, crate::terminal::LaunchLine::typed("exec claude\r"))
+        .unwrap();
 
     let expected = vec![AgentProcess {
         term_key: label.into(),
@@ -759,6 +777,7 @@ async fn nothing_agent_related_runs_while_the_link_is_down() {
 
     // The agent's pane waits for the link; nothing starts anywhere meanwhile.
     let manager = PtyManager::new();
+    let terminals = in_app(&manager, &link);
     let screen = Screen::new();
     let (output, links) = screen.channels();
     let opts = TerminalOpenOpts {
@@ -771,11 +790,13 @@ async fn nothing_agent_related_runs_while_the_link_is_down() {
         label: "tree:AK-1".into(),
         agent_kind: Some(AgentKind::Claude),
     };
-    let pane = terminal::open(&manager, &db, &link, opts, output, links)
+    let pane = terminal::open(&terminals, &db, opts, output, links)
         .await
         .unwrap();
     assert_eq!(screen.links(), [PaneLink::Reconnecting]);
-    link.terminals().seed(pane, "exec claude\r".into()).unwrap();
+    link.terminals()
+        .seed(pane, crate::terminal::LaunchLine::typed("exec claude\r"))
+        .unwrap();
     assert!(link.agents().detect(&link).await.is_empty());
 
     assert!(manager.sessions().is_empty(), "nothing ran on this Mac");

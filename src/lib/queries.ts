@@ -56,6 +56,7 @@ import type {
   ReviewWorkItem,
   ReviewWorkItemSource,
   ScriptInfo,
+  ServerStatus,
   Settings,
   TicketProvider,
   TicketRef,
@@ -288,7 +289,6 @@ export const queryKeys = {
   claudeAccountUsage: ["claude-account-usage"] as const,
   claudeGlobalCapture: ["claude-global-capture"] as const,
   resourceUsage: ["resource-usage"] as const,
-  terminalSessions: ["terminal-sessions"] as const,
   sessionUsageLive: ["session-usage-live"] as const,
   /** Prefix for every repo's task graph — invalidate this (not `tasks(repo)`)
    *  when a change (e.g. a fresh Linear connection) should refetch all repos'
@@ -394,6 +394,8 @@ export const queryKeys = {
     ["pr-check-log", owner, name, jobId] as const,
   openers: ["openers"] as const,
   daedalusStatus: ["daedalus-status"] as const,
+  serverStatus: ["server-status"] as const,
+  terminalInventory: ["terminal-inventory"] as const,
   daedalusWorkspaces: ["daedalus-workspaces"] as const,
   daedalusIcons: ["daedalus-icon"] as const,
   daedalusIcon: (name: string) => ["daedalus-icon", name] as const,
@@ -1906,6 +1908,117 @@ export const useDaedalusLinkWatcher = () => {
   }, [qc]);
 };
 
+// ── The local santree server ─────────────────────────────────────────────────
+// The detached process that owns this Mac's terminals on a signed build
+// (docs/server.md). Like the Daedalus link, every state — off, starting, down,
+// failing — is a value the read *returns*, never an error.
+
+/** The local server's state plus any older servers still draining. Pushed: the
+ *  backend emits `serverStateChanged` on every transition and
+ *  {@link useServerStatusWatcher} invalidates; the slow poll only covers an event
+ *  missed while the webview was reloading, as the Daedalus link's does. */
+export const useServerStatus = () =>
+  useQuery({
+    queryKey: queryKeys.serverStatus,
+    queryFn: commands.serverStatus,
+    staleTime: Number.POSITIVE_INFINITY,
+    refetchInterval: 60_000,
+  });
+
+/** Realtime refresh for {@link useServerStatus}. Mount once at the app root. */
+export const useServerStatusWatcher = () => {
+  const qc = useQueryClient();
+  useEffect(() => {
+    let live = true;
+    // A read in flight was asked before the event, so its answer is older: it is
+    // dropped, not joined. `invalidateQueries` alone only does that once the query
+    // holds data, and the page's first read (the one a launch races) holds none.
+    const refresh = async () => {
+      await qc.cancelQueries({ queryKey: queryKeys.serverStatus });
+      await qc.invalidateQueries({ queryKey: queryKeys.serverStatus });
+    };
+    const unlisten = events.serverStateChanged.listen(() => void refresh());
+    // A move before the listener was in place was never heard: ask once more.
+    void unlisten
+      .then(() => {
+        if (live) void refresh();
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+      void unlisten.then((off) => off());
+    };
+  }, [qc]);
+};
+
+/** The Mac's terminal sessions as the backend lists them, with the ones whose
+ *  tab is gone (`orphans`). Read once per adoption, never watched: it is what
+ *  decides which adopted sessions get a tab, so it must be asked *now*. */
+export const fetchTerminalInventory = (qc: QueryClient) =>
+  qc.fetchQuery({
+    queryKey: queryKeys.terminalInventory,
+    queryFn: () => unwrap(commands.terminalInventory()),
+    staleTime: 0,
+    // The caller has a fallback for a failed read; a toast would only say so.
+    meta: { silent: true },
+  });
+
+/** "Start server": the user's call after it went down or kept failing — santree
+ *  never restarts it past its crash budget on its own. Reads `Starting` at the
+ *  click; the event that follows replaces it, and a refused start rolls back and
+ *  red-toasts like any other write. */
+export const useStartServer = () =>
+  useOptimisticMutation<void, null>({
+    mutationFn: () => unwrap(commands.serverStart()),
+    optimistic: (qc) => {
+      const prev = qc.getQueryData<ServerStatus>(queryKeys.serverStatus);
+      if (!prev) return undefined;
+      qc.setQueryData<ServerStatus>(queryKeys.serverStatus, {
+        ...prev,
+        state: { kind: "Starting" },
+      });
+      return () => qc.setQueryData(queryKeys.serverStatus, prev);
+    },
+    invalidate: () => [queryKeys.serverStatus],
+  });
+
+/** This Mac's terminal sessions with `complete` and the orphans (those whose tab
+ *  is gone), for the server card. Shares {@link fetchTerminalInventory}'s cache
+ *  entry. Polls while the card is mounted, because whether a pane is attached and
+ *  whether a child is still alive both change without anything invalidating it. */
+export const useTerminalInventory = () =>
+  useUnwrappedQuery(queryKeys.terminalInventory, () => commands.terminalInventory(), {
+    staleTime: 1_000,
+    refetchInterval: 2_000,
+    meta: { silent: true },
+  });
+
+/** Restart / stop / end-draining are deliberately NOT optimistic: each one ends
+ *  terminals, so painting the result before the server confirms it would lie. The
+ *  card shows a pending state until the status event arrives; these only
+ *  reconcile the reads on settle. A refused call red-toasts like any write. */
+const serverActionKeys = () => [queryKeys.serverStatus, queryKeys.terminalInventory];
+
+export const useRestartServer = () =>
+  useOptimisticMutation<void, null>({
+    mutationFn: () => unwrap(commands.serverRestart()),
+    invalidate: serverActionKeys,
+  });
+
+export const useStopServer = () =>
+  useOptimisticMutation<void, null>({
+    mutationFn: () => unwrap(commands.serverStop()),
+    invalidate: serverActionKeys,
+  });
+
+/** Ends one older, draining server by its revision (a lookup key the backend
+ *  checks against the servers it found itself). */
+export const useEndDrainingServer = () =>
+  useOptimisticMutation<number, null>({
+    mutationFn: (revision) => unwrap(commands.serverEndDraining(revision)),
+    invalidate: serverActionKeys,
+  });
+
 /** A fresh attempt at the link, skipping its backoff, and how it settled. Never
  *  polled: once when Settings shows it, again on "Run check". */
 export const useDaedalusHealth = () =>
@@ -2290,20 +2403,6 @@ export const useResourceUsage = (watching: boolean) =>
   useUnwrappedQuery(queryKeys.resourceUsage, () => commands.resourceUsage(), {
     staleTime: 2_000,
     refetchInterval: watching ? 4_000 : 30_000,
-    meta: { silent: true },
-  });
-
-/**
- * Every live PTY session (Settings → Terminal).
- *
- * Polls only while the panel is open — `watching` — because the two facts that
- * make it worth showing, whether a pane is attached and whether the child is
- * still alive, both change without anything invalidating a cache key.
- */
-export const useTerminalSessions = (watching: boolean) =>
-  useUnwrappedQuery(queryKeys.terminalSessions, () => commands.terminalSessions(), {
-    staleTime: 1_000,
-    refetchInterval: watching ? 2_000 : false,
     meta: { silent: true },
   });
 
@@ -2855,6 +2954,15 @@ export const useExportLogs = () =>
     invalidate: () => [],
   });
 
+/** Settings → Terminal → "Open logs": reveals the log folder in the OS file
+ *  manager. Takes no arguments, so there is no path to validate. Nothing to
+ *  invalidate; failures toast through the global mutation policy. */
+export const useRevealLogs = () =>
+  useActionMutation({
+    mutationFn: () => unwrap(commands.revealLogs()),
+    invalidate: () => [],
+  });
+
 /** A bulk delete where only *some* worktrees failed. Carries the survivors so the
  *  caller can un-hide exactly those and leave the genuinely-deleted ones hidden. */
 export class BulkDeleteError extends Error {
@@ -3262,6 +3370,13 @@ export const useResumeWorktreeSession = (repo: string, id: string) =>
       queryKeys.worktreeSessions(repo, id),
       queryKeys.sessionProviders(repo, `tree:${id}:tab:${tabId}`),
     ],
+  });
+
+/** May a lost agent tab be relaunched in place? Refused (and red-toasted) while
+ *  its session could still be running — including while terminals reconnect. */
+export const useCheckTabResume = (repo: string) =>
+  useActionMutation<{ owner: string; tabId: string }, null>({
+    mutationFn: ({ owner, tabId }) => unwrap(commands.checkTabResume(repo, owner, tabId)),
   });
 
 /** The PATH of the on-disk work prompt for a freshly-started worktree. The backend

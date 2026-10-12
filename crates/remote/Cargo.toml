@@ -6,15 +6,15 @@ version.workspace = true
 license.workspace = true
 
 [features]
-# An in-process daemon speaking protocol v1 over an in-memory link, backed by a
-# real `PtyManager`, real processes and the real filesystem. For tests — this
+# An in-process daemon speaking protocol v1 over an in-memory link: the
+# production host (`santree-host`) with test controls. For tests — this
 # crate's own and the app's dispatch tests — never for shipping.
-fake = ["dep:santree-pty", "tokio/process"]
+fake = ["dep:santree-host", "santree-host/test-support"]
 
 [dependencies]
 # Protocol v1's types, re-exported as `proto`.
 santree-remote-proto = { path = "../remote-proto" }
-santree-pty = { path = "../pty", optional = true }
+santree-host = { path = "../host", optional = true }
 serde = { workspace = true }
 # `raw_value` so a frame's payload is decoded once, by the caller that knows its
 # type, instead of through an intermediate `Value` tree.
@@ -25,6 +25,7 @@ log = { workspace = true }
 
 [dev-dependencies]
 # The `fake` module is also compiled for this crate's own unit tests.
+santree-host = { path = "../host", features = ["test-support"] }
 santree-pty = { path = "../pty" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process"] }
 tempfile = "3"

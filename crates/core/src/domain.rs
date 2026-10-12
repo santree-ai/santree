@@ -529,6 +529,136 @@ pub struct DaedalusHealth {
     pub checked_at: String,
 }
 
+/// The state of santree's own local terminal server (the detached process that
+/// keeps terminals alive across app restarts). Like [`DaedalusLink`], every
+/// variant is a *state* to render, never an error: the commands answer with it
+/// as a plain value so it never becomes a red toast.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(tag = "kind")]
+pub enum ServerState {
+    /// Not in use: terminals run inside the app, and quitting ends them. No
+    /// server banner, no server controls.
+    Off,
+    /// Starting (or reconnecting to) the server; terminals wait for it.
+    Starting,
+    /// A stop the user asked for is under way (Stop, or the first half of a
+    /// Restart).
+    Stopping,
+    /// The server is up and the app is attached to it.
+    Running {
+        /// The server build this app talks to (its socket's revision).
+        revision: u32,
+        /// The server's own version string.
+        version: String,
+        pid: u32,
+        /// When the server booted, in milliseconds since the Unix epoch. An
+        /// `f64` on purpose: specta refuses `u64`/`i64` (they overflow JS
+        /// numbers) and an epoch-ms value is far inside f64's exact range.
+        #[serde(rename = "startedAtMs")]
+        started_at_ms: f64,
+        /// Terminals the server holds right now.
+        #[serde(rename = "liveSessions")]
+        live_sessions: u32,
+    },
+    /// No server and none being started, e.g. it was stopped, or could not be
+    /// trusted or launched. `reason` is a sentence to show, with a way to start
+    /// it again.
+    Down { reason: String },
+    /// The server keeps dying right after it starts: santree stopped
+    /// restarting it. `reason` says why; starting it again is the user's call.
+    Failing { reason: String },
+}
+
+/// How many terminals a server holds, when that is a fact and when it isn't.
+/// `Unknown` is a server that is running but didn't say (hung, slow, or its
+/// socket was removed): it may hold agents, so the UI must never draw it as
+/// `0`, which reads as "safe to end".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(tag = "kind")]
+pub enum SessionCount {
+    Known { count: u32 },
+    Unknown,
+}
+
+/// An older server revision that is still running because it holds terminals.
+/// It is left alone until its terminals end; a new server serves new ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DrainingServer {
+    pub revision: u32,
+    /// Terminals it still holds.
+    pub sessions: SessionCount,
+    /// Its process id, once it has answered `server.info`.
+    pub pid: Option<u32>,
+    /// The santree release it was built with, once it has answered.
+    pub version: Option<String>,
+}
+
+/// `server_status`: the current server plus any older ones still draining.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerStatus {
+    pub state: ServerState,
+    pub draining: Vec<DrainingServer>,
+}
+
+/// `quit_summary`: what quitting the app would cost, so the quit guard warns
+/// only about work that really ends (terminals the server keeps do not count;
+/// a setup run is a terminal like the rest).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct QuitSummary {
+    /// Terminals that end when the app quits.
+    pub terminals_end: u32,
+}
+
+/// One live PTY session, for the Terminal settings panel.
+///
+/// Deliberately a different shape from `TerminalUsage`, which answers "what is
+/// this costing" by joining the process table. This answers "what is running,
+/// and can I still reach it" — the lifecycle question, which is the one a reload
+/// made possible to get wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSession {
+    pub id: u32,
+    /// The `term_key` it was opened under — how the UI names it.
+    pub label: String,
+    pub cwd: Option<String>,
+    pub command: String,
+    /// The root process's pid, or `None` when the platform didn't report one.
+    pub pid: Option<u32>,
+    pub cols: u16,
+    pub rows: u16,
+    /// Whether a pane is currently receiving this session's output. `false` is
+    /// ordinary — a closed pane, or work inherited from a reload and not yet
+    /// reopened — but it is otherwise invisible, which is why it is here.
+    pub attached: bool,
+    /// Whether the root process still exists.
+    pub alive: bool,
+    /// The revision of the local server holding it, so the card can group
+    /// sessions by server. `None` for a session in the app itself.
+    #[specta(optional)]
+    pub server_revision: Option<u32>,
+}
+
+/// `terminal_inventory`: this Mac's terminal sessions as the Terminal settings
+/// panel's server card needs them — the list, whether it is the whole of it, and
+/// which of them no tab will ever show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalInventory {
+    pub sessions: Vec<TerminalSession>,
+    /// False when a server that may hold more sessions couldn't be asked. The
+    /// list is then what is known, not what is running.
+    pub complete: bool,
+    /// Ids (in `sessions`) of live sessions labelled as a tab whose tab no
+    /// longer exists, and that no pane is showing: a tab closed while its server
+    /// was unreachable, or a worktree deleted under it. Nothing closes these on
+    /// its own; the card offers to stop them.
+    pub orphans: Vec<u32>,
+}
+
 /// A setting this Mac may ask the box for, through the Daedalus agent here
 /// (docs/remote.md, "This Mac's settings").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -3121,6 +3251,121 @@ mod tests {
                 source
             );
         }
+    }
+
+    #[test]
+    fn server_state_serializes_tagged_and_camel_cased() {
+        use serde_json::json;
+        let cases = [
+            (ServerState::Off, json!({"kind": "Off"})),
+            (ServerState::Starting, json!({"kind": "Starting"})),
+            (ServerState::Stopping, json!({"kind": "Stopping"})),
+            (
+                ServerState::Running {
+                    revision: 3,
+                    version: "0.2.0".into(),
+                    pid: 4242,
+                    started_at_ms: 1_700_000_000_123.0,
+                    live_sessions: 5,
+                },
+                json!({
+                    "kind": "Running",
+                    "revision": 3,
+                    "version": "0.2.0",
+                    "pid": 4242,
+                    "startedAtMs": 1_700_000_000_123.0,
+                    "liveSessions": 5,
+                }),
+            ),
+            (
+                ServerState::Down {
+                    reason: "stopped".into(),
+                },
+                json!({"kind": "Down", "reason": "stopped"}),
+            ),
+            (
+                ServerState::Failing {
+                    reason: "crashed 5 times".into(),
+                },
+                json!({"kind": "Failing", "reason": "crashed 5 times"}),
+            ),
+        ];
+        for (state, want) in cases {
+            assert_eq!(serde_json::to_value(&state).unwrap(), want, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_inventory_serializes_camel_cased() {
+        use serde_json::json;
+        let inventory = TerminalInventory {
+            sessions: vec![TerminalSession {
+                id: 7,
+                label: "tree:AK-1:tab:t".into(),
+                cwd: None,
+                command: "/bin/zsh".into(),
+                pid: Some(42),
+                cols: 80,
+                rows: 24,
+                attached: false,
+                alive: true,
+                server_revision: Some(3),
+            }],
+            complete: false,
+            orphans: vec![7],
+        };
+        assert_eq!(
+            serde_json::to_value(inventory).unwrap(),
+            json!({
+                "sessions": [{
+                    "id": 7, "label": "tree:AK-1:tab:t", "cwd": null,
+                    "command": "/bin/zsh", "pid": 42, "cols": 80, "rows": 24,
+                    "attached": false, "alive": true,
+                    "serverRevision": 3,
+                }],
+                "complete": false,
+                "orphans": [7],
+            })
+        );
+    }
+
+    #[test]
+    fn server_status_and_quit_summary_serialize_camel_cased() {
+        use serde_json::json;
+        let status = ServerStatus {
+            state: ServerState::Starting,
+            draining: vec![
+                DrainingServer {
+                    revision: 2,
+                    sessions: SessionCount::Known { count: 7 },
+                    pid: Some(99),
+                    version: Some("0.1.18".into()),
+                },
+                DrainingServer {
+                    revision: 1,
+                    sessions: SessionCount::Unknown,
+                    pid: None,
+                    version: None,
+                },
+            ],
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            json!({
+                "state": {"kind": "Starting"},
+                "draining": [
+                    {"revision": 2, "sessions": {"kind": "Known", "count": 7},
+                     "pid": 99, "version": "0.1.18"},
+                    {"revision": 1, "sessions": {"kind": "Unknown"},
+                     "pid": null, "version": null},
+                ],
+            })
+        );
+        let quit = QuitSummary { terminals_end: 3 };
+        assert_eq!(
+            serde_json::to_value(quit).unwrap(),
+            json!({"terminalsEnd": 3})
+        );
     }
 }
 

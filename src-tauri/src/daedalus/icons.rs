@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use santree_core::domain::DaedalusIcon;
 use santree_remote_client::proto::{m, ErrorCode, WorkspaceIcon, WorkspacesIconParams};
 
-use super::host::{DaedalusHost, CONNECT_WAIT};
+use super::host::DaedalusHost;
+use crate::sessions::CONNECT_WAIT;
 
 /// How long an answer holds on one link before the box is asked again.
 const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -205,11 +206,11 @@ fn view(icon: WorkspaceIcon) -> DaedalusIcon {
 
 #[cfg(test)]
 mod tests {
+    use crate::sessions::testkit::fast;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use santree_remote_client::fake::{FakeAgent, FakeDaemon, FakeOptions};
     use santree_remote_client::proto::Method;
-    use santree_remote_client::{ClientOptions, HostOptions};
 
     use super::*;
 
@@ -220,15 +221,6 @@ mod tests {
         WorkspaceIcon {
             content_type: content_type.into(),
             data: data.to_vec(),
-        }
-    }
-
-    fn fast() -> HostOptions {
-        HostOptions {
-            backoff_min: Duration::from_millis(20),
-            backoff_max: Duration::from_millis(200),
-            hello_timeout: Duration::from_secs(5),
-            client: ClientOptions::default(),
         }
     }
 

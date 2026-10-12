@@ -8,10 +8,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AgentKind } from "../../bindings";
+import { useHeldFor } from "../../lib/useHeldFor";
 import type { PaneHandle } from "./orchestrator";
 import { paneAddress } from "./paneAddress";
 import { clearSessionTitle, setSessionTitle } from "./sessionTitles";
 import { tauriBackend } from "./TauriBackend";
+import { LostSession, WaitingBadge } from "./TerminalOverlays";
 import type { PaneLink, SessionId, TerminalBackend, TerminalRenderer } from "./types";
 import { XtermRenderer } from "./XtermRenderer";
 
@@ -44,9 +46,25 @@ export interface TerminalViewProps {
   focused?: boolean;
   /** Called once when the hosted process exits (so the tab can be torn down). */
   onExit?: () => void;
+  /** The user closed a pane whose session is gone (`lost`). Ending the tab is
+   *  the host's call, as it is for an exit; absent, the pane offers no Close. */
+  onClose?: () => void;
+  /** The user asked to pick a lost agent's conversation back up. A human click
+   *  and nothing else: santree never resumes on its own (COMPLIANCE.md). Absent
+   *  for a plain shell, which has nothing to resume. */
+  onResume?: () => void;
+  /** Why Resume cannot be clicked right now (the server it needs is not up). The
+   *  button stays, disabled, with this beside it. */
+  resumeBlocked?: string;
+  /** Where to look when the pane has waited on its host too long: the place that
+   *  shows that host's state (the local server's card, the Daedalus link). Absent
+   *  when there is no such place, and the pane only says it is waiting. */
+  unansweredHint?: string;
+  /** Told whenever the session's reachability changes, so the host can act on a
+   *  pane that is `lost` (a session adopted late for it). */
+  onLink?: (link: PaneLink) => void;
   /** Called once the PTY is live, handing out this pane's imperative handle:
-   *  how to type into the session from elsewhere (the Agents panel's reply box),
-   *  and how to end it. Returns a cleanup fn, run when the pane tears down. */
+   *  how to end it. Returns a cleanup fn, run when the pane tears down. */
   onReady?: (handle: PaneHandle) => (() => void) | undefined;
   /** The session's bytes come from Daedalus, not this Mac: they are untrusted
    *  (design S5), so the renderer is built with clipboard writes (OSC 52) off
@@ -71,6 +89,9 @@ function safeFit(renderer: TerminalRenderer): { cols: number; rows: number } {
   return { cols: 80, rows: 24 };
 }
 
+/** How long a pane waits on its host before it says the terminals aren't answering. */
+export const UNANSWERED_MS = 10_000;
+
 export function TerminalView({
   cwd,
   command = "",
@@ -83,22 +104,29 @@ export function TerminalView({
   active = true,
   focused = active,
   onExit,
+  onClose,
+  onResume,
+  resumeBlocked,
+  unansweredHint,
+  onLink,
   onReady,
   backend = tauriBackend,
   createRenderer = (opts) => new XtermRenderer(opts),
 }: TerminalViewProps) {
   const host = useRef<HTMLDivElement>(null);
-  // Whether the session is reachable right now. Only a session on Daedalus ever
-  // says otherwise, and `reconnecting` is never an exit: the process is still
-  // running there, and the backend catches this pane up when the link is back.
+  // Whether the session is reachable right now. Only a remote session (Daedalus,
+  // or the local santree server) ever says otherwise, and `reconnecting` is never
+  // an exit: the process is still running there, and the backend catches this pane
+  // up when the link is back. `lost` is not an exit either: the session is gone
+  // without having ended (the server stopped, or the pane never got one), so the
+  // sentinel that closes a tab never comes and the pane has to say so itself.
   const [link, setLink] = useState<PaneLink>("live");
+  // Whether the session has not yet answered the open/attach that brings this
+  // pane up. With `link === "reconnecting"` it is the other half of "waiting on
+  // the host", and either one lasting too long shows the hint below.
+  const [starting, setStarting] = useState(true);
   const rendererRef = useRef<TerminalRenderer | null>(null);
   const idRef = useRef<SessionId | null>(null);
-  // Where this pane is in the session's stream, for a later re-attach. Null
-  // until the backend has told us; a missing anchor degrades to a full replay,
-  // a *stale* one would silently skip bytes, so it is only ever set from an
-  // answer the backend gave.
-  const anchorRef = useRef<{ epoch: string; seq: number } | null>(null);
   // The session this pane started, as a promise, so a re-run of the mount effect
   // joins the one already in flight rather than racing it. Deliberately not
   // cleared on cleanup — it outlives the effect and dies with the component,
@@ -119,6 +147,8 @@ export function TerminalView({
   onExitRef.current = onExit;
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+  const onLinkRef = useRef(onLink);
+  onLinkRef.current = onLink;
   // Same, for `active`: every pane stays laid out at full size (see TerminalLayer),
   // so a geometry change to the shared layer resizes ALL of them at once. Only the
   // pane on screen may act on that — a SIGWINCH to a backgrounded shell makes it
@@ -155,14 +185,16 @@ export function TerminalView({
     // using this for anything else — the title must never reach a PTY write.
     renderer.onTitle((title) => setSessionTitle(paneAddress(label, agentKind), title));
 
-    let unregisterInput: (() => void) | undefined;
+    let unregisterPane: (() => void) | undefined;
     let disposed = false;
     const { cols, rows } = safeFit(renderer);
     const handlers = {
       onOutput: (bytes: Uint8Array) => renderer.write(bytes),
       onExit: () => onExitRef.current?.(),
       onLink: (next: PaneLink) => {
-        if (!disposed) setLink(next);
+        if (disposed) return;
+        setLink(next);
+        onLinkRef.current?.(next);
       },
     };
 
@@ -206,23 +238,17 @@ export function TerminalView({
         }
         if (!created) {
           // `fresh`, not `unknown`: this xterm was just constructed, so it has
-          // nothing on it that a replay could duplicate.
-          anchorRef.current = null;
-          const attached = await backend.attach(id, { kind: "fresh" }, handlers);
+          // nothing on it that a replay could duplicate. The terminal modes the
+          // program set before the retained tail come from the host, ahead of
+          // the replay.
+          await backend.attach(id, { kind: "fresh" }, handlers);
           if (disposed) return;
-          anchorRef.current =
-            attached.seq === null ? null : { epoch: attached.epoch, seq: attached.seq };
         }
         idRef.current = id;
+        setStarting(false);
         lastSizeRef.current = { cols, rows };
         renderer.onInput((data) => backend.write(id, data));
-        // Hand the same input channel out, so a session can be typed into from
-        // outside its pane (the Agents panel reply box) — identical to keystrokes
-        // arriving from the renderer, just sourced from another surface.
-        unregisterInput = onReadyRef.current?.({
-          write: (data) => backend.write(id, data),
-          end: () => backend.close(id),
-        });
+        unregisterPane = onReadyRef.current?.({ end: () => backend.close(id) });
         // Seeding an adopted session would type the launch command into a shell
         // that is already running the agent it names — `adoptId` is the test,
         // not `created`, because a session this pane opened still needs its seed
@@ -242,44 +268,17 @@ export function TerminalView({
         // The pane can close while `open` is still in flight; writing to a disposed
         // renderer throws, and there'd be no one left to show the message to anyway.
         if (disposed) return;
+        setStarting(false);
         renderer.write(`\r\n\x1b[31m[failed to start terminal: ${String(e)}]\x1b[0m\r\n`);
       }
     })();
 
-    let ro: ResizeObserver | undefined;
-    let sigwinch: ReturnType<typeof setTimeout> | undefined;
-    if (typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(() => {
-        if (!activeRef.current) return;
-        // Fit IMMEDIATELY, in the same frame the box changed. xterm sizes
-        // `.xterm-screen` and its canvases from the grid, not from the element it
-        // was mounted in, and nothing in its stylesheet clips them — so a grid
-        // that lags a shrinking box is a canvas painting over whatever sits
-        // beside the pane. (The layer clips too; this is the other half, so what
-        // survives the clip is also the right picture.) A fit is local work — it
-        // never touches the PTY — and `FitAddon.fit()` no-ops unless cols/rows
-        // actually changed, so the cost of doing it per tick is some extra
-        // repaints during a drag. That trade is deliberate.
-        const { cols, rows } = safeFit(renderer);
-        // The PTY resize is the half that stays debounced, and it is the half the
-        // debounce was always for: every SIGWINCH makes the shell reprint its
-        // prompt (p10k especially), so one per frame of a drag stacks a prompt
-        // line per frame. Wait for the size to SETTLE and send exactly one —
-        // `commitResize` then drops even that when the grid didn't change.
-        if (sigwinch) clearTimeout(sigwinch);
-        sigwinch = setTimeout(() => {
-          if (!activeRef.current) return;
-          commitResize(cols, rows);
-        }, SIGWINCH_SETTLE_MS);
-      });
-      ro.observe(el);
-    }
+    const stopObserving = observeResize(el, renderer, activeRef, commitResize);
 
     return () => {
       disposed = true;
-      ro?.disconnect();
-      if (sigwinch) clearTimeout(sigwinch);
-      unregisterInput?.();
+      stopObserving();
+      unregisterPane?.();
       // Detach, never close. A pane unmounting says nothing about whether the
       // work in it should stop — the user switched tabs, or the window
       // reloaded. Ending the session is an explicit act, and it happens in
@@ -299,6 +298,13 @@ export function TerminalView({
     };
   }, []);
 
+  // After UNANSWERED_MS of waiting on the host (a link that is down, or a session
+  // that has not opened), say so. A timer on the link state santree already holds:
+  // nothing reads or probes the PTY, and the hint never writes to it. A `lost`
+  // pane is not waiting, it has its own message.
+  const waiting = link !== "lost" && (link === "reconnecting" || starting);
+  const unanswered = useHeldFor(waiting, UNANSWERED_MS);
+
   // Refit when this pane comes on screen (it may have been sized to zero while
   // hidden behind another tab), and take the keyboard when it is the one being
   // worked in.
@@ -317,15 +323,57 @@ export function TerminalView({
   return (
     <div className="relative h-full w-full">
       <div ref={host} className="h-full w-full" />
-      {link === "reconnecting" && (
-        <div
-          role="status"
-          className="pointer-events-none absolute top-2 right-3 flex items-center gap-1.5 rounded border border-line-2 bg-raised px-2 py-1 text-[11px] text-muted-2 shadow-sm"
-        >
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-amber" />
-          Reconnecting…
-        </div>
+      <WaitingBadge
+        reconnecting={link === "reconnecting"}
+        unanswered={unanswered}
+        hint={unansweredHint}
+      />
+      {link === "lost" && (
+        <LostSession onClose={onClose} onResume={onResume} resumeBlocked={resumeBlocked} />
       )}
     </div>
   );
+}
+
+/**
+ * Keep the grid fitted to the pane's box, and the PTY told of the new size once
+ * a resize settles. Only the pane on screen acts (`activeRef`; see its comment).
+ * Returns the disposer.
+ */
+function observeResize(
+  el: HTMLElement,
+  renderer: TerminalRenderer,
+  activeRef: { readonly current: boolean },
+  commitResize: (cols: number, rows: number) => void,
+): () => void {
+  if (typeof ResizeObserver === "undefined") return () => {};
+  let sigwinch: ReturnType<typeof setTimeout> | undefined;
+  const ro = new ResizeObserver(() => {
+    if (!activeRef.current) return;
+    // Fit IMMEDIATELY, in the same frame the box changed. xterm sizes
+    // `.xterm-screen` and its canvases from the grid, not from the element it
+    // was mounted in, and nothing in its stylesheet clips them — so a grid that
+    // lags a shrinking box is a canvas painting over whatever sits beside the
+    // pane. (The layer clips too; this is the other half, so what survives the
+    // clip is also the right picture.) A fit is local work — it never touches
+    // the PTY — and `FitAddon.fit()` no-ops unless cols/rows actually changed, so
+    // the cost of doing it per tick is some extra repaints during a drag. That
+    // trade is deliberate.
+    const { cols, rows } = safeFit(renderer);
+    // The PTY resize is the half that stays debounced, and it is the half the
+    // debounce was always for: every SIGWINCH makes the shell reprint its prompt
+    // (p10k especially), so one per frame of a drag stacks a prompt line per
+    // frame. Wait for the size to SETTLE and send exactly one — `commitResize`
+    // then drops even that when the grid didn't change.
+    if (sigwinch) clearTimeout(sigwinch);
+    sigwinch = setTimeout(() => {
+      if (!activeRef.current) return;
+      commitResize(cols, rows);
+    }, SIGWINCH_SETTLE_MS);
+  });
+  ro.observe(el);
+  return () => {
+    ro.disconnect();
+    if (sigwinch) clearTimeout(sigwinch);
+  };
 }

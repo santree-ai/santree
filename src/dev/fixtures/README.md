@@ -29,7 +29,9 @@ and main tab; saving reloads the page onto it.
 Fake (`handlers.ts`): repos, worktrees and their git state, Linear tickets and
 triage, GitHub PRs and reviews, agent sessions and their usage, and the
 terminals — every pane the fixture world owns is painted from a script in
-`transcript.ts` instead of a process (`terminal.ts`).
+`transcript.ts` instead of a process (`terminal.ts`). The santree server is
+answered as off (`server_status`, `quit_summary`, `terminal_inventory`), so a
+capture never carries its banner or a quit prompt about terminals.
 
 Real: settings, prompts, the agent catalog and its availability, hook files,
 the keychain-backed statuses. The chrome around the invented work is the app's

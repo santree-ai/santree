@@ -14,7 +14,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
 use anyhow::{bail, Result};
 use tokio::sync::broadcast;
@@ -24,17 +23,7 @@ use santree_remote_client::proto::{
 };
 use santree_remote_client::{PtyEvent, RemoteClient, RemoteHost};
 
-/// What the PTY runs: the script as `$0`, its status file as `$1`. The status
-/// is written only when the script ends on its own; a killed run leaves none,
-/// which reads as a failure.
-const WRAPPER: &str = r#""$0"; s=$?; printf '%s' "$s" > "$1"; exit "$s""#;
-
-/// Backstop for a run that never ends, as `stream::DEADLINE` is for a local
-/// one; Stop is the normal way out.
-#[cfg(not(test))]
-const DEADLINE: Duration = Duration::from_secs(60 * 60);
-#[cfg(test)]
-const DEADLINE: Duration = Duration::from_secs(30);
+use crate::stream::{DEADLINE, WRAPPER};
 
 /// One setup run on the box.
 pub struct RunSpec {
@@ -135,6 +124,7 @@ impl RemoteRuns {
                 cols: crate::stream::COLS,
                 rows: crate::stream::ROWS,
                 env: spec.env.clone(),
+                base_env: Vec::new(),
                 owner: spec.owner.clone(),
                 label: spec.label.clone(),
                 agent_kind: None,

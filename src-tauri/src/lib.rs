@@ -6,6 +6,7 @@
 mod agent;
 mod agent_procs;
 mod awake;
+mod bundled_bin;
 mod claude_usage;
 mod codex_cli;
 mod codex_config;
@@ -27,6 +28,7 @@ mod git_watch;
 mod github;
 mod global_capture;
 mod gql;
+mod hook_bin;
 mod hooks;
 mod jira;
 mod legacy;
@@ -48,8 +50,10 @@ mod review_work_items;
 mod reviewed;
 mod reviews;
 mod santree_dir;
+mod server;
 mod session;
 mod session_signal;
+pub mod sessions;
 mod settings;
 mod split_stack;
 mod stream;
@@ -60,6 +64,8 @@ mod tracker;
 mod update;
 mod usage;
 mod worktree;
+
+use std::sync::Arc;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -85,6 +91,7 @@ fn specta_builder() -> AppBuilder {
             daedalus::host::DaedalusLinkChanged,
             git_watch::WorktreeChanged,
             pr::WorktreeBasesChanged,
+            server::commands::ServerStateChanged,
             session_signal::ClaudeRateLimitsChanged,
             session_signal::ReviewAiChanged,
             session_signal::SessionStateChanged,
@@ -132,6 +139,7 @@ fn specta_builder() -> AppBuilder {
             commands::worktree_session_subagents,
             commands::reveal_worktree_session_transcript,
             commands::resume_worktree_session,
+            commands::check_tab_resume,
             commands::watch_worktrees,
             commands::stage_path,
             commands::unstage_path,
@@ -264,6 +272,7 @@ fn specta_builder() -> AppBuilder {
             commands::legacy_cli_migrate,
             commands::check_for_update,
             commands::install_update,
+            commands::reveal_logs,
             commands::keep_awake_status,
             commands::set_keep_awake,
             terminal::terminal_open,
@@ -274,7 +283,13 @@ fn specta_builder() -> AppBuilder {
             terminal::terminal_attach,
             terminal::terminal_detach,
             terminal::terminal_adopt,
-            terminal::terminal_sessions,
+            terminal::terminal_inventory,
+            terminal::quit_summary,
+            server::commands::server_status,
+            server::commands::server_start,
+            server::commands::server_restart,
+            server::commands::server_stop,
+            server::commands::server_end_draining,
         ])
 }
 
@@ -595,7 +610,7 @@ pub fn run() {
             // The smoke run's success condition: the window's document loaded, so
             // the frontend bundle shipped and the webview came up.
             let loaded = matches!(payload.event(), tauri::webview::PageLoadEvent::Finished);
-            if smoke_enabled() && loaded {
+            if server::smoke_enabled() && loaded {
                 log::info!("smoke: the window finished loading; exiting 0");
                 webview.app_handle().exit(0);
             }
@@ -639,6 +654,12 @@ pub fn run() {
                     ),
                 ),
             };
+            // Agents' hooks name `santree-hook` by an absolute path, and the updater
+            // renames the bundle that ships it away: put a copy at a path that
+            // survives an update, before any command that writes one. After the
+            // migrations on purpose — the copy must never run ahead of a schema
+            // the previous hook binary still expects (hook_bin.rs).
+            hook_bin::prepare(app.handle());
             if let Err(e) = tauri::async_runtime::block_on(settings::migrate_helper_agents(&db)) {
                 log::warn!("helper-agent migration failed: {e:#}");
             }
@@ -704,7 +725,14 @@ pub fn run() {
             // re-apply it here. Synchronous, and before `db` is moved into managed
             // state: settled a tick late, the chrome's toggle would paint "off"
             // and then flip under the user on the first refetch.
-            let keep_awake = awake::KeepAwake::default();
+            // With a local server, the hold is the server's (it must outlive the
+            // app, which `caffeinate -w <app pid>` cannot); the app only
+            // remembers the setting and tells the server.
+            let keep_awake = if sessions::server_mode() == sessions::Mode::Off {
+                awake::KeepAwake::default()
+            } else {
+                awake::KeepAwake::delegated_to_server()
+            };
             tauri::async_runtime::block_on(awake::restore(&db, &keep_awake));
             app.manage(keep_awake);
 
@@ -740,8 +768,47 @@ pub fn run() {
             // follows it (see `update`).
             app.manage(update::PendingUpdate::default());
 
-            // Owns all live terminal sessions; commands read it from state.
-            app.manage(santree_pty::PtyManager::new());
+            // Where terminals live. `server_mode()` is decided once: on a signed
+            // build (or `SANTREE_SERVER=1`) local panes run on a detached
+            // santree-server and outlive the app; otherwise they are PTYs in this
+            // process, exactly as before. `Terminals` is the one handle every
+            // command holds; the supervisor is managed either way (its status
+            // reads `Off` when there is no server), so `server_status` always has
+            // its state.
+            let mode = sessions::server_mode();
+            let bundled_server = bundled_server_bin(app.handle());
+            let servers = {
+                let (daedalus_ids, db) = (
+                    app.state::<daedalus::host::DaedalusHost>().ids().clone(),
+                    app.state::<db::Db>().inner().clone(),
+                );
+                let (emit_to, awake_of, held_by) = (
+                    app.handle().clone(),
+                    app.handle().clone(),
+                    app.handle().clone(),
+                );
+                server::LocalServers::new(server::ServerConfig {
+                    app_data_dir: data_dir.clone(),
+                    log_dir: app.path().app_log_dir().ok(),
+                    bundled_binary: bundled_server.clone(),
+                    mode,
+                    ids: daedalus_ids,
+                    retire: terminal::retire_exited(db),
+                    // Every state change reaches the frontend, which also re-runs
+                    // `terminal_adopt` on the move into `Running`: an adopt that
+                    // met a server still coming up returned without its panes.
+                    emit: Arc::new(move |status| {
+                        use tauri_specta::Event as _;
+                        let _ = server::commands::ServerStateChanged(status).emit(&emit_to);
+                    }),
+                    keep_awake: Arc::new(move || awake_of.state::<awake::KeepAwake>().wanted()),
+                    keep_awake_held: Arc::new(move |held| {
+                        held_by.state::<awake::KeepAwake>().confirm(held)
+                    }),
+                })
+            };
+            terminal::manage(app.handle(), mode, &servers);
+            app.manage(servers.clone());
 
             // Owns the worktree filesystem watcher; `watch_worktrees` points it at
             // the active repo so the Trees views refresh live on disk changes.
@@ -781,19 +848,42 @@ pub fn run() {
 
             log::info!("santree started");
 
-            // CI's packaged-app probe (see `smoke_enabled`). The hook resource is
+            // CI's packaged-app probe (see `server::smoke_enabled`). The hook resource is
             // asserted *through* `resource_dir()` rather than with a `test -x` on
             // the bundle, because resolving it that way is what the app itself
             // does — a bundle can carry the file at a path the runtime can't find.
-            if smoke_enabled() {
-                match hooks::hook_bin(app.handle()) {
+            if server::smoke_enabled() {
+                match hook_bin::bundled(app.handle()) {
                     Some(p) => log::info!("smoke: resolved the bundled hook at {}", p.display()),
                     None => {
                         eprintln!("smoke: FAILED — the bundled santree-hook did not resolve");
                         std::process::exit(2);
                     }
                 }
+                // The bundled server must resolve and be the revision this app
+                // was built against. Asked of the binary (`version --json`), never
+                // by starting one: the run launches nothing that outlives it.
+                if mode != sessions::Mode::Off {
+                    let verdict = bundled_server
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("the bundled santree-server did not resolve"))
+                        .and_then(server::smoke_assert);
+                    match verdict {
+                        Ok(()) => log::info!("smoke: the bundled santree-server matches this app"),
+                        Err(e) => {
+                            eprintln!("smoke: FAILED — {e:#}");
+                            std::process::exit(2);
+                        }
+                    }
+                }
                 start_smoke_watchdog();
+            } else if mode != sessions::Mode::Off {
+                // Connect to this build's server, launching it if none runs, and
+                // find the older ones still holding sessions. Never under the
+                // smoke run (`ensure` refuses there too: the two share one
+                // predicate).
+                let servers = servers.clone();
+                tauri::async_runtime::spawn(async move { servers.ensure().await });
             }
 
             Ok(())
@@ -801,17 +891,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // By the time an exit is actually requested it's already been confirmed:
-            // ⌘Q goes through the custom menu item → QuitGuard, the close button /
-            // ⌘W goes through the window's `onCloseRequested` → QuitGuard, and both
-            // finish via `quit_app`/`destroy()`. So just reap terminal children here.
+            // By the time an exit is actually requested it's already been confirmed
+            // (QuitGuard asks only when quitting ends in-app terminals): ⌘Q goes
+            // through the custom menu item, the close button / ⌘W through the
+            // window's `onCloseRequested`, and both finish via `quit_app`/`destroy()`.
+            // So just let go of the terminals here.
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                if let Some(pty) = app.try_state::<santree_pty::PtyManager>() {
-                    pty.close_all();
-                }
-                // Setup scripts run their own PTY, outside PtyManager — quitting
-                // mid-setup would otherwise orphan `init.sh` and everything it spawned.
-                stream::RUNS.kill_all();
+                // In-app terminals end with the app — setup scripts are panes like
+                // the rest — and a local server's are let go and keep running.
+                terminal::release(app);
             }
         });
 }
@@ -925,9 +1013,43 @@ fn confirm_on_quit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     value.as_deref() != Some("false")
 }
 
+/// The bundled `santree-server`: the resource dir in a bundled build. A debug
+/// build also takes a sibling of the running executable (`cargo build` lands
+/// both in `target/debug`), the way `hook_bin` finds `santree-hook`; a release
+/// never does — it would exec whatever sits in `Contents/MacOS`, and the server
+/// must be the one the bundle was signed with. `None` if neither exists —
+/// `Mode::Off` never asks.
+fn bundled_server_bin(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    pick_server_bin(
+        app.path().resource_dir().ok().as_deref(),
+        std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(std::path::Path::parent),
+        cfg!(debug_assertions),
+    )
+}
+
+/// [`bundled_server_bin`]'s choice over the two places it looks, and whether the
+/// second is allowed at all.
+fn pick_server_bin(
+    resources: Option<&std::path::Path>,
+    beside_exe: Option<&std::path::Path>,
+    allow_beside_exe: bool,
+) -> Option<std::path::PathBuf> {
+    let found = |dir: &std::path::Path| {
+        let p = dir.join("santree-server");
+        p.exists().then_some(p)
+    };
+    resources
+        .and_then(found)
+        .or_else(|| beside_exe.filter(|_| allow_beside_exe).and_then(found))
+}
+
 /// CI's "does the packaged app actually start?" probe, enabled with
-/// `SANTREE_SMOKE=1`: the app exits 0 once its window has loaded, and the
-/// watchdog below fails the run if that never happens.
+/// `SANTREE_SMOKE=1` (read by [`server::smoke_enabled`], the one predicate the
+/// local server's launcher shares): the app exits 0 once its window has loaded
+/// (`on_page_load`), and this watchdog fails the run if that never happens.
 ///
 /// Everything else in the release pipeline inspects the *bundle* — codesign,
 /// notarization, the stapled ticket, the hook resource being present. Nothing
@@ -936,11 +1058,8 @@ fn confirm_on_quit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 /// through a green pipeline. This is deliberately start-and-quit rather than
 /// end-to-end: `tauri-driver` can't drive WKWebView, so "the window loaded" is
 /// the strongest signal available on macOS.
-fn smoke_enabled() -> bool {
-    std::env::var_os("SANTREE_SMOKE").is_some_and(|v| v != "0")
-}
-
-/// Fail the smoke run if the window never loads. Without it a hang would sit
+///
+/// Without the watchdog a hang would sit
 /// until the CI job's own timeout, reported as an infrastructure flake rather
 /// than as the app failing to start.
 fn start_smoke_watchdog() {
@@ -964,6 +1083,36 @@ mod tests {
     #[test]
     fn export_bindings_succeeds() {
         export_bindings(&specta_builder()).expect("bindings export should succeed");
+    }
+
+    /// A release resolves the server from the bundle's resources alone: a
+    /// `santree-server` beside the executable is only ever a dev build's.
+    #[test]
+    fn a_release_never_takes_a_server_from_beside_its_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let (resources, beside) = (dir.path().join("Resources"), dir.path().join("MacOS"));
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::create_dir_all(&beside).unwrap();
+        std::fs::write(beside.join("santree-server"), b"planted").unwrap();
+
+        assert_eq!(
+            pick_server_bin(Some(&resources), Some(&beside), false),
+            None
+        );
+        assert_eq!(
+            pick_server_bin(Some(&resources), Some(&beside), true),
+            Some(beside.join("santree-server")),
+            "a debug build's cargo output sits beside it"
+        );
+        // The bundle's own copy wins in both.
+        std::fs::write(resources.join("santree-server"), b"bundled").unwrap();
+        for allow in [false, true] {
+            assert_eq!(
+                pick_server_bin(Some(&resources), Some(&beside), allow),
+                Some(resources.join("santree-server"))
+            );
+        }
+        assert_eq!(pick_server_bin(None, None, true), None);
     }
 
     #[test]

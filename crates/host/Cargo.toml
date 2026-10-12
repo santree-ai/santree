@@ -1,0 +1,32 @@
+[package]
+name = "santree-host"
+description = "santree's protocol v1 served: PTY sessions that outlive their client, exec, files and a hook queue — the one implementation behind the local santree server, the test daemon and (later) Daedalus's session host."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+# The daedalus engine builds this crate with nix on rustc 1.95.
+rust-version = "1.95"
+
+# Meant to be consumed outside this workspace too: the daedalus engine's session
+# host will depend on this crate by git rev. Its public API and its dependency
+# list are a contract — no santree-core, no specta, nothing Tauri, no transport
+# or crypto (the embedder brings its own: a unix socket, TLS).
+
+[features]
+# `Host::pty`, the PTY table itself, for tests that assert on what runs (the
+# test daemon's `fake`). Never for shipping: a write through it bypasses the
+# `pty.write` handler (COMPLIANCE.md; the workspace clippy.toml forbids it).
+test-support = []
+
+[dependencies]
+santree-pty = { path = "../pty" }
+santree-remote-proto = { path = "../remote-proto" }
+tokio = { workspace = true, features = ["rt", "net", "io-util", "process", "time", "sync", "macros"] }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+log = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tempfile = "3"

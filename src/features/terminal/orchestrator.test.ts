@@ -371,11 +371,10 @@ describe("useTerminalTabs", () => {
    *  wrong leaks a shell on every closed tab. */
   describe("closing a tab ends its session", () => {
     const handle = () => {
-      const calls = { writes: [] as string[], ended: 0 };
+      const calls = { ended: 0 };
       return {
         calls,
         pane: {
-          write: (d: string) => calls.writes.push(d),
           end: () => {
             calls.ended += 1;
           },
@@ -412,22 +411,6 @@ describe("useTerminalTabs", () => {
       expect(result.current.tabs).toEqual([]);
     });
 
-    it("routes typed input to the registered pane", () => {
-      const { result } = renderHook(() => useTerminalTabs());
-      const { calls, pane } = handle();
-      let key = "";
-      act(() => {
-        key = result.current.open({ title: "one" });
-      });
-      act(() => {
-        result.current.registerPane(key, pane);
-      });
-
-      expect(result.current.send(key, "hi")).toBe(true);
-      expect(calls.writes).toEqual(["hi"]);
-      expect(result.current.send("nope", "hi")).toBe(false);
-    });
-
     /** A remounting pane registers its next handle before the previous one's
      *  cleanup runs, so an unregister must only drop its own. */
     it("an unregister only drops its own handle", () => {
@@ -445,9 +428,10 @@ describe("useTerminalTabs", () => {
       });
 
       act(() => releaseFirst());
+      act(() => result.current.close(key));
 
-      expect(result.current.send(key, "hi")).toBe(true);
-      expect(second.calls.writes).toEqual(["hi"]);
+      expect(second.calls.ended).toBe(1);
+      expect(first.calls.ended).toBe(0);
     });
   });
 });

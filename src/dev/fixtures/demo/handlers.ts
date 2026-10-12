@@ -958,9 +958,11 @@ export function buildDemoCommands(real: Commands): Partial<Commands> {
       closeFake(id);
       return ok(null);
     }),
-    terminalSessions: async () => {
-      const own = await real.terminalSessions();
-      return own.status === "ok" ? ok([...own.data, ...fakeSessions()]) : own;
+    terminalInventory: async () => {
+      const own = await real.terminalInventory();
+      return own.status === "ok"
+        ? ok({ ...own.data, sessions: [...own.data.sessions, ...fakeSessions()] })
+        : own;
     },
   };
 }

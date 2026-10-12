@@ -30,7 +30,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::Db;
-use crate::terminal::LiveTerminal;
+use crate::sessions::{LiveTerminal, Liveness};
 
 /// Claude stores each session's transcript at
 /// `~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`, escaping the working
@@ -779,6 +779,20 @@ pub struct ResumeRequest<'a> {
     pub sessions_root: Option<&'a Path>,
 }
 
+/// Whether a session is held by a running terminal: the answer to "may it be
+/// resumed into another tab?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Occupancy {
+    /// Some surface it is bound to has a live PTY with that provider in it.
+    Running,
+    /// No terminal is known to hold it, but the terminals santree could ask
+    /// don't add up to the whole (a local server it can't reach yet may be
+    /// holding it): neither running nor free.
+    Unknown,
+    /// Nothing holds it.
+    Free,
+}
+
 /// Whether `session_id` is running right now in one of `repo`'s terminals: some
 /// surface it is bound to has a live PTY with that provider in it.
 ///
@@ -786,13 +800,19 @@ pub struct ResumeRequest<'a> {
 /// CLI would refuse it anyway ("already running") — but only after santree had
 /// bound the session to the new tab as well, and a session bound to two
 /// surfaces reads through whichever join row comes last.
-pub async fn is_running(
+///
+/// An absence only means "free" when `terminals` is `complete`, or when no
+/// surface is bound to the session at all (nothing santree launched can be
+/// holding it). Otherwise it is [`Occupancy::Unknown`]: right after a relaunch
+/// the agent is still running on the local server while the app has not yet
+/// adopted it, and resuming then would start the conversation twice.
+pub async fn occupancy(
     db: &Db,
     repo: &str,
     session_id: &str,
     agent_kind: AgentKind,
-    live: &HashSet<LiveTerminal>,
-) -> Result<bool> {
+    terminals: &Liveness,
+) -> Result<Occupancy> {
     let keys: Vec<(String,)> = sqlx::query_as(
         "SELECT term_key FROM terminal_sessions
          WHERE repo = ? AND session_id = ? AND agent_kind = ?",
@@ -802,12 +822,99 @@ pub async fn is_running(
     .bind(agent_kind.as_str())
     .fetch_all(db)
     .await?;
-    Ok(keys.into_iter().any(|(term_key,)| {
-        live.contains(&LiveTerminal {
-            term_key,
-            agent_kind: Some(agent_kind),
-        })
-    }))
+    let bound = |pane: &LiveTerminal| {
+        pane.agent_kind == Some(agent_kind) && keys.iter().any(|(key,)| *key == pane.term_key)
+    };
+    match terminals.knows(bound) {
+        Some(true) => return Ok(Occupancy::Running),
+        // Nothing known holds it, but the answer didn't cover everything: the
+        // binding above is deleted when a tab closes, and a tab closed while the
+        // server couldn't be told leaves its agent running there. Not free.
+        None => return Ok(Occupancy::Unknown),
+        Some(false) => {}
+    }
+    // A complete answer, and no bound surface is live. The same orphan, once the
+    // server answers in full, is a live pane of this provider that no binding
+    // accounts for, beside fresh word from the session itself (its hooks or its
+    // status line). Only both together: a pane no binding accounts for is also a
+    // new agent that hasn't bound yet, and a session heard from a while ago is
+    // not one to refuse over. With in-app terminals a closed tab's process is
+    // gone, so there is no such pane and this is `Free` as it always was.
+    if unattributed_pane(db, agent_kind, terminals).await?
+        && heard_from_lately(db, session_id).await?
+    {
+        return Ok(Occupancy::Running);
+    }
+    Ok(Occupancy::Free)
+}
+
+/// Whether the agent tab `term_key` may be relaunched where it is — a lost
+/// pane's Resume, which reopens the tab on its own stored session. Not while
+/// its own surface still has a live pane, nor while a session bound to it is
+/// running anywhere; and an answer that could not see every terminal frees
+/// nothing, bound session or not (a Codex tab that was never prompted has no
+/// binding, and its agent may still be on a server not yet adopted).
+pub async fn tab_occupancy(
+    db: &Db,
+    repo: &str,
+    term_key: &str,
+    terminals: &Liveness,
+) -> Result<Occupancy> {
+    match terminals.knows(|pane| pane.term_key == term_key) {
+        Some(true) => return Ok(Occupancy::Running),
+        None => return Ok(Occupancy::Unknown),
+        Some(false) => {}
+    }
+    let bound: Vec<(String, String)> = sqlx::query_as(
+        "SELECT session_id, agent_kind FROM terminal_sessions WHERE repo = ? AND term_key = ?",
+    )
+    .bind(repo)
+    .bind(term_key)
+    .fetch_all(db)
+    .await?;
+    for (session_id, agent_kind) in bound {
+        let held = occupancy(db, repo, &session_id, agent_kind.parse()?, terminals).await?;
+        if held != Occupancy::Free {
+            return Ok(held);
+        }
+    }
+    Ok(Occupancy::Free)
+}
+
+/// Whether a live pane running `agent_kind` has no binding at all, in any repo.
+async fn unattributed_pane(db: &Db, agent_kind: AgentKind, terminals: &Liveness) -> Result<bool> {
+    let panes: Vec<&LiveTerminal> = terminals
+        .live
+        .iter()
+        .filter(|p| p.agent_kind == Some(agent_kind))
+        .collect();
+    if panes.is_empty() {
+        return Ok(false);
+    }
+    let bound: Vec<(String,)> =
+        sqlx::query_as("SELECT DISTINCT term_key FROM terminal_sessions WHERE agent_kind = ?")
+            .bind(agent_kind.as_str())
+            .fetch_all(db)
+            .await?;
+    let bound: HashSet<String> = bound.into_iter().map(|(k,)| k).collect();
+    Ok(panes.iter().any(|p| !bound.contains(&p.term_key)))
+}
+
+/// Whether the session's own process reported in within the heartbeat window: a
+/// hook event that left it not exited, or a status-line render.
+async fn heard_from_lately(db: &Db, session_id: &str) -> Result<bool> {
+    let since = crate::db::now_ms() - crate::hooks::HEARTBEAT_DEAD_MS;
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM session_state
+                  WHERE session_id = ?1 AND state <> 'exited' AND updated_at_ms >= ?2)
+              + (SELECT COUNT(*) FROM session_usage_live
+                  WHERE session_id = ?1 AND updated_at_ms >= ?2)",
+    )
+    .bind(session_id)
+    .bind(since)
+    .fetch_one(db)
+    .await?;
+    Ok(n > 0)
 }
 
 /// Point `term_key` at one of a worktree's past sessions, so the tab the user
@@ -1643,36 +1750,297 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        let live = |term_key: &str, agent_kind| {
-            HashSet::from([LiveTerminal {
+        let known = |term_key: &str, agent_kind, complete| Liveness {
+            live: HashSet::from([LiveTerminal {
                 term_key: term_key.to_string(),
                 agent_kind: Some(agent_kind),
-            }])
+            }]),
+            complete,
+        };
+        let live = |term_key: &str, agent_kind| known(term_key, agent_kind, true);
+        let none = |complete| Liveness {
+            live: HashSet::new(),
+            complete,
         };
 
-        let running = |live| {
+        let held = |live| {
             let db = db.clone();
             async move {
-                is_running(&db, "repo", "s1", AgentKind::Claude, &live)
+                occupancy(&db, "repo", "s1", AgentKind::Claude, &live)
                     .await
                     .unwrap()
             }
         };
-        assert!(running(live("tree:AK-1:tab:a", AgentKind::Claude)).await);
-        // Another tab, the same tab with another provider, or nothing: not running.
-        assert!(!running(live("tree:AK-1:tab:b", AgentKind::Claude)).await);
-        assert!(!running(live("tree:AK-1:tab:a", AgentKind::Codex)).await);
-        assert!(!running(HashSet::new()).await);
+        assert_eq!(
+            held(live("tree:AK-1:tab:a", AgentKind::Claude)).await,
+            Occupancy::Running
+        );
+        // Another tab, the same tab with another provider, or nothing: free.
+        assert_eq!(
+            held(live("tree:AK-1:tab:b", AgentKind::Claude)).await,
+            Occupancy::Free
+        );
+        assert_eq!(
+            held(live("tree:AK-1:tab:a", AgentKind::Codex)).await,
+            Occupancy::Free
+        );
+        assert_eq!(held(none(true)).await, Occupancy::Free);
         // Bound in another repo only: not this one's.
-        assert!(!is_running(
+        assert_eq!(
+            occupancy(
+                &db,
+                "other",
+                "s1",
+                AgentKind::Claude,
+                &live("tree:AK-1:tab:a", AgentKind::Claude)
+            )
+            .await
+            .unwrap(),
+            Occupancy::Free
+        );
+
+        // The same absences from an answer that could not see everything are
+        // not "free": the agent may be running on a server not yet adopted.
+        assert_eq!(held(none(false)).await, Occupancy::Unknown);
+        assert_eq!(
+            held(known("tree:AK-1:tab:b", AgentKind::Claude, false)).await,
+            Occupancy::Unknown
+        );
+        // Positive evidence still wins, complete or not.
+        assert_eq!(
+            held(known("tree:AK-1:tab:a", AgentKind::Claude, false)).await,
+            Occupancy::Running
+        );
+        // A session no surface is bound to is no different while the answer is
+        // incomplete: the binding is deleted when its tab closes, and the agent
+        // can live on in a server that can't be asked. Unknown, not Free.
+        assert_eq!(
+            occupancy(&db, "repo", "unbound", AgentKind::Claude, &none(false))
+                .await
+                .unwrap(),
+            Occupancy::Unknown
+        );
+        // With a complete answer nothing holds it.
+        assert_eq!(
+            occupancy(&db, "repo", "unbound", AgentKind::Claude, &none(true))
+                .await
+                .unwrap(),
+            Occupancy::Free
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A tab closed while its server could not be reached deletes the session's
+    /// binding (`tabs::remove`) and leaves the agent running on the server. The
+    /// conversation must not read as free to resume: not while the answer is
+    /// incomplete, and not afterwards, while a live pane of that provider that no
+    /// binding accounts for is there beside fresh evidence the session is alive.
+    #[tokio::test]
+    async fn a_session_whose_tab_closed_while_the_server_was_away_is_not_free() {
+        let base =
+            std::env::temp_dir().join(format!("santree-session-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let now = crate::db::now_ms();
+        sqlx::query(
+            "INSERT INTO worktree_tabs (repo, id, worktree_id, kind, agent_kind, title, position)
+             VALUES ('repo', 'X', 'AK-1', 'agent', 'Claude', 'x', 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'tree:AK-1:tab:X', '/w', 's1', 'Claude')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO session_state (session_id, state, event, cwd, updated_at_ms)
+             VALUES ('s1', 'idle', 'Stop', '/w', ?)",
+        )
+        .bind(now)
+        .execute(&db)
+        .await
+        .unwrap();
+        // The tab is closed: its row and the binding go together.
+        crate::tabs::remove(&db, "repo", "X").await.unwrap();
+
+        let held = |terminals| {
+            let db = db.clone();
+            async move {
+                occupancy(&db, "repo", "s1", AgentKind::Claude, &terminals)
+                    .await
+                    .unwrap()
+            }
+        };
+        let pane = |term_key: &str| LiveTerminal {
+            term_key: term_key.into(),
+            agent_kind: Some(AgentKind::Claude),
+        };
+
+        // The server can't be asked: unknown.
+        assert_eq!(
+            held(Liveness {
+                live: HashSet::new(),
+                complete: false
+            })
+            .await,
+            Occupancy::Unknown
+        );
+        // It answers in full: the agent is a live pane no tab or binding owns,
+        // and the session was heard from a moment ago.
+        let orphan = Liveness {
+            live: HashSet::from([pane("tree:AK-1:tab:X")]),
+            complete: true,
+        };
+        assert_eq!(held(orphan.clone()).await, Occupancy::Running);
+
+        // The same pane without that fresh evidence: another conversation may
+        // be what it runs, and this one is stale — nothing says otherwise.
+        sqlx::query("UPDATE session_state SET updated_at_ms = ? WHERE session_id = 's1'")
+            .bind(now - 3_600_000)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(held(orphan.clone()).await, Occupancy::Free);
+
+        // A pane a binding does account for is not an unattributed one.
+        sqlx::query("UPDATE session_state SET updated_at_ms = ? WHERE session_id = 's1'")
+            .bind(now)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'tree:AK-1:tab:X', '/w', 'other', 'Claude')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        assert_eq!(held(orphan).await, Occupancy::Free);
+
+        // Off mode, identical: the closed tab's PTY is closed, so no pane is
+        // live, and a recent heartbeat alone is nothing to refuse over.
+        assert_eq!(
+            held(Liveness {
+                live: HashSet::new(),
+                complete: true
+            })
+            .await,
+            Occupancy::Free
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A triage ticket's own tab, lost with its server: Resume relaunches it on
+    /// its stored session, so the session must be free — and "free" needs an
+    /// answer that saw every terminal.
+    #[tokio::test]
+    async fn a_lost_tab_is_resumable_only_when_nothing_of_it_can_still_be_running() {
+        let base =
+            std::env::temp_dir().join(format!("santree-session-lost-tab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let tab = "triage:AK-1:tab:t1";
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', ?, '/repo', 's1', 'Claude')",
+        )
+        .bind(tab)
+        .execute(&db)
+        .await
+        .unwrap();
+        let liveness = |keys: &[&str], complete| Liveness {
+            live: keys
+                .iter()
+                .map(|key| LiveTerminal {
+                    term_key: key.to_string(),
+                    agent_kind: Some(AgentKind::Claude),
+                })
+                .collect(),
+            complete,
+        };
+        let gate = |key: &'static str, terminals: Liveness| {
+            let db = db.clone();
+            async move { tab_occupancy(&db, "repo", key, &terminals).await.unwrap() }
+        };
+
+        // The server came back empty: nothing holds it.
+        assert_eq!(gate(tab, liveness(&[], true)).await, Occupancy::Free);
+        // The server can't be asked yet: not free, whatever is (not) seen.
+        assert_eq!(gate(tab, liveness(&[], false)).await, Occupancy::Unknown);
+        assert_eq!(
+            gate(tab, liveness(&["tree:AK-2"], false)).await,
+            Occupancy::Unknown
+        );
+        // The tab's own surface is live after all: it was never lost.
+        assert_eq!(gate(tab, liveness(&[tab], true)).await, Occupancy::Running);
+        // Its session is running in another surface it is bound to.
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'triage:AK-1:tab:t9', '/repo', 's1', 'Claude')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            gate(tab, liveness(&["triage:AK-1:tab:t9"], true)).await,
+            Occupancy::Running
+        );
+
+        // A tab with no binding at all (a Codex tab never prompted).
+        let unbound = "triage:AK-1:tab:t2";
+        assert_eq!(gate(unbound, liveness(&[], true)).await, Occupancy::Free);
+        assert_eq!(
+            gate(unbound, liveness(&[], false)).await,
+            Occupancy::Unknown
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// What the relaunch then runs: the tab's own stored conversation, resumed —
+    /// the resolver keys it by the tab's `triage:` key like any other surface.
+    #[tokio::test]
+    async fn a_triage_tab_relaunches_on_its_own_stored_session() {
+        let base = std::env::temp_dir().join(format!(
+            "santree-session-triage-tab-resume-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        sqlx::query(
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
+             VALUES ('repo', 'triage:AK-1:tab:t1', '/repo', 's1', 'Claude'),
+                    ('repo', 'triage:AK-1', '/repo', 'investigation', 'Claude')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let got = resolve_with(
             &db,
-            "other",
-            "s1",
-            AgentKind::Claude,
-            &live("tree:AK-1:tab:a", AgentKind::Claude)
+            "repo",
+            "triage:AK-1:tab:t1",
+            "/repo",
+            "/bin/claude",
+            true,
+            |cwd, id| async move {
+                assert_eq!((cwd.as_str(), id.as_str()), ("/repo", "s1"));
+                RecordPresence::Present
+            },
         )
         .await
-        .unwrap());
+        .unwrap();
+        assert_eq!(
+            got,
+            AgentSession::Resume {
+                agent_kind: AgentKind::Claude,
+                executable: "/bin/claude".into(),
+                session_id: "s1".into(),
+                launch_flags: String::new(),
+            }
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -22,6 +22,7 @@ import type {
   SessionSubagent,
   SessionUsageLive,
   TerminalAnchor,
+  TerminalInventory,
   TerminalOpenOpts,
   TriageSession,
   ViewedMarks,
@@ -511,9 +512,16 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
       closeFake(a.id);
       return null;
     },
-    terminal_sessions: async (a) => {
-      const own = (await real("terminal_sessions", a)) as unknown[];
-      return [...own, ...fakeSessions()];
+    // The santree server is not part of the world: a capture shows in-app
+    // terminals, so no banner, no server controls, and nothing to confirm on
+    // quit, whatever the dev machine's own mode is.
+    server_status: () => ({ state: { kind: "Off" }, draining: [] }),
+    quit_summary: () => ({ terminalsEnd: 0 }),
+    // The fake panes beside this app's own, as the server card lists them; the
+    // real list's completeness and orphans are the server's, which is off here.
+    terminal_inventory: async (a) => {
+      const own = (await real("terminal_inventory", a)) as TerminalInventory;
+      return { sessions: [...own.sessions, ...fakeSessions()], complete: true, orphans: [] };
     },
   };
 }

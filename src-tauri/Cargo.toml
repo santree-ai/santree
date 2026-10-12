@@ -23,6 +23,10 @@ santree-remote-client = { path = "../crates/remote" }
 # The hook binary's own "payload → rows" code, as a library: a hook relayed from
 # Daedalus is applied by exactly what applies a local one.
 santree-hook = { path = "../crates/hook" }
+# The local server's peer check (`peer::own_identity`, `peer::verify`) and its
+# revision/identifiers: the app is the server's one client, so what the server
+# admits and what the app admits are the same code.
+santree-server = { path = "../crates/server" }
 
 tauri = { version = "2", features = ["specta"] }
 tauri-plugin-opener = "2"
@@ -56,7 +60,11 @@ tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 # io-std/etc, which "full" pulled in unused. Tauri and sqlx pull in whatever
 # additional tokio features they themselves need via Cargo's feature unification;
 # this list only has to cover what our own code names directly.
-tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "process", "io-util"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "process", "io-util", "net"] }
+
+# The local server's launch (`pre_exec` fd placement, signals, uid checks) —
+# the same crate the server itself and the PTY layer use.
+libc = "0.2"
 
 anyhow = { workspace = true }
 async-trait = "0.1"
@@ -122,6 +130,8 @@ keyring = "4"
 santree-remote-client = { path = "../crates/remote", features = ["fake"] }
 # A private directory per test for the fake agent's socket.
 tempfile = "3"
+# Paused time, so a test of a timer (a setup run's deadline) doesn't wait it out.
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Repositions the macOS traffic lights (the `trafficLightPosition` config field is

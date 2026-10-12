@@ -5,21 +5,25 @@
  *  wedged, and for the state reattach made possible — a session still running
  *  with nothing attached to it, which no other surface shows.
  *
- *  Deliberately not modelled on superset's daemon block, even though the shape
- *  is borrowed from it. Their panel carries a daemon version and an "Update
- *  daemon" button because their PTYs live in a separate process that outlives
- *  the app and can therefore be a different version from it. Ours do not, so
- *  there is no second version to report and nothing to hand off to; claiming
- *  otherwise would be a control for a problem we don't have. */
+ *  On a signed build the sessions live in the detached santree server, which can
+ *  be a different revision from the app after an update, so the card above the
+ *  table controls it (`ServerCard`) and the table groups sessions by the server
+ *  holding them. In a build without one they live in the app and end when it quits. */
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import type { TerminalSession } from "../../../bindings";
+import type { ServerStatus, TerminalSession } from "../../../bindings";
 import { commands } from "../../../bindings";
 import { Button, ConfirmDialog, Dot } from "../../../components/primitives";
-import { queryKeys, useAppVersion, useTerminalSessions } from "../../../lib/queries";
+import {
+  queryKeys,
+  useAppVersion,
+  useServerStatus,
+  useTerminalInventory,
+} from "../../../lib/queries";
 import { palette } from "../../../theme/colors";
 import { Heading } from "../widgets";
+import { ServerCard } from "./ServerCard";
 
 /** What a session's dot and status word say. Three states, because "running"
  *  and "running but unwatched" are genuinely different things to the user, and
@@ -61,20 +65,50 @@ function surfaceOf(session: TerminalSession): string {
   return label;
 }
 
+const ORPHAN_HINT =
+  "running, but no tab will ever show them (a tab closed while its server was unreachable, or a worktree deleted under it). Kill them to free the process.";
+
+/** Sessions grouped by the server holding them, newest revision first; sessions
+ *  in the app itself (no revision) come last. */
+function groupByServer(
+  rows: TerminalSession[],
+  status: ServerStatus | undefined,
+): { key: string; label: string; sessions: TerminalSession[] }[] {
+  const current = status?.state.kind === "Running" ? status.state.revision : null;
+  const by = new Map<number | null, TerminalSession[]>();
+  for (const s of rows) {
+    const k = s.serverRevision ?? null;
+    by.set(k, [...(by.get(k) ?? []), s]);
+  }
+  return [...by.entries()]
+    .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : b - a))
+    .map(([rev, sessions]) => ({
+      key: String(rev),
+      label:
+        rev === null
+          ? "In this app"
+          : `Server r${rev}${rev === current ? " · current" : " · older, draining"}`,
+      sessions,
+    }));
+}
+
 export function TerminalSection() {
   // Polls only while this section is on screen: TanStack runs `refetchInterval`
   // only while a query has observers, and navigating away unmounts this.
-  const { data: sessions } = useTerminalSessions(true);
+  const { data: inventory } = useTerminalInventory();
+  const { data: serverStatus } = useServerStatus();
   const { data: version } = useAppVersion();
   const qc = useQueryClient();
   const [killing, setKilling] = useState<TerminalSession | null>(null);
   const [killAll, setKillAll] = useState(false);
 
-  const rows = sessions ?? [];
+  const rows = inventory?.sessions ?? [];
+  const orphans = new Set(inventory?.orphans ?? []);
+  const groups = groupByServer(rows, serverStatus);
   const running = rows.filter((s) => s.alive).length;
   const detached = rows.filter((s) => s.alive && !s.attached).length;
 
-  const refresh = () => qc.invalidateQueries({ queryKey: queryKeys.terminalSessions });
+  const refresh = () => qc.invalidateQueries({ queryKey: queryKeys.terminalInventory });
   const close = async (id: number) => {
     const result = await commands.terminalClose(id);
     if (result.status === "error") throw new Error(result.error);
@@ -88,6 +122,8 @@ export function TerminalSection() {
         subtitle="What is running behind your panes, and how to recover a terminal that has stopped responding."
       />
 
+      <ServerCard />
+
       <div className="mb-3.5 rounded-xl border border-line-2 bg-raised px-4 py-4">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
@@ -96,15 +132,15 @@ export function TerminalSection() {
               {version && (
                 <span
                   className="font-mono text-[11px] font-normal text-muted-4"
-                  title="Sessions are owned by santree itself — there is no separate terminal process to version or update."
+                  title="This app's version. The server has its own revision, shown in the card above."
                 >
                   santree {version}
                 </span>
               )}
             </div>
             <p className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
-              Sessions are owned by the app, not by the window. They survive reloading the window —
-              closing a pane leaves the work running — and they end when santree quits.
+              Sessions outlive the window: closing a pane leaves the work running. Which process
+              holds them, and whether they outlive the app, depends on the server above.
             </p>
           </div>
           <div className="flex flex-none gap-2">
@@ -137,42 +173,71 @@ export function TerminalSection() {
               <div className="w-[86px] flex-none pl-3">Status</div>
               <div className="w-[28px] flex-none" />
             </div>
-            {rows.map((s) => {
-              const status = statusOf(s);
-              return (
-                <div
-                  key={s.id}
-                  className="group flex items-center border-t border-line px-3 py-2 text-[11.5px] first:border-t-0"
-                >
-                  <div className="min-w-0 flex-1 truncate text-fg-3" title={s.cwd ?? s.label}>
-                    {surfaceOf(s)}
-                  </div>
-                  <div className="w-[70px] flex-none text-right font-mono text-muted-4">
-                    {s.pid ?? "—"}
-                  </div>
-                  <div className="w-[80px] flex-none text-right font-mono text-muted-4">
-                    {s.cols}×{s.rows}
-                  </div>
-                  <div
-                    className="flex w-[86px] flex-none items-center gap-1.5 pl-3 text-muted-3"
-                    title={status.hint}
-                  >
-                    <Dot color={status.color} />
-                    {status.label}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setKilling(s)}
-                    title={`Kill ${surfaceOf(s)}`}
-                    aria-label={`Kill session ${surfaceOf(s)}`}
-                    className="w-[28px] flex-none cursor-pointer text-muted-4 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:text-status-red"
-                  >
-                    ✕
-                  </button>
+            {groups.map((g) => (
+              <div key={g.key}>
+                <div className="border-t border-line bg-panel px-3 py-1 text-[10.5px] text-muted-3 first:border-t-0">
+                  {g.label}
                 </div>
-              );
-            })}
+                {g.sessions.map((s) => {
+                  const status = statusOf(s);
+                  return (
+                    <div
+                      key={s.id}
+                      className="group flex items-center border-t border-line px-3 py-2 text-[11.5px]"
+                    >
+                      <div
+                        className="flex min-w-0 flex-1 items-center gap-2 truncate text-fg-3"
+                        title={s.cwd ?? s.label}
+                      >
+                        <span className="truncate">{surfaceOf(s)}</span>
+                        {orphans.has(s.id) && (
+                          <span
+                            className="flex-none rounded-sm bg-panel px-1 text-[10px] text-status-amber"
+                            title={ORPHAN_HINT}
+                          >
+                            no tab
+                          </span>
+                        )}
+                      </div>
+                      <div className="w-[70px] flex-none text-right font-mono text-muted-4">
+                        {s.pid ?? "—"}
+                      </div>
+                      <div className="w-[80px] flex-none text-right font-mono text-muted-4">
+                        {s.cols}×{s.rows}
+                      </div>
+                      <div
+                        className="flex w-[86px] flex-none items-center gap-1.5 pl-3 text-muted-3"
+                        title={status.hint}
+                      >
+                        <Dot color={status.color} />
+                        {status.label}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setKilling(s)}
+                        title={`Kill ${surfaceOf(s)}`}
+                        aria-label={`Kill session ${surfaceOf(s)}`}
+                        className="w-[28px] flex-none cursor-pointer text-muted-4 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:text-status-red"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
           </div>
+        )}
+
+        {orphans.size > 0 && (
+          <p role="note" className="mt-2 text-[11.5px] leading-[1.5] text-muted-3">
+            {orphans.size} session{orphans.size === 1 ? "" : "s"} marked "no tab": {ORPHAN_HINT}
+          </p>
+        )}
+        {inventory && !inventory.complete && (
+          <p role="note" className="mt-2 text-[11.5px] leading-[1.5] text-muted-3">
+            This list may be missing sessions: a server that may hold more couldn't be asked.
+          </p>
         )}
       </div>
 

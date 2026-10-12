@@ -1,0 +1,37 @@
+# COMPLIANCE.md, enforced by the compiler: where bytes may enter a PTY, where
+# a PTY may be spawned, and who may open, attach, adopt or close a pane. Each
+# rule has its sanctioned call sites, each marked
+# `#[allow(clippy::disallowed_methods)]`, and `compliance.rs`
+# (`the_lint_exceptions_are_exactly_the_sanctioned_sites`) pins every one of
+# them. CI runs `cargo clippy --workspace --all-targets -- -D warnings`, so a
+# call anywhere else fails the build. A path whose crate a crate does not
+# depend on is skipped for that crate, so this one file serves the workspace.
+disallowed-methods = [
+    # Bytes into a PTY. Sanctioned: the facade's in-app arm
+    # (sessions/backend.rs `write_in_app`, which takes only a `PtyInput`) and
+    # the protocol host's input thread (crates/host/src/pty.rs), which relays a
+    # `pty.write` request's bytes.
+    { path = "santree_pty::PtyManager::write", reason = "bytes enter a PTY only through terminal.rs `write_pty` (COMPLIANCE.md)" },
+    # A PTY session spawned. Sanctioned: the facade's in-app arm and the
+    # protocol host's `pty.open` handler.
+    { path = "santree_pty::PtyManager::open", reason = "a PTY is opened only when a human opens a pane, through the terminal facade (COMPLIANCE.md)" },
+    # A process behind a PTY. Sanctioned: crates/pty's command builder, which
+    # strips the inherited nested-session markers.
+    { path = "portable_pty::CommandBuilder::new", reason = "PTY processes are spawned by santree-pty alone, which strips the inherited session markers (COMPLIANCE.md)" },
+    # The protocol host's PTY input queue. Sanctioned: the `pty.write` handler.
+    { path = "santree_host::Host::pty_input", reason = "the host types only the bytes of a `pty.write` request (COMPLIANCE.md)" },
+    # `pty.write` sent from the app. Sanctioned: a pane's writer
+    # (sessions/remote.rs `write_loop`), fed only `PtyInput`.
+    { path = "santree_remote_client::RemoteClient::pty_write", reason = "bytes enter a remote PTY only through a pane's writer, fed by `write_pty` (COMPLIANCE.md)" },
+    # A pane's lifecycle belongs to the adapter. Sanctioned: terminal.rs's
+    # commands for `Terminals`, and the facade's arms in sessions/backend.rs
+    # for `RemoteTerminals`.
+    { path = "santree_lib::sessions::Terminals::open", reason = "panes are opened by terminal.rs alone (COMPLIANCE.md)" },
+    { path = "santree_lib::sessions::Terminals::attach", reason = "panes are attached by terminal.rs alone (COMPLIANCE.md)" },
+    { path = "santree_lib::sessions::Terminals::adopt", reason = "panes are adopted by terminal.rs alone (COMPLIANCE.md)" },
+    { path = "santree_lib::sessions::Terminals::close", reason = "panes are closed by terminal.rs alone (COMPLIANCE.md)" },
+    { path = "santree_lib::sessions::RemoteTerminals::open", reason = "a remote pane is opened through the facade alone (COMPLIANCE.md)" },
+    { path = "santree_lib::sessions::RemoteTerminals::attach", reason = "a remote pane is attached through the facade alone (COMPLIANCE.md)" },
+    { path = "santree_lib::sessions::RemoteTerminals::adopt", reason = "remote panes are adopted through the facade alone (COMPLIANCE.md)" },
+    { path = "santree_lib::sessions::RemoteTerminals::close", reason = "a remote pane is closed through the facade alone (COMPLIANCE.md)" },
+]

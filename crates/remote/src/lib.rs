@@ -37,4 +37,4 @@ pub use agent::AgentConnector;
 pub use client::{ClientOptions, HookMessage, PtyEvent, RemoteClient, RemoteError};
 pub use control::{AgentControl, ControlError, MachineSettings, SetOutcome, SettingKey};
 pub use host::{HookDelivery, HostConfig, HostOptions, HostStatus, Reconnected, RemoteHost};
-pub use transport::{AgentOk, ConnectError, Connector, Link, Refusal};
+pub use transport::{AgentOk, ConnectError, Connector, Link, PeerTrust, Refusal, Required};

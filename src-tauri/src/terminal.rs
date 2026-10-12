@@ -1,28 +1,36 @@
 //! Tauri command adapter for the real terminal layer.
 //!
-//! These are thin wrappers over [`santree_pty::PtyManager`]. Output is streamed
-//! to the frontend over a [`tauri::ipc::Channel`] (the correct high-throughput
-//! primitive for per-chunk terminal output — `emit` would choke); input, resize
-//! and close map straight onto the PTY.
+//! These are thin wrappers over [`crate::sessions::Terminals`], the one facade
+//! over where a pane's process lives: in this app (`santree_pty::PtyManager`), on
+//! the local santree server, or on Daedalus. Output is streamed to the frontend
+//! over a [`tauri::ipc::Channel`] (the correct high-throughput primitive for
+//! per-chunk terminal output — `emit` would choke); input, resize and close map
+//! straight onto the pane.
 
-use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+use futures::future::BoxFuture;
 
 use serde::{Deserialize, Serialize};
 use specta::{datatype::DataType, Type, Types};
 use tauri::ipc::{Channel, InvokeResponseBody, IpcResponse};
 use tauri::{AppHandle, Manager, State};
 
-use crate::daedalus::host::{DaedalusHost, CONNECT_WAIT};
-use crate::daedalus::terminals::{self, RemoteTerminals, Sinks, Spec};
+use crate::daedalus::host::DaedalusHost;
 use crate::db::Db;
 use crate::error::CmdResult;
-use santree_core::domain::AgentKind;
-use santree_pty::{Anchor, OpenOpts, PtyManager, ReplayMode, SessionId};
-use santree_remote_client::proto::{Anchor as BoxAnchor, ReplayMode as BoxReplayMode};
+use crate::sessions::{
+    Exited, Local, Mode, OnExited, PaneId, Route, SeedPolicy, Sinks, Spec, Terminals,
+};
+pub use crate::sessions::{LiveTerminal, PaneLink};
+pub use input::{Keystrokes, LaunchLine, LaunchRequest, PtyInput};
+pub use santree_core::domain::TerminalSession;
+use santree_core::domain::{AgentKind, QuitSummary, TerminalInventory};
+use santree_pty::{Anchor, PtyManager, SessionId};
+use santree_remote_client::proto::ReplayMode as BoxReplayMode;
 
 /// A PTY output chunk, wrapped so it crosses the Tauri IPC [`Channel`] as raw
 /// bytes (delivered to the frontend as an `ArrayBuffer`) instead of the
@@ -136,30 +144,6 @@ impl From<TerminalAnchor> for Anchor {
     }
 }
 
-impl From<TerminalAnchor> for BoxAnchor {
-    /// The same anchor, for a session on Daedalus: the box's ring answers it
-    /// with the same three outcomes.
-    fn from(value: TerminalAnchor) -> Self {
-        match Anchor::from(value) {
-            Anchor::At { epoch, seq } => BoxAnchor::At { epoch, seq },
-            Anchor::Fresh => BoxAnchor::Fresh,
-            Anchor::Unknown => BoxAnchor::Unknown,
-        }
-    }
-}
-
-/// Whether a pane is reaching its session right now, pushed on its own
-/// channel beside the bytes. Only a session on Daedalus ever sends one: a local
-/// PTY is always reachable. `Reconnecting` is never an exit — the process is
-/// still running on the box, and the pane catches up from its anchor when the
-/// link returns; only the empty output chunk says a process ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub enum PaneLink {
-    Live,
-    Reconnecting,
-}
-
 /// What the client should believe after an attach.
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -183,16 +167,6 @@ pub enum TerminalReplayMode {
     Reanchor,
 }
 
-impl From<ReplayMode> for TerminalReplayMode {
-    fn from(value: ReplayMode) -> Self {
-        match value {
-            ReplayMode::Exact => TerminalReplayMode::Exact,
-            ReplayMode::Tail => TerminalReplayMode::Tail,
-            ReplayMode::Reanchor => TerminalReplayMode::Reanchor,
-        }
-    }
-}
-
 impl From<BoxReplayMode> for TerminalReplayMode {
     fn from(value: BoxReplayMode) -> Self {
         match value {
@@ -203,34 +177,8 @@ impl From<BoxReplayMode> for TerminalReplayMode {
     }
 }
 
-/// One live PTY session, for the Terminal settings panel.
-///
-/// Deliberately a different shape from `TerminalUsage` (`resources.rs`), which
-/// answers "what is this costing" by joining the process table. This answers
-/// "what is running, and can I still reach it" — the lifecycle question, which
-/// is the one a reload made possible to get wrong.
-#[derive(Debug, Clone, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalSession {
-    pub id: SessionId,
-    /// The `term_key` it was opened under — how the UI names it.
-    pub label: String,
-    pub cwd: Option<String>,
-    pub command: String,
-    /// The root process's pid, or `None` when the platform didn't report one.
-    pub pid: Option<u32>,
-    pub cols: u16,
-    pub rows: u16,
-    /// Whether a pane is currently receiving this session's output. `false` is
-    /// ordinary — a closed pane, or work inherited from a reload and not yet
-    /// reopened — but it is otherwise invisible, which is why it is here.
-    pub attached: bool,
-    /// Whether the root process still exists.
-    pub alive: bool,
-}
-
 /// A session handed over from a previous page load.
-#[derive(Debug, Clone, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoptedSession {
     pub id: SessionId,
@@ -244,63 +192,21 @@ pub struct AdoptedSession {
     pub command: String,
 }
 
-/// One live PTY, named the way `terminal_sessions` names a session: the surface
-/// it hosts and the provider running in it.
-///
-/// The pair is the identity, and it is a pair on purpose. `term_key` alone is
-/// what the durable row is keyed by *together with* `agent_kind` — one surface
-/// holds one conversation per provider — so a single string could only carry
-/// both by decorating one with the other, which is exactly the bug this replaced:
-/// a triage PTY opened under `AK-1::codex` matched no `term_key` on the way back,
-/// and a live agent was reported as exited.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LiveTerminal {
-    /// The `term_key` the pane's PTY was opened under.
-    pub term_key: String,
-    /// The provider santree launched in it, or `None` for a plain shell.
-    pub agent_kind: Option<AgentKind>,
-}
-
-/// The `(term_key, agent_kind)` pairs that have a live PTY right now.
-///
-/// This is santree's whole answer to "which agents are actually running", and it
-/// is a *live read*, not a record: the manager holds the real processes, and
-/// `alive` is a non-blocking `try_wait` on each one. There is no daemon, so a PTY
-/// cannot outlive the app — which is what makes an empty set after a restart the
-/// correct answer rather than a missing one.
-///
-/// A session's `label` **is** its `term_key` and its `agent_kind` **is** the
-/// provider column (see [`TerminalOpenOpts`] and `TauriBackend.ts`, which keys
-/// adopted sessions by the same pair), so this needs no translation. Consumed by
-/// `hooks::session_states`.
-pub fn live_terminals(manager: &PtyManager) -> HashSet<LiveTerminal> {
-    manager
-        .sessions()
-        .into_iter()
-        .filter(|s| s.alive)
-        .map(|s| LiveTerminal {
-            term_key: s.label,
-            agent_kind: s.agent_kind,
-        })
-        .collect()
-}
-
-/// Each live PTY session's address paired with its root pid — the pane roots a
+/// Each live session's address paired with its root pid — the pane roots a
 /// process-table scan walks down from (`agent_procs::detect`).
 ///
-/// Sibling of [`live_terminals`]: the same live read of the manager, asked a
-/// different question. A session the platform reported no pid for is omitted
+/// A live read of `Terminals::local_sessions`, asked a different question than
+/// `Terminals::liveness`. A session the platform reported no pid for is omitted
 /// rather than guessed at, which is the same rule the resource accounting uses.
-pub fn pane_roots(manager: &PtyManager) -> Vec<(LiveTerminal, u32)> {
-    manager
-        .sessions()
-        .into_iter()
+pub fn pane_roots(sessions: &[santree_pty::SessionInfo]) -> Vec<(LiveTerminal, u32)> {
+    sessions
+        .iter()
         .filter(|s| s.alive)
         .filter_map(|s| {
             let pid = s.pid?;
             Some((
                 LiveTerminal {
-                    term_key: s.label,
+                    term_key: s.label.clone(),
                     agent_kind: s.agent_kind,
                 },
                 pid,
@@ -336,12 +242,17 @@ fn retiring_sink(
         }
         let (db, label, cwd) = (db.clone(), label.clone(), cwd.clone());
         tauri::async_runtime::spawn(async move {
-            match crate::hooks::retire_terminal(&db, &label, agent_kind, cwd.as_deref()).await {
-                Ok(n) if n > 0 => log::info!("pty for {label} exited; retired {n} session row(s)"),
-                Ok(_) => {}
-                Err(e) => log::warn!("retiring session rows for {label}: {e}"),
-            }
+            retire(&db, &label, agent_kind, cwd.as_deref()).await;
         });
+    }
+}
+
+/// Stamp the agent rows a terminal hosted as exited, logging what it did.
+async fn retire(db: &Db, label: &str, agent_kind: Option<AgentKind>, cwd: Option<&str>) {
+    match crate::hooks::retire_terminal(db, label, agent_kind, cwd).await {
+        Ok(n) if n > 0 => log::info!("pty for {label} exited; retired {n} session row(s)"),
+        Ok(_) => {}
+        Err(e) => log::warn!("retiring session rows for {label}: {e}"),
     }
 }
 
@@ -366,13 +277,6 @@ fn retiring_sink(
 /// repeating an absolute hook-binary and db path. Shortening one command fixes
 /// one command; a limit every seed passes through fixes the next one too.
 const MAX_SEED_LINE: usize = 512;
-
-/// [`MAX_SEED_LINE`] for a pane on Daedalus, where the tty is the box's: a
-/// Linux one, whose canonical buffer (`N_TTY_BUF_SIZE`) is 4096 bytes. Half of
-/// it, by the same reasoning. A Codex launch there carries six hook flags, each
-/// naming the session host's hook binary, which a 512-byte line can't hold; this
-/// holds it with room to spare, and a seed past it is refused, never truncated.
-const MAX_REMOTE_SEED_LINE: usize = 2048;
 
 /// How long a spilled seed script may sit before a later launch sweeps it.
 ///
@@ -585,66 +489,131 @@ fn sweep_seed_scripts(dir: &Path) {
     }
 }
 
-/// The single place bytes enter a PTY.
-///
-/// Both [`terminal_write`] (keystrokes) and [`terminal_seed`] (the one
-/// human-initiated launch line) go through here, so COMPLIANCE.md's "only
-/// `terminal.rs` writes into a PTY" stays checkable as one call site rather than
-/// a growing list of them. A pane on Daedalus is written the same way, through
-/// its session's one writer ([`RemoteTerminals::write`] / [`RemoteTerminals::seed`]),
-/// which is the only `pty.write` santree sends.
-fn write_pty(
-    manager: &PtyManager,
-    remote: &RemoteTerminals,
-    id: SessionId,
-    input: Input,
-) -> anyhow::Result<()> {
-    match (terminals::is_remote(id), input) {
-        (true, Input::Keys(bytes)) => remote.write(id, bytes),
-        (true, Input::Seed(line)) => remote.seed(id, line),
-        (false, input) => manager.write(id, &input.into_bytes()),
+/// What a terminal accepts as input, as types (COMPLIANCE.md, "No output-parsing
+/// influences input"). The only bytes santree types are the user's keystrokes
+/// and the one launch line they asked for, and these types are how the compiler
+/// holds that: [`Keystrokes`] and [`LaunchRequest`] have private fields and no
+/// constructor function, so the only way to make one is to deserialize it — and
+/// the only things deserialized into them are the IPC arguments of
+/// [`terminal_write`] and [`terminal_seed`]. Everything that types into a pane,
+/// here, in the facade or in a remote pane's queue, takes one of them or a
+/// [`PtyInput`] made from one. None is `Clone`, so each launch request is typed
+/// at most once; that a pane asks only once is the frontend's latch.
+pub mod input {
+    use serde::Deserialize;
+    use specta::Type;
+
+    /// The user's keystrokes, verbatim, as the webview sent them.
+    #[derive(Deserialize, Type)]
+    #[serde(transparent)]
+    #[specta(transparent)]
+    pub struct Keystrokes(String);
+
+    /// The launch line a human asked for, before it is prepared for a tty.
+    #[derive(Deserialize, Type)]
+    #[serde(transparent)]
+    #[specta(transparent)]
+    pub struct LaunchRequest(String);
+
+    /// The line typed for one [`LaunchRequest`], prepared for the pane's tty.
+    pub struct LaunchLine(String);
+
+    /// Bytes on their way into a PTY: keystrokes or a launch line, nothing else.
+    pub struct PtyInput(Vec<u8>);
+
+    impl LaunchRequest {
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+
+        /// The line typed for this request. Consumes it: one request, one line.
+        pub fn into_line(self, line: String) -> LaunchLine {
+            LaunchLine(line)
+        }
     }
+
+    impl PtyInput {
+        pub fn as_bytes(&self) -> &[u8] {
+            &self.0
+        }
+
+        pub fn into_bytes(self) -> Vec<u8> {
+            self.0
+        }
+    }
+
+    impl From<Keystrokes> for PtyInput {
+        fn from(keys: Keystrokes) -> Self {
+            Self(keys.0.into_bytes())
+        }
+    }
+
+    impl From<LaunchLine> for PtyInput {
+        fn from(line: LaunchLine) -> Self {
+            Self(line.0.into_bytes())
+        }
+    }
+
+    #[cfg(test)]
+    impl Keystrokes {
+        pub fn typed(keys: impl Into<String>) -> Self {
+            Self(keys.into())
+        }
+    }
+
+    #[cfg(test)]
+    impl LaunchRequest {
+        pub fn typed(seed: impl Into<String>) -> Self {
+            Self(seed.into())
+        }
+    }
+
+    #[cfg(test)]
+    impl LaunchLine {
+        pub fn typed(line: impl Into<String>) -> Self {
+            Self(line.into())
+        }
+    }
+}
+
+/// The single place bytes enter a PTY: [`terminal_write`]'s keystrokes and
+/// [`terminal_seed`]'s launch line. The facade relays them to wherever the
+/// pane's process is — in this app, on the local server, or on Daedalus.
+fn write_pty(terminals: &Terminals, id: SessionId, input: Input) -> anyhow::Result<()> {
+    refuse_run_pane(id)?;
+    match input {
+        Input::Keys(keys) => terminals.write(id, keys),
+        Input::Seed(line) => terminals.seed(id, line),
+    }
+}
+
+/// A setup run's pane belongs to the app: nothing a page sends may type into it,
+/// attach to it, detach it or re-grid it — attaching replaces the sinks the run
+/// is followed by. (Closing it stays allowed, as it is for every id: it ends
+/// the process, and the run's own task then settles it as stopped.)
+fn refuse_run_pane(id: SessionId) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !crate::stream::RUNS.owns(id),
+        "terminal {id} is a setup run's, not a tab's"
+    );
+    Ok(())
 }
 
 /// What [`write_pty`] types: the user's keystrokes, or the one launch line
 /// (with its Enter). A remote session tells them apart — a found-again session
 /// is already running its launch, so only keystrokes reach it.
 enum Input {
-    Keys(Vec<u8>),
-    Seed(String),
+    Keys(Keystrokes),
+    Seed(LaunchLine),
 }
 
-impl Input {
-    fn into_bytes(self) -> Vec<u8> {
-        match self {
-            Input::Keys(bytes) => bytes,
-            Input::Seed(line) => line.into_bytes(),
-        }
-    }
-}
-
-/// What a terminal on Daedalus is given from here: `TERM` and nothing else.
-///
-/// Not [`crate::env::resolve_env`]: that is this Mac's project environment —
-/// variables whose values live in this Mac's keychain and `.env` files read
-/// from this Mac's disk — and none of it is the box's to have. The shell there
-/// is the box's login shell under the session host, which already runs with
-/// the operator's profile `PATH`; the box's own profile is where a Daedalus
-/// project's environment belongs. `TERM` is what santree's renderer is, so it
-/// travels (santree-pty on the box sets the same value last anyway). santree's
-/// own `SANTREE_*` keys are per launch — a setup run's worktree and root, an
-/// agent's repo and term key — and are added by what launches them.
-fn remote_env() -> Vec<(String, String)> {
-    vec![("TERM".into(), "xterm-256color".into())]
-}
-
-/// Output and link channels, as the sinks a remote pane forwards to. The exit
-/// sentinel retires the pane's session rows, as a local pane's does
-/// ([`retiring_sink`]): `pane` is its address, `cwd` its directory on the box.
+/// Output and link channels, as the sinks a pane forwards to. The exit
+/// sentinel retires the pane's session rows ([`retiring_sink`]): `pane` is its
+/// address, `cwd` its directory on its host.
 fn channel_sinks(
     db: &Db,
     pane: LiveTerminal,
-    cwd: String,
+    cwd: Option<String>,
     on_output: Channel<RawBytes>,
     on_link: Channel<PaneLink>,
 ) -> Sinks {
@@ -653,8 +622,10 @@ fn channel_sinks(
             db.clone(),
             pane.term_key,
             pane.agent_kind,
-            Some(cwd),
+            cwd,
             move |bytes| {
+                // A failed send means the channel was dropped (view unmounted);
+                // the session is closed separately, so just stop forwarding.
                 let _ = on_output.send(RawBytes(bytes));
             },
         )),
@@ -680,78 +651,191 @@ pub(crate) fn box_cwd(cwd: &str) -> anyhow::Result<String> {
     Ok(cwd.to_string())
 }
 
-/// Open a terminal: a local PTY, or — for a cwd inside a Daedalus project — a
-/// pane on the box. A Daedalus project's checkout is a path on the server: a
-/// shell there runs on the box or not at all, never in whatever this machine
-/// has at that path. With the link down the pane waits, `Reconnecting`, and
-/// opens on the next connect.
+/// What a server's `on_exited` does with a session found already exited when
+/// the app (re)connected: the same row retirement a live pane's exit sentinel
+/// does ([`retiring_sink`]), for an exit nobody was attached to hear.
+pub fn retire_exited(db: Db) -> OnExited {
+    Arc::new(move |exited: Exited| {
+        let db = db.clone();
+        Box::pin(async move {
+            retire(&db, &exited.label, exited.agent_kind, exited.cwd.as_deref()).await;
+        })
+    })
+}
+
+/// Build the terminal facade for `mode` and put it in Tauri state, where every
+/// command finds it. With no server the local arm is a `PtyManager` in this
+/// process; otherwise it is the supervisor, so local panes run on the detached
+/// santree server. The Daedalus arm is the link's own, sharing its id registry.
+/// Must run after the Daedalus link is managed.
+pub fn manage(app: &AppHandle, mode: Mode, servers: &Arc<crate::server::LocalServers>) {
+    let local = match mode {
+        Mode::Off => Local::InApp(PtyManager::new()),
+        Mode::Signed { .. } | Mode::OptIn => Local::Server(servers.clone()),
+    };
+    let link = app.state::<DaedalusHost>();
+    let terminals = Arc::new(Terminals::new(
+        local,
+        link.terminals().clone(),
+        link.ids().clone(),
+    ));
+    app.manage(terminals.clone());
+    app.manage(Arc::new(TerminalRuns::new(terminals)) as Arc<dyn crate::stream::RunHost>);
+}
+
+/// The owner a setup run's pane is opened under: no page's. A reloaded page's
+/// adopt takes it over like any pane, and [`terminal_adopt`] then leaves it out
+/// of what the page is handed, by label.
+const RUN_OWNER: &str = "santree-runs";
+
+/// The terminals a setup run is a pane of ([`crate::stream::RunHost`]): this
+/// adapter is the only place a run touches the facade, so a run is opened,
+/// closed and re-gridded like any pane — on the local server when there is
+/// one, in this process when there isn't — and, like any pane it opens,
+/// nothing in it ever writes into the PTY.
+pub struct TerminalRuns {
+    terminals: Arc<Terminals>,
+}
+
+impl TerminalRuns {
+    pub fn new(terminals: Arc<Terminals>) -> Self {
+        Self { terminals }
+    }
+}
+
+impl crate::stream::RunHost for TerminalRuns {
+    fn open(
+        &self,
+        launch: crate::stream::Launch,
+        size: (u16, u16),
+        sinks: Sinks,
+    ) -> BoxFuture<'_, anyhow::Result<PaneId>> {
+        Box::pin(async move {
+            // The project's env; what the process inherits beneath it is its
+            // host's, as for any local terminal.
+            let spec = Spec {
+                cwd: Some(launch.cwd),
+                command: launch.command,
+                args: launch.args,
+                env: launch.env,
+                label: launch.label,
+                agent_kind: None,
+            };
+            #[allow(clippy::disallowed_methods)]
+            let opened = self
+                .terminals
+                .open(Route::Local, spec, RUN_OWNER.into(), size, sinks)
+                .await;
+            opened
+        })
+    }
+
+    fn any_live(&self, prefix: &str) -> BoxFuture<'_, Option<bool>> {
+        let prefix = prefix.to_string();
+        Box::pin(async move {
+            self.terminals
+                .liveness()
+                .await
+                .knows(|pane| pane.term_key.starts_with(&prefix))
+        })
+    }
+
+    fn close(&self, pane: PaneId) {
+        #[allow(clippy::disallowed_methods)]
+        let closed = self.terminals.close(pane);
+        if let Err(e) = closed {
+            // Already gone: the run is over either way.
+            log::debug!("closing run pane {pane}: {e:#}");
+        }
+    }
+
+    fn resize(&self, pane: PaneId, cols: u16, rows: u16) -> bool {
+        self.terminals.resize(pane, cols, rows).is_ok()
+    }
+}
+
+/// The run host over a fresh in-app terminal set, for tests.
+#[cfg(test)]
+pub(crate) fn test_run_host() -> Arc<dyn crate::stream::RunHost> {
+    let link = DaedalusHost::default();
+    let terminals = Terminals::new(
+        Local::InApp(PtyManager::new()),
+        link.terminals().clone(),
+        link.ids().clone(),
+    );
+    Arc::new(TerminalRuns::new(Arc::new(terminals)))
+}
+
+/// The app is exiting or updating: let go of every terminal. A terminal in this
+/// app ends with it; one on the local server keeps running — quitting never
+/// stops it ([`Terminals::release`]).
+pub fn release(app: &AppHandle) {
+    if let Some(terminals) = app.try_state::<Arc<Terminals>>() {
+        terminals.release();
+    }
+}
+
+/// Open a terminal: on this Mac (in the app or on the local server) or — for a
+/// cwd inside a Daedalus project — on the box. A Daedalus project's checkout is
+/// a path on the server: a shell there runs on the box or not at all, never in
+/// whatever this machine has at that path. With the link down the pane waits,
+/// `Reconnecting`, and opens on the next connect.
+///
+/// The route is the one decision made here, because only the caller knows
+/// whether a directory is a Daedalus project's; everything after it
+/// ([`Terminals::open`]) is the facade's.
 pub(crate) async fn open(
-    manager: &PtyManager,
+    terminals: &Terminals,
     db: &Db,
-    daedalus: &DaedalusHost,
     opts: TerminalOpenOpts,
     on_output: Channel<RawBytes>,
     on_link: Channel<PaneLink>,
-) -> anyhow::Result<SessionId> {
-    if let Some(cwd) = opts.cwd.as_deref() {
-        if let Some(repo) = crate::repo::daedalus_repo_at(db, Path::new(cwd)).await? {
-            let cwd = box_cwd(cwd)?;
-            let mut env = remote_env();
-            if opts.agent_kind.is_some() {
-                // What the hooks the agent fires on the box carry back, so the
-                // relay binds its session to this pane (docs/remote.md). The
-                // seed exports the same pair; here they are the pane's own.
-                crate::tabs::validate_term_key(&opts.label).map_err(anyhow::Error::msg)?;
-                env.push(("SANTREE_REPO".into(), repo));
-                env.push(("SANTREE_TERM_KEY".into(), opts.label.clone()));
-            }
-            let pane = LiveTerminal {
-                term_key: opts.label.clone(),
-                agent_kind: opts.agent_kind,
-            };
-            let sinks = channel_sinks(db, pane, cwd.clone(), on_output, on_link);
-            let spec = Spec {
-                cwd,
-                command: opts.command,
-                args: opts.args,
-                env,
-                label: opts.label,
-                agent_kind: opts.agent_kind,
-            };
-            let client = daedalus.client_within(CONNECT_WAIT).await.ok();
-            return daedalus
-                .terminals()
-                .open(spec, opts.owner, (opts.cols, opts.rows), client, sinks)
-                .await;
-        }
-    }
-    // The user's configured project env for the repo this cwd belongs to (app +
-    // per-repo). Applies to every santree-spawned terminal — the one chokepoint.
-    let env = crate::env::resolve_env(db, opts.cwd.as_deref()).await;
-    let opts = OpenOpts {
-        cwd: opts.cwd,
+) -> anyhow::Result<PaneId> {
+    // The `run:` namespace is the app's own (setup runs): a page can't open, or
+    // claim, a pane under it.
+    anyhow::ensure!(
+        !crate::stream::is_run_label(&opts.label),
+        "that terminal label is reserved"
+    );
+    let daedalus = match opts.cwd.as_deref() {
+        Some(cwd) => crate::repo::daedalus_repo_at(db, Path::new(cwd))
+            .await?
+            .is_some(),
+        None => false,
+    };
+    let route = if daedalus {
+        Route::Daedalus
+    } else {
+        Route::Local
+    };
+    // A path on the box is checked before anything is built for it.
+    let cwd = match route {
+        Route::Daedalus => opts.cwd.as_deref().map(box_cwd).transpose()?,
+        Route::Local => opts.cwd.clone(),
+    };
+    // The env a pane starts with, by where its process runs: the user's project
+    // env for a local one (app + per-repo, the one chokepoint every
+    // santree-spawned terminal passes), never the Mac's for Daedalus. What it
+    // inherits beneath that is its host's.
+    let env = crate::sessions::env::session_env(route, db, &opts).await?;
+    let pane = LiveTerminal {
+        term_key: opts.label.clone(),
+        agent_kind: opts.agent_kind,
+    };
+    let sinks = channel_sinks(db, pane, cwd.clone(), on_output, on_link);
+    let spec = Spec {
+        cwd,
         command: opts.command,
         args: opts.args,
-        cols: opts.cols,
-        rows: opts.rows,
         env,
-        owner: opts.owner,
         label: opts.label,
         agent_kind: opts.agent_kind,
     };
-    let manager = manager.clone();
-    let sink = retiring_sink(
-        db.clone(),
-        opts.label.clone(),
-        opts.agent_kind,
-        opts.cwd.clone(),
-        move |bytes| {
-            // A failed send means the channel was dropped (view unmounted); the
-            // session will be closed separately, so just stop forwarding.
-            let _ = on_output.send(RawBytes(bytes));
-        },
-    );
-    tokio::task::spawn_blocking(move || manager.open(opts, sink)).await?
+    #[allow(clippy::disallowed_methods)]
+    let opened = terminals
+        .open(route, spec, opts.owner, (opts.cols, opts.rows), sinks)
+        .await;
+    opened
 }
 
 // These are `async` so Tauri runs them on the async runtime rather than the main
@@ -763,25 +847,24 @@ pub(crate) async fn open(
 ///
 /// The spawn itself is `openpty` + a fork/exec with a full env copy + a reader
 /// thread — all blocking, and slow enough (an interactive `claude` on a cold
-/// cache) to stall a tokio worker, so it goes to the blocking pool like
-/// [`terminal_write`]. Nothing about *what* is spawned or how its bytes stream
-/// changes: `PtyManager::open` runs exactly once, with the same opts and the
-/// same verbatim byte-forwarding sink (COMPLIANCE.md).
+/// cache) to stall a tokio worker, so the facade sends it to the blocking pool
+/// like [`terminal_write`]. Nothing about *what* is spawned or how its bytes
+/// stream changes: it runs exactly once, with the same opts and the same
+/// verbatim byte-forwarding sink (COMPLIANCE.md).
 ///
 /// In a Daedalus project the process is spawned on the box instead ([`open`]);
-/// `on_link` then says whether the pane is reaching it. A local session never
-/// sends on it.
+/// `on_link` then says whether the pane is reaching it, and so it does for a
+/// pane on the local server. An in-app session never sends on it.
 #[tauri::command]
 #[specta::specta]
 pub async fn terminal_open(
     opts: TerminalOpenOpts,
     on_output: Channel<RawBytes>,
     on_link: Channel<PaneLink>,
-    manager: State<'_, PtyManager>,
+    terminals: State<'_, Arc<Terminals>>,
     db: State<'_, Db>,
-    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<SessionId> {
-    Ok(open(&manager, &db, &daedalus, opts, on_output, on_link).await?)
+    Ok(open(&terminals, &db, opts, on_output, on_link).await?)
 }
 
 /// Write raw bytes to a session — the user's keystrokes, verbatim.
@@ -798,15 +881,11 @@ pub async fn terminal_open(
 #[specta::specta]
 pub async fn terminal_write(
     id: SessionId,
-    data: String,
-    manager: State<'_, PtyManager>,
-    daedalus: State<'_, DaedalusHost>,
+    data: Keystrokes,
+    terminals: State<'_, Arc<Terminals>>,
 ) -> CmdResult<()> {
-    let (manager, remote) = (manager.inner().clone(), daedalus.terminals().clone());
-    Ok(tokio::task::spawn_blocking(move || {
-        write_pty(&manager, &remote, id, Input::Keys(data.into_bytes()))
-    })
-    .await??)
+    let terminals = terminals.inner().clone();
+    Ok(tokio::task::spawn_blocking(move || write_pty(&terminals, id, Input::Keys(data))).await??)
 }
 
 /// Type the one human-initiated seed into a session, followed by Enter.
@@ -819,49 +898,71 @@ pub async fn terminal_write(
 /// half-typed at the prompt. A keystroke can never take that path.
 ///
 /// Both parameters are untrusted, and neither gains authority here: `id` is an
-/// integer looked up in the manager, exactly as [`terminal_write`] looks it up,
+/// integer looked up in the facade, exactly as [`terminal_write`] looks it up,
 /// and `seed` becomes bytes in a PTY that the caller could already have written
 /// one keystroke at a time. It never reaches a path — the spill file's name is a
 /// UUID this process mints — and it is shell-quoted by the builder that composed
 /// it (`agentProvider.ts`), which this must preserve rather than redo.
 ///
-/// A session on Daedalus has no spill: its tty is the box's Linux one, whose
-/// line holds [`MAX_REMOTE_SEED_LINE`], and a seed that doesn't fit is refused
-/// rather than truncated.
+/// A session whose tty isn't this Mac's (Daedalus) has no spill: its line holds
+/// what [`SeedPolicy::Cap`] says, and a seed that doesn't fit is refused rather
+/// than truncated.
 #[tauri::command]
 #[specta::specta]
 pub async fn terminal_seed(
     app: AppHandle,
     id: SessionId,
-    seed: String,
-    manager: State<'_, PtyManager>,
-    daedalus: State<'_, DaedalusHost>,
+    seed: LaunchRequest,
+    terminals: State<'_, Arc<Terminals>>,
 ) -> CmdResult<()> {
     let dir = seed_dir(&app);
-    let (manager, remote) = (manager.inner().clone(), daedalus.terminals().clone());
-    Ok(tokio::task::spawn_blocking(move || {
-        let line = if terminals::is_remote(id) {
-            let line = seed.trim_end_matches(['\r', '\n']);
+    let terminals = terminals.inner().clone();
+    Ok(
+        tokio::task::spawn_blocking(move || type_seed(&terminals, dir.as_deref(), id, seed))
+            .await??,
+    )
+}
+
+/// [`terminal_seed`]'s body: prepare the launch line for the pane's tty, then
+/// type it through the chokepoint.
+fn type_seed(
+    terminals: &Terminals,
+    dir: Option<&Path>,
+    id: SessionId,
+    seed: LaunchRequest,
+) -> anyhow::Result<()> {
+    refuse_run_pane(id)?;
+    let line = match terminals.seed_policy(id) {
+        SeedPolicy::Cap(cap) => {
+            let line = seed.as_str().trim_end_matches(['\r', '\n']);
             anyhow::ensure!(
-                line.len() < MAX_REMOTE_SEED_LINE,
+                line.len() < cap,
                 "this launch line is too long to type into a terminal on Daedalus"
             );
             line.to_string()
-        } else {
+        }
+        SeedPolicy::Spill => {
             // Resolve the session BEFORE spilling, so a file is only ever the
-            // consequence of a real launch. `write_pty` would reject an unknown id
+            // consequence of a real launch. A write would reject an unknown id
             // anyway, but only after the script had been written — and a caller
             // looping on an id that does not exist would leave one file per call
-            // for the whole TTL. Ordinary TOCTOU applies (the session can close in
-            // between) and is harmless: the write then fails exactly as before.
-            if !manager.sessions().iter().any(|s| s.id == id) {
-                anyhow::bail!("no terminal session {id}");
+            // for the whole TTL. Ordinary TOCTOU applies (the session can close
+            // in between) and is harmless: the write then fails exactly as before.
+            if !terminals.seed_wanted(id) {
+                // A session found already running (on the local server) has its
+                // launch and is never typed a second one; one that isn't there at
+                // all is an error, as it always was.
+                anyhow::ensure!(terminals.address(id).is_some(), "no terminal session {id}");
+                return Ok(());
             }
-            seed_line(dir.as_deref(), &seed)
-        };
-        write_pty(&manager, &remote, id, Input::Seed(format!("{line}\r")))
-    })
-    .await??)
+            seed_line(dir, seed.as_str())
+        }
+    };
+    write_pty(
+        terminals,
+        id,
+        Input::Seed(seed.into_line(format!("{line}\r"))),
+    )
 }
 
 /// Resize a session's PTY to the visible grid.
@@ -871,29 +972,20 @@ pub async fn terminal_resize(
     id: SessionId,
     cols: u16,
     rows: u16,
-    manager: State<'_, PtyManager>,
-    daedalus: State<'_, DaedalusHost>,
+    terminals: State<'_, Arc<Terminals>>,
 ) -> CmdResult<()> {
-    if terminals::is_remote(id) {
-        return Ok(daedalus.terminals().resize(id, cols, rows)?);
-    }
-    Ok(manager.resize(id, cols, rows)?)
+    refuse_run_pane(id)?;
+    Ok(terminals.resize(id, cols, rows)?)
 }
 
-/// Kill a session's child and free it. On Daedalus, as soon as the box can be
+/// Kill a session's child and free it. On a remote host, as soon as it can be
 /// told.
 #[tauri::command]
 #[specta::specta]
-pub async fn terminal_close(
-    id: SessionId,
-    manager: State<'_, PtyManager>,
-    daedalus: State<'_, DaedalusHost>,
-) -> CmdResult<()> {
-    if terminals::is_remote(id) {
-        daedalus.terminals().close(id);
-        return Ok(());
-    }
-    Ok(manager.close(id)?)
+pub async fn terminal_close(id: SessionId, terminals: State<'_, Arc<Terminals>>) -> CmdResult<()> {
+    #[allow(clippy::disallowed_methods)]
+    let closed = terminals.close(id);
+    Ok(closed?)
 }
 
 /// Point a live session's output at this page's channel, and catch it up.
@@ -901,7 +993,8 @@ pub async fn terminal_close(
 /// This is what makes a session survive losing its view. The previous sink — an
 /// unmounted pane's channel, or a whole page that reloaded — is replaced, and
 /// the bytes the client is missing are written to `on_output` **before** this
-/// returns, so they arrive ahead of any live output on the same channel.
+/// returns, so they arrive ahead of any live output on the same channel (the
+/// facade holds back what the new sink is handed meanwhile).
 ///
 /// `anchor` is what the client claims to already have. When that claim can't be
 /// verified against the session's ring (a different stream, or a gap older than
@@ -909,9 +1002,9 @@ pub async fn terminal_close(
 /// client's own screen is better than anything this could synthesize, and the
 /// caller repaints from the running program instead.
 ///
-/// A session on Daedalus is caught up from the box's ring the same way; while
-/// the link is down the answer is `Reanchor` with nothing sent, `on_link` says
-/// `Reconnecting`, and the catch-up follows on the next connect.
+/// A session on a remote host is caught up from that host's ring the same way;
+/// while the link is down the answer is `Reanchor` with nothing sent, `on_link`
+/// says `Reconnecting`, and the catch-up follows on the next connect.
 ///
 /// Untrusted like any IPC value, and inert: `epoch` is compared for string
 /// equality against a value this process minted, `seq` indexes a byte count.
@@ -924,64 +1017,41 @@ pub async fn terminal_attach(
     anchor: TerminalAnchor,
     on_output: Channel<RawBytes>,
     on_link: Channel<PaneLink>,
-    manager: State<'_, PtyManager>,
+    terminals: State<'_, Arc<Terminals>>,
     db: State<'_, Db>,
-    daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<TerminalAttached> {
-    if terminals::is_remote(id) {
-        // The address and cwd from the pane as it was opened, never IPC's —
-        // as the label is the manager's for a local session below.
-        let (pane, cwd) = daedalus
-            .terminals()
-            .address(id)
-            .ok_or_else(|| anyhow::anyhow!("no terminal session {id}"))?;
-        let attached = daedalus
-            .terminals()
-            .attach(
-                id,
-                anchor.into(),
-                channel_sinks(&db, pane, cwd, on_output, on_link),
-            )
-            .await?;
-        return Ok(TerminalAttached {
-            epoch: attached.epoch,
-            seq: attached.seq as f64,
-            mode: attached.mode.into(),
-        });
-    }
+    Ok(attach(&terminals, &db, id, anchor, on_output, on_link).await?)
+}
+
+/// [`terminal_attach`]'s body, over the facade it was handed.
+pub(crate) async fn attach(
+    terminals: &Terminals,
+    db: &Db,
+    id: SessionId,
+    anchor: TerminalAnchor,
+    on_output: Channel<RawBytes>,
+    on_link: Channel<PaneLink>,
+) -> anyhow::Result<TerminalAttached> {
+    refuse_run_pane(id)?;
     // Attaching *replaces* the sink, so the exit retirement has to be re-wrapped
     // here or a session loses it the first time its pane remounts — which is the
-    // common case, not the rare one. The label comes from the manager rather than
-    // the caller: it is the value this process stored at open, and an IPC-supplied
-    // one could name another surface's terminal.
-    let owner = manager
-        .sessions()
-        .into_iter()
-        .find(|s| s.id == id)
-        .map(|s| (s.label, s.agent_kind, s.cwd));
-    let forward = {
-        let on_output = on_output.clone();
-        move |bytes: Vec<u8>| {
-            let _ = on_output.send(RawBytes(bytes));
-        }
-    };
-    let replay = match owner {
-        Some((label, agent_kind, cwd)) => manager.attach(
+    // common case, not the rare one. The address and cwd come from the pane as it
+    // was opened, never from IPC, which could name another surface's terminal.
+    let (pane, cwd) = terminals
+        .address(id)
+        .ok_or_else(|| anyhow::anyhow!("no terminal session {id}"))?;
+    #[allow(clippy::disallowed_methods)]
+    let attached = terminals
+        .attach(
             id,
-            &anchor.into(),
-            retiring_sink(db.inner().clone(), label, agent_kind, cwd, forward),
-        ),
-        None => manager.attach(id, &anchor.into(), forward),
-    }?;
-    // Never send an empty chunk: empty is the exit sentinel, and an `Exact`
-    // attach with no gap (or any `Reanchor`) legitimately has nothing to write.
-    if !replay.bytes.is_empty() {
-        let _ = on_output.send(RawBytes(replay.bytes));
-    }
+            anchor.into(),
+            channel_sinks(db, pane, cwd, on_output, on_link),
+        )
+        .await?;
     Ok(TerminalAttached {
-        epoch: replay.epoch,
-        seq: replay.seq as f64,
-        mode: replay.mode.into(),
+        epoch: attached.epoch,
+        seq: attached.seq as f64,
+        mode: attached.mode.into(),
     })
 }
 
@@ -990,44 +1060,85 @@ pub async fn terminal_attach(
 /// stops, and [`terminal_attach`] resumes it.
 #[tauri::command]
 #[specta::specta]
-pub async fn terminal_detach(
-    id: SessionId,
-    manager: State<'_, PtyManager>,
-    daedalus: State<'_, DaedalusHost>,
-) -> CmdResult<()> {
-    if terminals::is_remote(id) {
-        daedalus.terminals().detach(id);
-    } else {
-        manager.detach(id);
-    }
+pub async fn terminal_detach(id: SessionId, terminals: State<'_, Arc<Terminals>>) -> CmdResult<()> {
+    refuse_run_pane(id)?;
+    terminals.detach(id);
     Ok(())
 }
 
-/// Every live PTY session, for the Terminal settings panel.
-///
-/// Read-only and cheap: a snapshot under the manager lock plus one non-blocking
-/// `try_wait` per session. It grants no authority the frontend doesn't have —
-/// it can already close any id — and it reveals nothing about a session's
-/// *contents*, only that it exists. This Mac's sessions only: the box's are
-/// its own to list.
+/// What quitting the app would end, so the quit guard warns only about work that
+/// really goes: the in-app terminals — setup runs included, they are panes like
+/// the rest. With a local server the answer is none (its sessions outlive the
+/// app), so on a build that has one quitting never asks.
 #[tauri::command]
 #[specta::specta]
-pub async fn terminal_sessions(manager: State<'_, PtyManager>) -> CmdResult<Vec<TerminalSession>> {
-    Ok(manager
-        .sessions()
+pub fn quit_summary(terminals: State<'_, Arc<Terminals>>) -> QuitSummary {
+    summarize_quit(&terminals)
+}
+
+fn summarize_quit(terminals: &Terminals) -> QuitSummary {
+    QuitSummary {
+        terminals_end: terminals.ends_on_quit(),
+    }
+}
+
+/// This Mac's terminal sessions with what the Terminal settings panel's server
+/// card needs beside them: whether the list is the whole of it (`complete` is
+/// false while a server that may hold more can't be asked) and which sessions
+/// are orphans — see [`orphans_of`].
+///
+/// Read-only and cheap: in-app, a snapshot under the manager lock plus one
+/// non-blocking `try_wait` per session; on the local server, one listing per
+/// server. It grants no authority the frontend doesn't have — it can already
+/// close any id — and reveals nothing about a session's *contents*, only that
+/// it exists. This Mac's sessions only: the box's are its own to list. The db
+/// read is the set of tab ids the app itself stored, compared by string
+/// equality.
+#[tauri::command]
+#[specta::specta]
+pub async fn terminal_inventory(
+    terminals: State<'_, Arc<Terminals>>,
+    db: State<'_, Db>,
+) -> CmdResult<TerminalInventory> {
+    let snapshot = terminals.snapshot().await;
+    let tabs = tab_term_keys(&db).await?;
+    let orphans = orphans_of(&snapshot.sessions, &tabs);
+    Ok(TerminalInventory {
+        sessions: snapshot.sessions,
+        complete: snapshot.complete,
+        orphans,
+    })
+}
+
+/// The terminal key of every tab row there is, in any repo: the keys a session
+/// labelled as a tab can still belong to.
+async fn tab_term_keys(db: &Db) -> anyhow::Result<std::collections::HashSet<String>> {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT worktree_id, id FROM worktree_tabs")
+        .fetch_all(db)
+        .await?;
+    Ok(rows
         .into_iter()
-        .map(|info| TerminalSession {
-            id: info.id,
-            label: info.label,
-            cwd: info.cwd,
-            command: info.command,
-            pid: info.pid,
-            cols: info.cols,
-            rows: info.rows,
-            attached: info.attached,
-            alive: info.alive,
-        })
+        .map(|(owner, id)| crate::tabs::term_key(&owner, &id))
         .collect())
+}
+
+/// The live sessions no tab will ever show: labelled as a tab
+/// (`tree:<worktree>:tab:<id>`, `triage:<ticket>:tab:<id>`), with no pane
+/// showing them, and no tab row of that key. That is what is left when a tab was
+/// closed while its server couldn't be told, or a worktree went away under a
+/// session. Only tab-shaped labels can be judged: an investigation, an AI review
+/// and a settings login terminal live on surfaces that have no row, so the
+/// backend cannot know whether one is still wanted, and they are never listed.
+pub fn orphans_of(
+    sessions: &[TerminalSession],
+    tabs: &std::collections::HashSet<String>,
+) -> Vec<SessionId> {
+    sessions
+        .iter()
+        .filter(|s| s.alive && !s.attached)
+        .filter(|s| s.label.contains(":tab:") && !tabs.contains(&s.label))
+        .map(|s| s.id)
+        .collect()
 }
 
 /// Claim the sessions an earlier page-load left running, and report them so the
@@ -1042,9 +1153,12 @@ pub async fn terminal_sessions(manager: State<'_, PtyManager>) -> CmdResult<Vec<
 /// pane up from the stream — a reload now costs the view, not the work.
 ///
 /// Panes on Daedalus are handed over the same way: they live in this process
-/// too, beside the link. (After santree itself restarts there is nothing here
-/// to adopt; a pane opening under the same address finds its session on the
-/// box instead — `daedalus::terminals`.)
+/// too, beside the link. With a local santree server there is more to hand over:
+/// every session it holds, including ones no tab asked for since the app was
+/// relaunched, so this first waits (bounded) for the server to list them. (After
+/// santree itself restarts a Daedalus pane has nothing here to adopt; a pane
+/// opening under the same address finds its session on the box instead —
+/// `sessions::remote`.)
 ///
 /// The caller must close whatever it cannot host (a worktree deleted while the
 /// page was down); this reports everything rather than filtering, because only
@@ -1058,33 +1172,18 @@ pub async fn terminal_sessions(manager: State<'_, PtyManager>) -> CmdResult<Vec<
 #[specta::specta]
 pub async fn terminal_adopt(
     owner: String,
-    manager: State<'_, PtyManager>,
-    daedalus: State<'_, DaedalusHost>,
+    terminals: State<'_, Arc<Terminals>>,
 ) -> CmdResult<Vec<AdoptedSession>> {
-    let mut adopted: Vec<AdoptedSession> = manager
-        .adopt_others(&owner)
+    #[allow(clippy::disallowed_methods)]
+    let adopted: Vec<AdoptedSession> = terminals
+        .adopt(&owner)
+        .await
         .into_iter()
-        .map(|info| AdoptedSession {
-            id: info.id,
-            label: info.label,
-            agent_kind: info.agent_kind,
-            cwd: info.cwd,
-            command: info.command,
-        })
+        // A setup run is a pane no page hosts: the app follows it itself
+        // while it can (`stream::start`), and a page handed it would have
+        // nothing to put it on.
+        .filter(|pane| !crate::stream::is_run_label(&pane.label))
         .collect();
-    adopted.extend(
-        daedalus
-            .terminals()
-            .adopt(&owner)
-            .into_iter()
-            .map(|pane| AdoptedSession {
-                id: pane.id,
-                label: pane.label,
-                agent_kind: pane.agent_kind,
-                cwd: Some(pane.cwd),
-                command: pane.command,
-            }),
-    );
     if !adopted.is_empty() {
         log::info!(
             "adopted {} pty session(s) from a previous page load",
@@ -1095,8 +1194,93 @@ pub async fn terminal_adopt(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests drive PTYs directly
 mod tests {
+
+    fn session(id: SessionId, label: &str, alive: bool, attached: bool) -> TerminalSession {
+        TerminalSession {
+            id,
+            label: label.into(),
+            cwd: None,
+            command: "/bin/zsh".into(),
+            pid: Some(id + 1000),
+            cols: 80,
+            rows: 24,
+            attached,
+            alive,
+            server_revision: None,
+        }
+    }
+
+    /// An orphan is a live, unshown session labelled as a tab whose row is gone.
+    /// Anything the backend cannot judge is never one.
+    #[test]
+    fn a_session_is_an_orphan_only_when_its_tab_is_gone_and_nothing_shows_it() {
+        let tabs: std::collections::HashSet<String> = [
+            crate::tabs::term_key("AK-1", "t1"),
+            crate::tabs::term_key("triage:AK-9", "t2"),
+        ]
+        .into();
+        let sessions = vec![
+            session(1, "tree:AK-1:tab:t1", true, false), // its tab exists
+            session(2, "tree:AK-1:tab:gone", true, false), // tab closed: orphan
+            session(3, "tree:AK-2:tab:t1", true, true),  // a pane shows it
+            session(4, "tree:AK-2:tab:t9", false, false), // exited: not running
+            session(5, "triage:AK-9:tab:t2", true, false), // a triage tab, present
+            session(6, "triage:AK-9:tab:zz", true, false), // a triage tab, gone: orphan
+            session(7, "triage:AK-9", true, false),      // an investigation: unjudgeable
+            session(8, "ai-review:o/r#4", true, false),  // a review session: unjudgeable
+            session(9, "login:claude", true, false),     // settings login: unjudgeable
+        ];
+        assert_eq!(orphans_of(&sessions, &tabs), vec![2, 6]);
+        assert!(orphans_of(&[], &tabs).is_empty());
+    }
+
+    /// A setup run's pane is the app's: a page's attach, write, seed, resize
+    /// and detach on it are refused, so it cannot take the run's sinks.
+    #[test]
+    fn a_page_cannot_reach_a_setup_runs_pane() {
+        let host = crate::stream::fake::FakeHost::new();
+        let host: Arc<dyn crate::stream::RunHost> = host;
+        let slot = crate::stream::RUNS.reserve("terminal-test-run").unwrap();
+        assert!(refuse_run_pane(987_654).is_ok());
+        assert!(slot.attach_for_test(&host, 987_654));
+        assert!(refuse_run_pane(987_654).is_err());
+        drop(slot);
+        assert!(refuse_run_pane(987_654).is_ok());
+    }
+
+    /// The keys are read from the real table with the same function the tabs are
+    /// keyed by, so a worktree's and a triage ticket's tabs both count.
+    #[tokio::test]
+    async fn tab_keys_come_from_the_tab_rows_of_every_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::init(dir.path().join("test.db")).await.unwrap();
+        for (repo, owner, id) in [("a", "AK-1", "t1"), ("b", "triage:AK-9", "t2")] {
+            sqlx::query(
+                "INSERT INTO worktree_tabs (repo, id, worktree_id, kind, title, position) \
+                 VALUES (?, ?, ?, 'terminal', 'x', 1)",
+            )
+            .bind(repo)
+            .bind(id)
+            .bind(owner)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let keys = tab_term_keys(&db).await.unwrap();
+        assert_eq!(
+            keys,
+            [
+                "tree:AK-1:tab:t1".to_string(),
+                "triage:AK-9:tab:t2".to_string()
+            ]
+            .into()
+        );
+    }
     use super::*;
+    use santree_pty::OpenOpts;
+    use std::sync::Mutex;
 
     /// A throwaway seed directory, uniquely named per test (no tempfile dep in
     /// this crate — see `openers.rs`, which does the same).
@@ -1343,7 +1527,7 @@ mod tests {
             )
             .expect("open session");
 
-        let roots = pane_roots(&manager);
+        let roots = pane_roots(&manager.sessions());
         assert_eq!(
             roots
                 .iter()
@@ -1378,5 +1562,306 @@ mod tests {
             }],
             "a pty-hosted `codex` must be seen in its pane's foreground"
         );
+    }
+
+    // ── The adapter over the facade ─────────────────────────────────────────
+    //
+    // `open`, `attach` and `type_seed` are the commands' bodies, so these run
+    // what a pane's life runs, through the channels the frontend holds — once
+    // with no server (`Mode::Off`, the default for unsigned, dev and Linux
+    // builds) and once on a real `santree-server`.
+
+    use crate::sessions::testkit::{until, Screen};
+
+    fn shell_opts(cwd: &Path, label: &str, agent_kind: Option<AgentKind>) -> TerminalOpenOpts {
+        TerminalOpenOpts {
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            command: "/bin/sh".into(),
+            args: Vec::new(),
+            cols: 100,
+            rows: 30,
+            owner: "page-1".into(),
+            label: label.into(),
+            agent_kind,
+        }
+    }
+
+    fn type_line(terminals: &Terminals, id: SessionId, line: &str) {
+        write_pty(
+            terminals,
+            id,
+            Input::Keys(Keystrokes::typed(format!("{line}\n"))),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_no_server_a_terminal_is_an_in_app_pty_exactly_as_before() {
+        let _serial = crate::stream::pty_guard().await;
+        let dir = scratch("off");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::init(dir.join("t.db")).await.unwrap();
+        let link = DaedalusHost::default();
+        let manager = PtyManager::new();
+        let terminals = Terminals::new(
+            Local::InApp(manager.clone()),
+            link.terminals().clone(),
+            link.ids().clone(),
+        );
+
+        // A retirable agent row: the pane's exit must still stamp it.
+        for sql in [
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind) \
+             VALUES ('r', 'tree:A:tab:1', ?, 's1', 'Claude')",
+            "INSERT INTO session_state (session_id, state, event, cwd, updated_at_ms) \
+             VALUES ('s1', 'active', 'UserPromptSubmit', ?, 1)",
+        ] {
+            sqlx::query(sql)
+                .bind(dir.to_string_lossy().into_owned())
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+
+        let screen = Screen::new();
+        let (output, links) = screen.channels();
+        let id = open(
+            &terminals,
+            &db,
+            shell_opts(&dir, "tree:A:tab:1", Some(AgentKind::Claude)),
+            output,
+            links,
+        )
+        .await
+        .unwrap();
+
+        // The manager's own id, never minted; the session is the manager's.
+        assert!(!link.ids().minted(id));
+        let held = manager.sessions();
+        assert_eq!((held.len(), held[0].id), (1, id));
+        assert_eq!(held[0].label, "tree:A:tab:1");
+        assert_eq!(held[0].agent_kind, Some(AgentKind::Claude));
+        assert_eq!(terminals.seed_policy(id), SeedPolicy::Spill);
+        assert!(screen.links().is_empty(), "in-app never sends a link");
+
+        type_line(&terminals, id, "echo off-$((20+1))");
+        screen
+            .until("the echo", |s| s.text().contains("off-21"))
+            .await;
+
+        // Detach, let it print unwatched, attach from where the screen stopped:
+        // exactly the missed bytes, ahead of anything live.
+        let anchor = TerminalAnchor::At {
+            epoch: held[0].epoch.clone(),
+            seq: screen.len() as f64,
+        };
+        terminals.detach(id);
+        type_line(&terminals, id, "echo away-$((3+3))");
+        let again = Screen::new();
+        let (output, links) = again.channels();
+        let attached = attach(&terminals, &db, id, anchor, output, links)
+            .await
+            .unwrap();
+        assert!(matches!(attached.mode, TerminalReplayMode::Exact));
+        again
+            .until("the missed output", |s| s.text().contains("away-6"))
+            .await;
+        assert!(!again.text().contains("off-21"), "{:?}", again.text());
+
+        // A launch line too long for a tty is spilled and run, as before; an
+        // unknown id spills nothing.
+        let seeds = dir.join("seeds");
+        let long = format!("echo spilled-$((2+2)) # {}", "x".repeat(MAX_SEED_LINE * 2));
+        type_seed(
+            &terminals,
+            Some(&seeds),
+            id,
+            LaunchRequest::typed(long.clone()),
+        )
+        .unwrap();
+        again
+            .until("the spilled seed", |s| s.text().contains("spilled-4"))
+            .await;
+        assert_eq!(std::fs::read_dir(&seeds).unwrap().count(), 1);
+        let nowhere = dir.join("nowhere");
+        assert!(type_seed(&terminals, Some(&nowhere), 999, LaunchRequest::typed(long)).is_err());
+        assert!(!nowhere.exists(), "a refused seed left a file");
+
+        // Quitting would end this in-app terminal.
+        assert_eq!(summarize_quit(&terminals), QuitSummary { terminals_end: 1 });
+
+        // The exit sentinel closes the pane and retires the agent's rows.
+        type_line(&terminals, id, "exit");
+        again.until("the exit", |s| s.exited()).await;
+        for _ in 0..100 {
+            let (state,): (String,) =
+                sqlx::query_as("SELECT state FROM session_state WHERE session_id = 's1'")
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            if state == "exited" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let (state,): (String,) =
+            sqlx::query_as("SELECT state FROM session_state WHERE session_id = 's1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(state, "exited");
+
+        // Leaving closes every in-app session, as it always did.
+        terminals.release();
+        assert!(manager.sessions().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same pane on a real `santree-server`: it opens there with the app's
+    /// environment, takes keystrokes, survives a detach and re-attaches with
+    /// exact replay, is adopted by a later page, and outlives the app's
+    /// `release`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_a_server_the_pane_runs_there_replays_exactly_and_outlives_release() {
+        use crate::server::testkit::{real_binary, Fixture};
+        use crate::server::{LocalServers, ServerConfig};
+        use santree_core::domain::ServerState;
+
+        assert!(
+            std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
+            "this test reads cargo's own variable to prove the app's env reaches the \
+             server: run it through `cargo test`"
+        );
+        let _serial = crate::stream::pty_guard().await;
+        let fx = Fixture::new();
+        let db = crate::db::init(fx.dir.path().join("t.db")).await.unwrap();
+        let link = DaedalusHost::default();
+        let states = Arc::new(Mutex::new(Vec::new()));
+        let servers = LocalServers::new(ServerConfig {
+            app_data_dir: fx.dir.path().to_path_buf(),
+            log_dir: Some(fx.dir.path().join("logs")),
+            bundled_binary: Some(real_binary()),
+            mode: Mode::OptIn,
+            ids: link.ids().clone(),
+            retire: retire_exited(db.clone()),
+            emit: {
+                let states = states.clone();
+                Arc::new(move |status| states.lock().unwrap().push(status.state))
+            },
+            keep_awake: Arc::new(|| false),
+            keep_awake_held: Arc::new(|_| {}),
+        });
+        servers.ensure().await;
+        let ServerState::Running { pid, .. } = servers.status().state else {
+            panic!("the server isn't running: {:?}", servers.status());
+        };
+        fx.track(pid);
+        // `ensure` announced the move into Running, which is what the frontend
+        // re-runs its adopt on.
+        assert!(matches!(
+            states.lock().unwrap().last(),
+            Some(ServerState::Running { .. })
+        ));
+
+        let terminals = Terminals::new(
+            Local::Server(servers.clone()),
+            link.terminals().clone(),
+            link.ids().clone(),
+        );
+        let screen = Screen::new();
+        let (output, links) = screen.channels();
+        let id = open(
+            &terminals,
+            &db,
+            shell_opts(fx.dir.path(), "tree:S:tab:1", None),
+            output,
+            links,
+        )
+        .await
+        .unwrap();
+        assert!(
+            id >= 1 << 31,
+            "a server pane's id is minted by the registry"
+        );
+        assert!(
+            crate::sessions::LocalHosts::current(&*servers).is_some_and(|server| server.holds(id)),
+            "the pane is the server's"
+        );
+        assert_eq!(terminals.seed_policy(id), SeedPolicy::Spill);
+        screen
+            .until("the pane to go live", |s| {
+                s.links().contains(&PaneLink::Live)
+            })
+            .await;
+
+        // The app's environment reached a server that started with none of it
+        // (`CARGO_MANIFEST_DIR` is in a test's env and in no server's).
+        type_line(&terminals, id, "echo base-${CARGO_MANIFEST_DIR:+forwarded}");
+        screen
+            .until("the base env", |s| s.text().contains("base-forwarded"))
+            .await;
+
+        type_line(&terminals, id, "echo first-$((1+1))");
+        screen
+            .until("the echo", |s| s.text().contains("first-2"))
+            .await;
+        let held = terminals.local_sessions().await;
+        assert_eq!((held.len(), held[0].id), (1, id));
+        // Input typed to a detached pane is dropped, never replayed later, so
+        // the shell is told in advance to print while nobody is watching, and
+        // to leave a mark once it has.
+        let printed = fx.dir.path().join("printed");
+        type_line(
+            &terminals,
+            id,
+            &format!(
+                "(sleep 1; echo away-$((3+3)); touch '{}') &",
+                printed.display()
+            ),
+        );
+        screen
+            .until("the job to start", |s| s.text().contains("[1]"))
+            .await;
+        let anchor = TerminalAnchor::At {
+            epoch: held[0].epoch.clone(),
+            seq: screen.len() as f64,
+        };
+        terminals.detach(id);
+        until("the job to print unwatched", || printed.exists()).await;
+        let again = Screen::new();
+        let (output, links) = again.channels();
+        let attached = attach(&terminals, &db, id, anchor, output, links)
+            .await
+            .unwrap();
+        assert!(matches!(attached.mode, TerminalReplayMode::Exact));
+        again
+            .until("the missed output", |s| s.text().contains("away-6"))
+            .await;
+        assert!(!again.text().contains("first-2"), "{:?}", again.text());
+        type_line(&terminals, id, "echo typed-$((2+2))");
+        again
+            .until("typing", |s| s.text().contains("typed-4"))
+            .await;
+
+        // A later page adopts the pane; the snapshot lists it.
+        let adopted = terminals.adopt("page-2").await;
+        assert_eq!(
+            adopted
+                .iter()
+                .map(|a| (a.id, a.label.as_str()))
+                .collect::<Vec<_>>(),
+            [(id, "tree:S:tab:1")]
+        );
+        assert_eq!(terminals.snapshot().await.sessions.len(), 1);
+
+        // A live session on the server is not something quitting ends.
+        assert_eq!(summarize_quit(&terminals), QuitSummary { terminals_end: 0 });
+
+        // Quitting the app lets go; the server keeps running and answering.
+        terminals.release();
+        let info =
+            crate::server::testkit::info_over(&fx.layout.socket_for(santree_server::REVISION))
+                .await;
+        assert_eq!(info.pid, pid, "the server ended with the app");
     }
 }

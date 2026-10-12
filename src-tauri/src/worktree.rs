@@ -27,7 +27,7 @@ use crate::git::{self, Checkout};
 use crate::repo;
 use crate::reviews;
 use crate::session::{self, RecordPresence};
-use crate::stream::{self, StreamEvent};
+use crate::stream::{self, RunHost, StreamEvent};
 
 /// Sentinel worktree id for the repo root itself — the checkout the per-issue
 /// worktrees branch off, normally sitting on main/master. It isn't a tracked
@@ -954,15 +954,17 @@ fn setup_key(root: &str, issue_id: &str) -> String {
 /// Run `.santree/init.sh` in the worktree, streaming its output over `on_event`
 /// for the Trees "Setup" tab, and record it as run on success.
 ///
-/// The process, the PTY and the cancel registry all belong to [`crate::stream`] —
-/// the same machinery behind the Dev tab's build. All this adds is what's specific
-/// to setup: finding the script, the worktree env, and the `setup_ran` flag.
+/// The run is a terminal pane ([`crate::stream`]): on a build with the local
+/// santree server its process lives there and outlives the app, though nothing
+/// follows it after a relaunch. All this adds is what's specific to setup:
+/// finding the script, the worktree env, and the `setup_ran` flag.
 ///
 /// In a Daedalus project the script runs on the box ([`run_setup_on_box`]),
 /// streamed to the same pane.
 pub async fn run_setup_streamed(
     db: &Db,
     daedalus: &DaedalusHost,
+    host: &Arc<dyn RunHost>,
     repo: &str,
     issue_id: &str,
     on_event: Channel<StreamEvent>,
@@ -991,10 +993,26 @@ pub async fn run_setup_streamed(
     }
 
     // Claim the run slot up front — two `init.sh` runs in one worktree would race
-    // over the same directory. Held (and freed) by the blocking run below.
-    let Some(slot) = stream::RUNS.reserve(&setup_key(&root, issue_id)) else {
+    // over the same directory. Held (and freed) by the run below.
+    let key = setup_key(&root, issue_id);
+    let Some(slot) = stream::RUNS.reserve(&key) else {
         bail!("setup is already running for '{issue_id}'");
     };
+    // A run this process no longer follows — one from before a restart, still
+    // going on the local server — holds the directory just the same. Its
+    // label carries the key, so the host says.
+    let earlier = format!("{}{key}#", stream::LABEL_PREFIX);
+    match host.any_live(&earlier).await {
+        Some(false) => {}
+        Some(true) => bail!(
+            "setup from before santree restarted is still running for '{issue_id}'; end it in \
+             Settings → Terminal"
+        ),
+        None => bail!(
+            "setup can't start for '{issue_id}' yet: the santree server hasn't said what it is \
+             running; try again in a moment"
+        ),
+    }
 
     // The user's configured project env, so `init.sh` sees the same variables the
     // Terminal does — otherwise it behaves differently in the Setup tab than when the
@@ -1005,24 +1023,39 @@ pub async fn run_setup_streamed(
     env.push(("SANTREE_WORKTREE_PATH".into(), wt_dir.clone()));
     env.push(("SANTREE_REPO_ROOT".into(), root.clone()));
 
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let status = {
+        let dir = Checkout::local(&wt_path);
+        let run_id = run_id.clone();
+        tokio::task::spawn_blocking(move || setup_status_path(&dir, &run_id)).await??
+    };
+    let launch = stream::Launch::script(
+        stream::run_label(&key, &run_id),
+        &wt_path,
+        &script,
+        &status,
+        env,
+    );
     let ev = on_event.clone();
-    let command = format!("exec {}", shell_quote(&script.to_string_lossy()));
-    let ok = tokio::task::spawn_blocking(move || {
-        stream::run(
-            stream::Spec {
-                command,
-                cwd: &wt_path,
-                env,
-            },
-            slot,
-            &ev,
-        )
-    })
-    .await
-    .unwrap_or(false);
-
+    let on_text: stream::Text = Arc::new(move |text| {
+        let _ = ev.send(StreamEvent::Chunk { text });
+    });
+    let ok = stream::start(host, slot, launch, on_text).await;
+    let _ = std::fs::remove_file(&status);
     finish_setup(db, &root, issue_id, ok, &on_event).await;
     Ok(())
+}
+
+/// Where a run's wrapper leaves its exit code: in the checkout's own git dir,
+/// like the split's private index — never in the tree it is setting up.
+fn setup_status_path(dir: &Checkout, run_id: &str) -> Result<String> {
+    let name = format!("santree-setup-{run_id}.status");
+    let path = git::git(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-path", &name],
+    )?;
+    ensure!(!path.is_empty(), "git named no place for the setup status");
+    Ok(path)
 }
 
 /// Record a finished setup run and tell its pane.
@@ -1070,15 +1103,11 @@ async fn run_setup_on_box(
             if !dir.is_executable(Path::new(&script))? {
                 return Ok(None);
             }
-            // The wrapper's exit-code file: in the checkout's own git dir, like
-            // the split's private index — never in the tree it is setting up.
-            let name = format!("santree-setup-{}.status", uuid::Uuid::new_v4());
-            let path = git::git(
+            // The wrapper's exit-code file.
+            Ok(Some(setup_status_path(
                 &dir,
-                &["rev-parse", "--path-format=absolute", "--git-path", &name],
-            )?;
-            ensure!(!path.is_empty(), "git named no place for the setup status");
-            Ok(Some(path))
+                &uuid::Uuid::new_v4().to_string(),
+            )?))
         }
     })
     .await??;
@@ -1091,7 +1120,7 @@ async fn run_setup_on_box(
     };
 
     let client = daedalus
-        .client_within(crate::daedalus::host::CONNECT_WAIT)
+        .client_within(crate::sessions::CONNECT_WAIT)
         .await?;
     let spec = crate::daedalus::setup::RunSpec {
         cwd: wt_dir.clone(),
@@ -1144,11 +1173,6 @@ pub async fn resize_setup(
     validate_issue_id(issue_id)?;
     let key = setup_key(&stored_root(db, repo).await?, issue_id);
     Ok(stream::RUNS.resize(&key, cols, rows) || daedalus.runs().resize(&key, cols, rows).await)
-}
-
-/// Single-quote a string for a POSIX shell command line.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Merge the base branch (origin/main, etc.) into the worktree — the "pull from
@@ -2239,6 +2263,11 @@ mod tests {
         DaedalusHost::default()
     }
 
+    /// Where setup runs live under test: in-app terminals.
+    fn run_host() -> Arc<dyn RunHost> {
+        crate::terminal::test_run_host()
+    }
+
     /// The `test` repo's root checkout, as a command resolves it.
     async fn test_root(db: &Db) -> Checkout {
         root(db, &no_link(), "test").await.unwrap()
@@ -2544,9 +2573,10 @@ mod tests {
         let (first_ch, first_log) = recording_channel();
         let (second_ch, second_log) = recording_channel();
         let link = no_link();
+        let host = run_host();
         let (first, second) = tokio::join!(
-            run_setup_streamed(&db, &link, "test", "AK-1", first_ch),
-            run_setup_streamed(&db, &link, "test", "AK-1", second_ch),
+            run_setup_streamed(&db, &link, &host, "test", "AK-1", first_ch),
+            run_setup_streamed(&db, &link, &host, "test", "AK-1", second_ch),
         );
 
         assert!(
@@ -2614,7 +2644,7 @@ mod tests {
         let (channel, log) = recording_channel();
         let db = db.clone();
         let run = tokio::spawn(async move {
-            run_setup_streamed(&db, &no_link(), "test", "AK-1", channel).await
+            run_setup_streamed(&db, &no_link(), &run_host(), "test", "AK-1", channel).await
         });
         (run, log)
     }
@@ -2709,7 +2739,7 @@ mod tests {
 
         // Absent entirely.
         let (channel, log) = recording_channel();
-        run_setup_streamed(&db, &no_link(), "test", "AK-1", channel)
+        run_setup_streamed(&db, &no_link(), &run_host(), "test", "AK-1", channel)
             .await
             .unwrap();
         assert!(events_contain(&log, "nothing to run"));
@@ -2720,7 +2750,7 @@ mod tests {
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
         std::fs::write(&script, "#!/bin/bash\necho should not run\n").unwrap();
         let (channel, log) = recording_channel();
-        run_setup_streamed(&db, &no_link(), "test", "AK-1", channel)
+        run_setup_streamed(&db, &no_link(), &run_host(), "test", "AK-1", channel)
             .await
             .unwrap();
         assert!(events_contain(&log, "nothing to run"));
@@ -2778,6 +2808,41 @@ mod tests {
             .reserve(&setup_key(&repo_dir.to_string_lossy(), "AK-1"))
             .is_some());
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Setup runs that outlive the app ─────────────────────────────────────
+
+    /// A run from before a restart, still going on the local server, holds the
+    /// worktree as surely as one this process follows: a second is refused and
+    /// nothing starts. So is one while the server can't say what it runs —
+    /// unknown is not absent.
+    #[tokio::test]
+    async fn a_setup_is_refused_while_an_earlier_one_may_still_be_running() {
+        let (base, repo_dir, db) = test_repo("setup-earlier").await;
+        spawn_worktree(&db, "AK-1").await;
+        write_init_script(&repo_dir, "#!/bin/bash\necho should not run\n");
+        let fake = stream::fake::FakeHost::new();
+        let host: Arc<dyn RunHost> = fake.clone();
+        for (live, says) in [
+            (Some(true), "still running"),
+            (None, "hasn't said what it is running"),
+        ] {
+            fake.set_live(live);
+            let (channel, log) = recording_channel();
+            let refused = run_setup_streamed(&db, &no_link(), &host, "test", "AK-1", channel)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(refused.contains(says), "{refused}");
+            assert!(!events_contain(&log, "should not run"));
+            assert_eq!(fake.opened.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+        // The refusal held nothing: once the host says it's gone, a run starts.
+        fake.set_live(Some(false));
+        assert!(stream::RUNS
+            .reserve(&setup_key(&repo_dir.to_string_lossy(), "AK-1"))
+            .is_some());
         let _ = std::fs::remove_dir_all(&base);
     }
 

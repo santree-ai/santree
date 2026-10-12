@@ -14,6 +14,8 @@
 
 use std::collections::VecDeque;
 
+use crate::modes::ModeTracker;
+
 /// How much output a session keeps for catch-up.
 ///
 /// Sized off superset's measurement rather than guessed: their reproducible
@@ -60,7 +62,9 @@ pub struct Replay {
     /// that is exactly the case where the client's own epoch was wrong and it
     /// needs the right one to anchor against next time.
     pub epoch: String,
-    /// The position the client should count from after writing `bytes`.
+    /// The position the client should count from after writing `bytes`. A
+    /// `Tail` replay may begin with a short mode preamble that is not part of
+    /// the stream, so its length is not `seq - start`.
     pub seq: u64,
     pub bytes: Vec<u8>,
 }
@@ -74,6 +78,14 @@ pub struct Ring {
     /// Total bytes ever produced by this session.
     seq: u64,
     cap: usize,
+    /// The process ended (the reader sent its exit sentinel). Kept with the
+    /// chunks, under their lock, so an attach sees the output and the end of
+    /// it as one state.
+    exited: bool,
+    /// The terminal modes where the retained part begins: every evicted chunk
+    /// went through it, so a `Tail` replay is that state, then the tail
+    /// (`modes.rs`).
+    modes_at_start: ModeTracker,
 }
 
 impl Default for Ring {
@@ -90,7 +102,18 @@ impl Ring {
             start_seq: 0,
             seq: 0,
             cap,
+            exited: false,
+            modes_at_start: ModeTracker::default(),
         }
+    }
+
+    /// Nothing more will be pushed: the session's process ended.
+    pub fn mark_exited(&mut self) {
+        self.exited = true;
+    }
+
+    pub fn exited(&self) -> bool {
+        self.exited
     }
 
     /// Record output. Always advances `seq` by `data.len()`, whether or not the
@@ -108,9 +131,12 @@ impl Ring {
         // is still the only record of the current screen, and an empty ring
         // would turn every attach into a reanchor.
         while self.bytes > self.cap && self.chunks.len() > 1 {
-            let dropped = self.chunks.pop_front().map(|c| c.len()).unwrap_or(0);
-            self.bytes -= dropped;
-            self.start_seq += dropped as u64;
+            let Some(dropped) = self.chunks.pop_front() else {
+                break;
+            };
+            self.bytes -= dropped.len();
+            self.start_seq += dropped.len() as u64;
+            self.modes_at_start.feed(&dropped);
         }
         debug_assert_eq!(self.start_seq + self.bytes as u64, self.seq);
     }
@@ -132,12 +158,19 @@ impl Ring {
                     bytes: self.read_from(*seq),
                 }
             }
-            Anchor::Fresh => Replay {
-                mode: ReplayMode::Tail,
-                epoch: epoch.to_string(),
-                seq: self.seq,
-                bytes: self.read_from(self.start_seq),
-            },
+            Anchor::Fresh => {
+                // A fresh viewer has none of the modes the program set long ago:
+                // the preamble puts it where the tail begins. `seq` counts the
+                // stream, so the extra bytes move no position.
+                let mut bytes = self.modes_at_start.snapshot().preamble(self.exited);
+                bytes.extend_from_slice(&self.read_from(self.start_seq));
+                Replay {
+                    mode: ReplayMode::Tail,
+                    epoch: epoch.to_string(),
+                    seq: self.seq,
+                    bytes,
+                }
+            }
             _ => Replay {
                 mode: ReplayMode::Reanchor,
                 epoch: epoch.to_string(),
@@ -304,5 +337,137 @@ mod tests {
         ring.push(b"hi");
         ring.push(b"");
         assert_eq!(ring.seq, 2);
+    }
+
+    // ── mode preamble on a fresh replay ─────────────────────────────────────
+
+    #[test]
+    fn a_tail_that_lost_the_decset_starts_with_a_mode_preamble() {
+        // Cap 16: the DECSET chunk is evicted, the text chunks stay.
+        let ring = ring_of(16, &[b"\x1b[?2004h", b"0123456789", b"abcdefghij"]);
+        let replay = ring.replay_for("e1", &Anchor::Fresh);
+        assert_eq!(replay.mode, ReplayMode::Tail);
+        assert_eq!(replay.bytes, b"\x1b[?2004habcdefghij");
+        // Positions still count the stream, not the preamble.
+        assert_eq!(replay.seq, 28);
+    }
+
+    #[test]
+    fn a_decset_still_in_the_tail_gets_no_preamble() {
+        let ring = ring_of(64, &[b"\x1b[?2004h", b"text"]);
+        let replay = ring.replay_for("e1", &Anchor::Fresh);
+        assert_eq!(replay.bytes, b"\x1b[?2004htext");
+    }
+
+    #[test]
+    fn a_reset_before_the_detach_is_not_resurrected_by_the_replay() {
+        let ring = ring_of(12, &[b"\x1b[?2004h", b"\x1b[?2004l", b"0123456789ab"]);
+        let replay = ring.replay_for("e1", &Anchor::Fresh);
+        assert_eq!(replay.bytes, b"0123456789ab");
+    }
+
+    #[test]
+    fn a_sequence_split_across_pushes_is_tracked_whole() {
+        let ring = ring_of(8, &[b"\x1b[?20", b"04h", b"0123456789"]);
+        let replay = ring.replay_for("e1", &Anchor::Fresh);
+        assert!(
+            replay.bytes.starts_with(b"\x1b[?2004h"),
+            "{:?}",
+            replay.bytes
+        );
+    }
+
+    /// The preamble of a ring whose first chunk (`gone`) was evicted by a
+    /// 16-byte text chunk.
+    fn preamble_after(gone: &[u8], exited: bool) -> Vec<u8> {
+        let mut ring = ring_of(16, &[gone, b"0123456789abcdef"]);
+        if exited {
+            ring.mark_exited();
+        }
+        let replay = ring.replay_for("e1", &Anchor::Fresh);
+        replay.bytes[..replay.bytes.len() - 16].to_vec()
+    }
+
+    #[test]
+    fn a_reset_of_any_mouse_protocol_turns_reporting_off() {
+        // xterm.js keeps one mouse protocol: `?1002l` ends `?1000h` as well.
+        assert_eq!(
+            preamble_after(b"\x1b[?1000h\x1b[?1002h\x1b[?1002l", false),
+            b""
+        );
+        assert_eq!(
+            preamble_after(b"\x1b[?1006h\x1b[?1016h\x1b[?1016l", false),
+            b""
+        );
+        assert_eq!(
+            preamble_after(b"\x1b[?1000h\x1b[?1003h\x1b[?1006h", false),
+            b"\x1b[?1003h\x1b[?1006h"
+        );
+    }
+
+    #[test]
+    fn a_soft_reset_keeps_the_alt_screen_and_the_mouse() {
+        assert_eq!(
+            preamble_after(
+                b"\x1b[?1049h\x1b[?1000h\x1b[?2004h\x1b[?1004h\x1b[!p",
+                false
+            ),
+            b"\x1b[?1049h\x1b[?1000h"
+        );
+    }
+
+    #[test]
+    fn a_lone_0x9b_is_not_a_csi() {
+        // xterm.js decodes UTF-8 first and drops an invalid lead byte.
+        assert_eq!(preamble_after(b"\x9b?2004h", false), b"");
+    }
+
+    #[test]
+    fn an_exited_session_gets_the_alt_screen_and_no_input_modes() {
+        // Nothing reads its input any more: reporting modes would only make the
+        // viewer send mouse and focus reports into a dead pane.
+        let gone = b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h";
+        assert_eq!(preamble_after(gone, true), b"\x1b[?1049h");
+    }
+
+    /// What a fresh viewer ends in after the preamble and the tail is what the
+    /// whole stream left, at every eviction point.
+    #[test]
+    fn a_fresh_replay_settles_the_modes_of_the_whole_stream() {
+        let chunks: [&[u8]; 9] = [
+            b"\x1b[?1049h",
+            b"\x1b[?1000h\x1b[?1006h",
+            b"frame one",
+            b"\x1b[?2004h\x1b[?1004h",
+            b"\x1b[!p",
+            b"\x1b[?1002h\x1b[?1h",
+            b"\x1b[?1049l",
+            b"\x1b[?1000l\x1b[?2004h",
+            b"prompt",
+        ];
+        for cap in 1..=chunks.concat().len() {
+            let ring = ring_of(cap, &chunks);
+            let replay = ring.replay_for("e1", &Anchor::Fresh);
+            let (mut viewer, mut whole) = (ModeTracker::default(), ModeTracker::default());
+            viewer.feed(&replay.bytes);
+            whole.feed(&chunks.concat());
+            assert_eq!(viewer.snapshot(), whole.snapshot(), "cap {cap}");
+        }
+    }
+
+    #[test]
+    fn an_exact_replay_and_a_reanchor_get_no_preamble() {
+        let ring = ring_of(16, &[b"\x1b[?2004h", b"0123456789", b"abcdefghij"]);
+        let exact = ring.replay_for(
+            "e1",
+            &Anchor::At {
+                epoch: "e1".into(),
+                seq: 18,
+            },
+        );
+        assert_eq!(exact.mode, ReplayMode::Exact);
+        assert_eq!(exact.bytes, b"abcdefghij");
+        let unknown = ring.replay_for("e1", &Anchor::Unknown);
+        assert!(unknown.bytes.is_empty());
     }
 }

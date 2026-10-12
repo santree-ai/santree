@@ -25,6 +25,18 @@ Trees, beside its worktree and its agents (the right panel's PR and AI-work pane
 Reviews carries the PRs waiting on *your* review — other people's. That split is
 load-bearing for where new PR work goes; see "Key patterns".
 
+**Terminals outlive the app on a signed build.** santree launches a detached
+`santree-server` that owns this Mac's PTYs, so a quit, a crash or an update never
+ends an agent or a setup script; unsigned, dev and Linux builds keep in-app PTYs
+unless opted in (`SANTREE_SERVER=1`). `terminal.rs` runs on the
+`sessions::Terminals` facade; liveness consumers honour `Liveness.complete` (an
+unreachable server is "unknown", never "exited"), and agent hooks name a stable
+`<app_data>/bin/santree-hook` copy. The tables `santree-hook` writes are a
+compatibility surface: migrations on them are additive only. docs/server.md is
+the source of truth, with the Status table and the Unverified list (nothing of it
+has run on a signed build yet; the first release with it is a beta tag). Read it
+before touching terminals, `crates/host`, `crates/server`, or `src-tauri/src/{sessions,server}/`.
+
 The hidden **Dev** tab (dogfooding: build/install santree from inside santree, cut
 a release, bug TODO list) was **removed** before the public release, along with the
 cross-repo Agents landing view it sat beside. `/` now redirects to `/trees`, whose
@@ -64,7 +76,15 @@ applied version the resolved set no longer has — and `0028` drops the table.
   `crates/remote-tls` (`santree-remote-tls`: the session host's pinned TLS 1.3
   profile — the engine's; santree itself doesn't depend on it) +
   `crates/agent-kind` (`santree-agent-kind`: the `AgentKind` enum, re-exported by
-  `santree_core::domain`).
+  `santree_core::domain`) +
+  `crates/host` (`santree-host`: protocol v1 served — the local server's and the
+  test daemon's host; Daedalus's session host to adopt it) +
+  `crates/server` (`santree-server`: the local server binary — santree-host on a
+  unix socket, built with `--profile server` (panics unwind); its `REVISION`
+  (1 for the first release) is pinned by `revision.lock`: when its code or linked
+  crates change, bump it if a release carries it, then run
+  `UPDATE_REVISION_LOCK=1 cargo test -p santree-server revision`; docs/server.md
+  "Versions and draining").
 - **Crates the daedalus engine consumes:** `santree-pty`, `santree-remote-proto`,
   `santree-remote-tls` and `santree-agent-kind` are depended on by git rev from
   the daedalus engine repo, so their public API and their dependency list are a
@@ -74,7 +94,14 @@ applied version the resolved set no longer has — and `0028` drops the table.
   provider, passed explicitly (no aws-lc-rs in its tree, never the process
   default). The engine builds them with nix on an older rustc than
   `rust-toolchain.toml` pins, so they declare `rust-version = "1.95"` and must
-  keep building on it.
+  keep building on it. `santree-host` is not consumed yet but carries the same
+  contract (`rust-version = "1.95"`; no santree-core, Tauri, specta, transport
+  or crypto). The `#[allow(clippy::disallowed_methods)]` attributes in
+  `santree-pty` and `santree-host` mark this workspace's sanctioned PTY sites;
+  they are inert in the engine, which has no such `clippy.toml`.
+  `santree-pty`'s `OpenOpts` gained `base_env` and its sinks are now
+  `Send + Sync`: the engine's session host must move to `santree-host` in the
+  same rev bump.
 
 ## Architecture & data flow
 
@@ -114,6 +141,12 @@ React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
 ```
 docs/terminals.md  how terminal emulation works, end to end — the source of
                    truth for crates/pty, terminal.rs and features/terminal
+docs/server.md     the local santree server: modes, lifecycle, trust, revisions,
+                   sessions, env, build/sign/release, and a built-vs-planned
+                   Status table — the source of truth for crates/host,
+                   crates/server and src-tauri/src/{sessions,server}/
+docs/remote.md     Daedalus projects, protocol v1, the link — the source of
+                   truth for crates/remote{,-proto,-tls} and src-tauri/src/daedalus/
 crates/core/src/   domain.rs (types) · config.rs (static config/defaults) · linear.rs
                    + jira.rs (tracker → domain mapping) · layout.rs (dagre-free graph helpers) · diff_index.rs
                    (a PR's commentable hunk spans; written by the app, read by the
@@ -131,7 +164,17 @@ crates/remote/src/ the client for Daedalus's session host (docs/remote.md):
                    · control (the agent's own socket: this Mac's settings)
                    · transport (the `Connector` seam, `ConnectError` states)
                    · client · host (reconnect, backoff, hook cursor) · fake
-                   (test daemon + fake agent socket)
+                   (test daemon — santree-host over an in-memory link — + fake
+                   agent socket)
+crates/host/src/   protocol v1 served (`santree-host`): lib.rs (Host, Caps,
+                   Methods, Extension, HostOptions) · conn.rs (a connection: its
+                   bounded queue, pacing, writer) · pty.rs (attach gates,
+                   sessions, input threads) · exec.rs · fsops.rs · hooks.rs
+crates/server/src/ the local santree server (`santree-server`): lib.rs (serve,
+                   idle retirement, signals, flood limit, REVISION) ·
+                   endpoint.rs (run dir, the flock that owns the socket and its
+                   repair, the anonymous ready socketpair) · ext.rs
+                   (`server.*`) · peer.rs (who may connect) · logging.rs
 crates/remote-proto/src/  lib.rs — protocol v1 as types (re-exported as the
                    client's `proto`); its tests pin the exact wire text
 crates/remote-tls/src/    lib.rs — the session-host link's TLS profile (identity,
@@ -144,14 +187,22 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    write goes through — see "A repo reads one tracker") · linear.rs
                    (GraphQL) · daedalus/ (the home server through the local
                    Daedalus agent: `host` — the live link and the hook relay —
-                   `terminals` — a Daedalus project's terminals as PTYs on the
-                   box, re-attached across dropped links and relaunches —
                    `setup` — its setup scripts there — `agents` — Claude and
                    Codex there: hooks written on the box, launch resolution,
                    the box's CLIs and process table — `settings` — this Mac's
                    own settings through the agent's socket — `history` — its
                    session history, read from the box's transcripts — plus the
                    health check and the workspace list over the link)
+                   · sessions/ (where a terminal's process lives and how a pane
+                   reaches it — docs/server.md: `backend` — `Terminals`, the one
+                   facade the commands hold, `Local::{InApp, Server}` + Daedalus —
+                   `ids` — the id registry — `remote` — `RemoteTerminals`, the
+                   remote panes of a local server AND Daedalus, as a `Profile` —
+                   `env` — a pane's env and `baseEnv`; `mod` — `Mode`,
+                   `server_mode()`)
+                   · server/ (the local server's app side:
+                   `LocalServers` ensure/spawn/adopt/respawn, the
+                   signature-checking connector, the supervisor)
                    · git.rs + git/checkout.rs (`Checkout`: the one seam a repo's
                    git, reads and writes, and its file access go through, here
                    or on Daedalus;
@@ -164,7 +215,9 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    JSON-RPC, `tracker` the reads, `wire` the tool → domain
                    mapping; design and fallbacks in docs/linear-mcp.md)
                    · db.rs (sqlx pool + migrations) · repo.rs · settings.rs · terminal.rs · stream.rs
-                   (background command runs behind a PTY → read-only log panes)
+                   (setup runs as panes on the terminal facade → read-only log
+                   panes; on a server build a script outlives the app, untracked:
+                   Settings → Terminal lists it and a second run waits for it)
                    · proc_table.rs (the one `ps` listing, cached 500ms) +
                    agent_procs.rs (which agent owns each pane's foreground —
                    identity, never status; see COMPLIANCE.md)
@@ -449,6 +502,25 @@ src/
   survives a drag. Terminals stay in the terminal layer, one slot per session
   (docs/terminals.md). A "visible worktree" is now every row on screen
   (`VisibleWorktree.tabs`), one per group.
+- **Terminals have two backends, one facade.** A local pane's process is either
+  in this app (`PtyManager`, `Mode::Off`) or in the detached santree server
+  (`RemoteTerminals` over a unix socket); a Daedalus pane is the same
+  `RemoteTerminals` over the agent's link. `sessions::Terminals` is the one handle
+  commands hold, and it dispatches by id (one `IdRegistry` counter; each host
+  answers whether it `holds(id)`) — new panes name
+  a `Route` (`Local | Daedalus`, the caller knows whether a cwd is a Daedalus
+  project's). Which local backend runs is `sessions::server_mode()`, decided once:
+  `Signed` (a release whose own signature matches the baked `SANTREE_TEAM_ID`),
+  `OptIn` (`SANTREE_SERVER=1`, uid-only) or `Off`. **Never branch on the backend
+  anywhere else** — a `match` on `Mode`, `Local` or a host in a command or view is
+  how a pane ends up on the wrong host (a review rule: nothing checks it). What
+  the compiler does hold: a pane is typed into only with `terminal::input`'s
+  IPC-born types, and opened, attached, adopted and closed only by `terminal.rs`
+  and the facade's arms (`clippy.toml` `disallowed-methods`, its exceptions
+  pinned by `compliance.rs`). Liveness is `Liveness { live, complete }`: an
+  incomplete answer keeps agents as they were and refuses a resume. A lost agent
+  tab's Resume is `useLostTabResume`, one path for every tab that is a row.
+  docs/server.md, "Sessions".
 - **One place renders a diff.** `features/trees/DiffPane` picks the source with
   `prDiffModeFor`: GitHub's own patch when the file is in the PR (its line numbers
   are what the comments anchor to), the local branch-vs-base diff otherwise, and
@@ -590,9 +662,38 @@ version.
 
 - Tauri does **not** sign `bundle.resources`, and notarization rejects any
   unsigned Mach-O in the bundle. `scripts/sign-resources.mjs` signs
-  `santree-hook` from `beforeBundleCommand` — after staging, before the
-  bundler seals it — and no-ops without `APPLE_SIGNING_IDENTITY` so keyless
-  builds keep working. A new resource binary must be added there.
+  `santree-hook` and `santree-server` from `beforeBundleCommand` — after
+  staging (`pnpm bundle:binaries`), before the bundler seals them — and no-ops
+  without `APPLE_SIGNING_IDENTITY` so keyless builds keep working (with one, a
+  missing binary is an error). The server is signed with identifier
+  `com.santree.server` and no entitlements. A new resource binary must be added
+  there.
+- **`santree-server` is a macOS-only resource**, declared in
+  `tauri.macos.conf.json` (merged over `tauri.conf.json` by JSON merge patch, so
+  `bundle.resources` keys add up). Linux builds neither need nor ship it. But
+  tauri-build fails on a *declared* resource that doesn't exist, so on macOS
+  every cargo build of `src-tauri` needs `target/bundle-resources/santree-server`
+  staged first — `pnpm bundle:binaries` does it, and ci.yml's cargo-only job
+  stages both binaries by hand. Add the file to the conf only after it is staged.
+- **`SANTREE_TEAM_ID` is baked into the server at build time**
+  (`option_env!`; cargo rebuilds when it changes, no build script needed). The
+  server refuses every peer unless its own signature carries that Team ID, so
+  release.yml derives it from the signing identity (a throwaway test-signature,
+  asserted to be 10 chars of `[A-Z0-9]`) and exports it to the build; unset, you
+  get a dev server that goes by whatever signature it has. A build that bakes
+  the wrong team ships a server that serves nobody — release.yml checks the
+  shipped binary carries the team and that it equals the app's.
+- **Hardened runtime, and no `get-task-allow` /
+  `disable-library-validation` / `allow-dyld-environment-variables` on the app or
+  the server, is load-bearing**: the server admits only santree.app by
+  signature, which means nothing if an agent running as the same user can inject
+  into either process. `scripts/verify-bundle-signatures.sh` asserts it (and the
+  server's identifier and Team ID) on the signed bundle. Never add an
+  entitlements file to the build "to make something work" without reading
+  that script's header.
+- `REVISION` (`crates/server/src/lib.rs`) is what the smoke launch compares the
+  bundled server's `version --json` against, and `pgrep -x santree-server` after
+  it must find nothing — nothing may outlive a CI run.
 - The signing certificate is imported into a keychain in its own workflow step
   *before* the build. Tauri's own import happens at its signing phase, which is
   after `beforeBundleCommand` — too late for the hook. That ordering was the
@@ -618,7 +719,7 @@ version.
   `/new-command` (end-to-end Tauri command checklist incl. security gate),
   `/production-review` (multi-agent review + wave-pattern fix mode).
 - **Agent:** `ipc-security-auditor` — run it on any diff touching `commands.rs`,
-  `git.rs`, `terminal.rs`, or `crates/pty`.
+  `git.rs`, `terminal.rs`, `crates/pty`, `crates/host` or `crates/server`.
 - **Hook:** editing `commands.rs`/`lib.rs`/`domain.rs` triggers a bindings-drift
   reminder (`.claude/hooks/bindings-reminder.py`).
 - Session/worktree state under `.claude/` stays gitignored; only settings,
@@ -644,7 +745,11 @@ version.
   `terminal.rs`, or `src/features/terminal/`.
 - **Terminal compliance:** the PTY runs the real, unmodified CLI — no credential
   handling, no output-parsing-drives-input, no unattended loops. See `COMPLIANCE.md`;
-  these constraints are load-bearing.
+  these constraints are load-bearing. Who may write into or spawn a PTY is held
+  by the compiler (the input types in `terminal.rs`, the root `clippy.toml`):
+  a new call outside a sanctioned site fails `cargo clippy -- -D warnings`, and
+  a new `#[allow(clippy::disallowed_methods)]` fails
+  `the_lint_exceptions_are_exactly_the_sanctioned_sites`.
 - **External CLI contracts:** verify vendor flags against `--help`, don't guess.
   Claude `--model` takes dash-form ids or aliases (`sonnet`/`opus`/`haiku`) —
   dotted (`claude-sonnet-4.5`) is invalid and fails launch.

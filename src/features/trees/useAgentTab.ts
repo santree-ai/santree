@@ -240,10 +240,19 @@ export function useAgentTab(opts: AgentTabOptions): AgentTab {
         remoteControl.isFetched));
   const preparing = hold === true || (needsSeed && (session.isFetching || !flagsReady));
 
-  // Drop the cached session resolution: it may predate this exit (the process can
-  // die while the pane is unmounted, so `onExited` never fired) and would replay a
-  // stale decision — a `--session-id` for a session whose transcript now exists, or
-  // a "fresh" verdict that `session::resolve` would now correctly resume.
+  // Drop the cached session resolution once the process is over: it was made before
+  // the agent ran, and replaying it would hand the next launch a stale decision — a
+  // `--session-id` for a session whose transcript now exists, or a "fresh" verdict
+  // that `session::resolve` would now correctly resume. Called when the exit is
+  // seen (`onExited`) and when the user resumes.
+  //
+  // An exit is always seen, even one that happened while nothing was attached (a
+  // reload, or — with the santree server — the app being closed): the PTY layer
+  // owes the next pane that attaches the exit sentinel, which closes the tab like
+  // any other exit and fires `onExited`. A fresh page has no cached resolution to
+  // go stale, and a session found already exited when sessions are adopted is
+  // retired without a tab. What is *not* an exit is a session santree can no longer
+  // reach (`PaneLink` `lost`): its tab stays, and resuming it is the user's click.
   const dropSession = useCallback(() => {
     qc.removeQueries({ queryKey: queryKeys.agentSessionPrefix(repo, refId, requestedAgent) });
   }, [qc, repo, refId, requestedAgent]);

@@ -167,6 +167,39 @@ jobs:
             exit 1
           fi
 
+      # santree-server admits only peers signed by ITS OWN Team ID, and the build
+      # bakes the expected one in (`option_env!("SANTREE_TEAM_ID")`): a server that
+      # can't confirm its own signature refuses everyone instead of failing open
+      # to uid-only. So the Team ID has to come from the identity that is about to
+      # sign, not from a second place that could drift — sign a throwaway copy of
+      # a system binary with it and read back what codesign recorded. That is the
+      # same field the verifier reads, and it works whatever form the
+      # APPLE_SIGNING_IDENTITY secret takes (full name, hash, partial name).
+      # Exported through GITHUB_ENV so the build step bakes it; the Team ID is
+      # public (it is in every signature), not a secret.
+      - name: Derive the Team ID
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          probe="$RUNNER_TEMP/team-probe"
+          cp /usr/bin/true "$probe"
+          codesign --force --sign "$APPLE_SIGNING_IDENTITY" "$probe"
+          info=$(codesign -dv "$probe" 2>&1)
+          rm -f "$probe"
+          team=$(awk -F= '$1 == "TeamIdentifier" { print $2; exit }' <<< "$info")
+          if ! [[ $team =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "::error::could not derive a Team ID from the signing identity (got '$team')"
+            exit 1
+          fi
+          # A Developer ID name ends in "(TEAMID)"; if this one does, it must agree.
+          if [[ $APPLE_SIGNING_IDENTITY =~ \(([A-Z0-9]{10})\)$ && ${BASH_REMATCH[1]} != "$team" ]]; then
+            echo "::error::the identity name says team ${BASH_REMATCH[1]} but it signs as $team"
+            exit 1
+          fi
+          echo "SANTREE_TEAM_ID=$team" >> "$GITHUB_ENV"
+          echo "baking Team ID $team into santree-server"
+
       # `--config` flips on the updater artifacts. It is passed here rather than
       # committed to tauri.conf.json because generating them REQUIRES the signing
       # key: with it on by default, every keyless build — ci.yml's bundle smoke,
@@ -228,6 +261,7 @@ jobs:
           # notarization outright, so assert it explicitly rather than trusting
           # --deep to have covered it.
           codesign --verify --strict --verbose=2 "$app/Contents/Resources/santree-hook"
+          codesign --verify --strict --verbose=2 "$app/Contents/Resources/santree-server"
           spctl --assess --type exec --verbose=4 "$app"
           # `stapler validate` re-checks a ticket the bundling step already
           # stapled, and it asks Apple to do the checking — so it fails for two
@@ -260,6 +294,17 @@ jobs:
           xcrun stapler validate '${{ steps.artifacts.outputs.dmg }}' \
             || echo "::warning::the DMG is not stapled (the .app inside it is)"
 
+      # The server's trust model rests on three facts about the shipped bytes: its
+      # identifier and Team ID (what the app admits it by, and what it admits the
+      # app by), the hardened runtime, and the absence of the entitlements that
+      # would let a same-user agent attach to or inject into either process. They
+      # are asserted here, on the signed bundle, rather than trusted from the
+      # config that was meant to produce them. See the script for each check.
+      - name: Verify the server's identity and the hardened runtime
+        env:
+          APP: ${{ steps.artifacts.outputs.app }}
+        run: scripts/verify-bundle-signatures.sh "$APP" "$SANTREE_TEAM_ID"
+
       # Nothing above ever RUNS the thing we're about to ship. A panic in setup, a
       # frontend bundle that didn't make it in, or a resource the runtime can't
       # resolve all produce a perfectly signed app that dies on launch.
@@ -268,7 +313,33 @@ jobs:
         env:
           SANTREE_SMOKE: "1"
           APP: ${{ steps.artifacts.outputs.app }}
-        run: "$APP/Contents/MacOS/santree"
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The bundled server answers, and is the revision this checkout declares
+          # (`REVISION` is what crates/server's drift test pins to revision.lock):
+          # an app that bundled a stale or foreign server would adopt the wrong
+          # code across updates.
+          server="$APP/Contents/Resources/santree-server"
+          expected=$(sed -n 's/^pub const REVISION: u32 = \([0-9][0-9]*\);$/\1/p' crates/server/src/lib.rs)
+          [[ $expected =~ ^[0-9]+$ ]] || { echo "::error::no REVISION in crates/server/src/lib.rs"; exit 1; }
+          info=$("$server" version --json)
+          echo "$info"
+          jq -e --argjson rev "$expected" --arg ver "$VERSION" \
+            '.revision == $rev and .version == $ver and (.protocol | type == "number") and (.features | type == "array")' \
+            <<< "$info" > /dev/null \
+            || { echo "::error::the bundled server does not report revision $expected / version $VERSION"; exit 1; }
+
+          "$APP/Contents/MacOS/santree"
+
+          # The smoke launch must leave nothing behind: a server it started would
+          # outlive the run (the server is detached by design) and a runner
+          # that is reused, or a later step, would find it holding the sockets.
+          if pgrep -x santree-server > /dev/null; then
+            pgrep -lf santree-server || true
+            echo "::error::a santree-server outlived the smoke launch"
+            exit 1
+          fi
 
       # The release body and the updater's "What's new" are the CHANGELOG entry
       # for this version. Generated notes are the fallback for betas without one

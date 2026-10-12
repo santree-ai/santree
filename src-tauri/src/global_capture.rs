@@ -34,7 +34,7 @@ use santree_core::domain::ClaudeGlobalCapture;
 use serde_json::{Map, Value};
 use tauri::AppHandle;
 
-use crate::hooks::{db_path, hook_bin, sh_quote, statusline_command};
+use crate::hooks::{db_path, sh_quote, statusline_command};
 
 /// The hook binary's file name — what a wrapper is recognised by, whatever
 /// directory it lives in.
@@ -61,7 +61,7 @@ pub(crate) fn set(app: &AppHandle, enabled: bool) -> Result<ClaudeGlobalCapture>
     }
     // Only an *enable* needs these, so a disable still works from a build whose
     // bundled hook has gone missing.
-    let bin = hook_bin(app).context("the santree-hook binary is not available")?;
+    let bin = crate::hook_bin::resolve(app).context("the santree-hook binary is not available")?;
     let db = db_path(app).context("no app data directory")?;
     apply(
         &path,

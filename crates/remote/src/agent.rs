@@ -34,7 +34,7 @@ use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 
-use crate::transport::{AgentOk, BoxFuture, ConnectError, Connector, Link, Refusal};
+use crate::transport::{AgentOk, BoxFuture, ConnectError, Connector, Link, PeerTrust, Refusal};
 
 /// Where the agent keeps its sockets (its data directory's `run/`).
 #[cfg(target_os = "macos")]
@@ -132,6 +132,8 @@ impl AgentConnector {
             reader: Box::new(reader),
             writer: Box::new(writer),
             agent: Some(agent),
+            // `check_server` above is what this means: root serves the socket.
+            peer: PeerTrust::Agent,
         })
     }
 }

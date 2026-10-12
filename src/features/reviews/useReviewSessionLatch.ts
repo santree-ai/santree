@@ -7,7 +7,7 @@
  * and "there was one while this pane was mounted" are different facts, and the
  * second one latches.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { AgentKind } from "../../bindings";
 import { useTerminals } from "../terminal/TerminalsContext";
@@ -45,14 +45,16 @@ export function useReviewSessionLatch(termKey: string, agentKind: AgentKind): Re
     }
   }, [liveSession]);
 
+  const requestResume = useCallback(() => {
+    setResumeRequested(true);
+    setLiveSeen(false);
+  }, []);
+
   return {
     liveSession,
     ended: !liveSession && liveSeen && !resumeRequested,
     needsSeed: !liveSession && !liveSeen,
     resumeRequested,
-    requestResume: () => {
-      setResumeRequested(true);
-      setLiveSeen(false);
-    },
+    requestResume,
   };
 }

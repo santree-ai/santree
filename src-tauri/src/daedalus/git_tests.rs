@@ -12,23 +12,14 @@ use std::time::Duration;
 
 use santree_core::domain::{FileStatus, RepoLocation};
 use santree_remote_client::fake::{FakeAgent, FakeDaemon, FakeOptions};
-use santree_remote_client::{ClientOptions, HostOptions};
 
 use super::host::{describe, DaedalusHost};
 use crate::db::Db;
 use crate::git;
 use crate::repo;
+use crate::sessions::testkit::fast;
 use crate::split_stack;
 use crate::worktree::{self, BASE_ID};
-
-fn fast() -> HostOptions {
-    HostOptions {
-        backoff_min: Duration::from_millis(20),
-        backoff_max: Duration::from_millis(200),
-        hello_timeout: Duration::from_secs(5),
-        client: ClientOptions::default(),
-    }
-}
 
 fn run_git(dir: &Path, args: &[&str]) {
     let out = std::process::Command::new("git")

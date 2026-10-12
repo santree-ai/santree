@@ -28,6 +28,7 @@ export function TriageTerminal({
   seed,
   agent,
   onExited,
+  onResume,
 }: {
   /** The row's term key — see the file comment. */
   refId: string;
@@ -41,10 +42,13 @@ export function TriageTerminal({
   agent?: AgentTabIdentity;
   /** Fired once when the process exits. */
   onExited?: () => void;
+  /** The tab's own Resume, for a pane whose session is lost. */
+  onResume?: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
     spec: { title, cwd, source: "triage", refId, seed, agent },
     onExited,
+    onResume,
   });
   // The TerminalLayer overlays this host with the ticket's live pane.
   return <div ref={hostRef} className="h-full w-full" />;

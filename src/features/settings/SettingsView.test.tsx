@@ -29,6 +29,10 @@ vi.mock("../../components/shell/Sidebar", () => ({ TRAFFIC_LIGHTS_INSET: 78 }));
 
 // Each pane is a stub naming itself, so a click can be checked by what appears.
 // The factories are inline because `vi.mock` is hoisted above any local helper.
+// Settings is outside the shell, so it carries the server banner itself.
+vi.mock("../../components/shell/ServerBanner", () => ({
+  ServerBanner: () => <div>server banner</div>,
+}));
 vi.mock("./sections/Actions", () => ({
   ReviewActionSection: () => <div>Reviews pane</div>,
   TriageActionSection: () => <div>Triage pane</div>,
@@ -69,6 +73,11 @@ const groupItems = (group: string): string[] => {
 describe("Settings → nav", () => {
   beforeEach(() => {
     searchParams = {};
+  });
+
+  it("shows the server banner: the shell that normally carries it is not around", () => {
+    render(<SettingsView />);
+    expect(screen.getByText("server banner")).toBeInTheDocument();
   });
 
   it("groups the integrations under an Integrations heading", () => {

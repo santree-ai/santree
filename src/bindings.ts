@@ -286,6 +286,17 @@ export const commands = {
 	 */
 	resumeWorktreeSession: (repo: string, issueId: string, tabId: string, sessionId: string, agentKind: AgentKind) => typedError<null, CmdError>(__TAURI_INVOKE("resume_worktree_session", { repo, issueId, tabId, sessionId, agentKind })),
 	/**
+	 *  May a lost agent tab be relaunched where it is? A lost pane's Resume asks
+	 *  this before its surface reopens the tab, whose launch (`agent_session`) then
+	 *  resumes the tab's own stored conversation — on a triage tab, on the main
+	 *  checkout `validate_agent_cwd` holds it to. The tab keeps its row, so the
+	 *  conversation keeps its binding: closing the row first would forget it.
+	 * 
+	 *  `owner` and `tab_id` name the row; the key is derived from the row santree
+	 *  holds, never taken from IPC.
+	 */
+	checkTabResume: (repo: string, owner: string, tabId: string) => typedError<null, CmdError>(__TAURI_INVOKE("check_tab_resume", { repo, owner, tabId })),
+	/**
 	 *  Start (or re-point) the filesystem watcher at the given repo's worktrees, so
 	 *  the Trees views refresh live when files change on disk (e.g. an agent editing
 	 *  in the terminal). A no-op for repos without a local path; idempotent, so the
@@ -1278,6 +1289,13 @@ export const commands = {
 	 */
 	installUpdate: () => typedError<null, CmdError>(__TAURI_INVOKE("install_update")),
 	/**
+	 *  Open the app's log directory in the file browser, where `santree.log`, the
+	 *  server's log and the rotated files live. Takes no argument: the directory is
+	 *  the app's own, resolved here, and nothing from the frontend reaches the
+	 *  opener.
+	 */
+	revealLogs: () => typedError<null, CmdError>(__TAURI_INVOKE("reveal_logs")),
+	/**
 	 *  The keep-awake hold's current state. `supported` is false off-macOS — the
 	 *  chrome uses it to not render the toggle at all.
 	 */
@@ -1294,14 +1312,14 @@ export const commands = {
 	 * 
 	 *  The spawn itself is `openpty` + a fork/exec with a full env copy + a reader
 	 *  thread — all blocking, and slow enough (an interactive `claude` on a cold
-	 *  cache) to stall a tokio worker, so it goes to the blocking pool like
-	 *  [`terminal_write`]. Nothing about *what* is spawned or how its bytes stream
-	 *  changes: `PtyManager::open` runs exactly once, with the same opts and the
-	 *  same verbatim byte-forwarding sink (COMPLIANCE.md).
+	 *  cache) to stall a tokio worker, so the facade sends it to the blocking pool
+	 *  like [`terminal_write`]. Nothing about *what* is spawned or how its bytes
+	 *  stream changes: it runs exactly once, with the same opts and the same
+	 *  verbatim byte-forwarding sink (COMPLIANCE.md).
 	 * 
 	 *  In a Daedalus project the process is spawned on the box instead ([`open`]);
-	 *  `on_link` then says whether the pane is reaching it. A local session never
-	 *  sends on it.
+	 *  `on_link` then says whether the pane is reaching it, and so it does for a
+	 *  pane on the local server. An in-app session never sends on it.
 	 */
 	terminalOpen: (opts: TerminalOpenOpts, onOutput: Channel<ArrayBuffer>, onLink: Channel<PaneLink>) => typedError<number, CmdError>(__TAURI_INVOKE("terminal_open", { opts, onOutput, onLink })),
 	/**
@@ -1316,7 +1334,7 @@ export const commands = {
 	 *  write is offloaded to a blocking-pool thread so a stuck child's full PTY
 	 *  buffer can never pin a tokio worker and starve every other async command.
 	 */
-	terminalWrite: (id: number, data: string) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_write", { id, data })),
+	terminalWrite: (id: number, data: Keystrokes) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_write", { id, data })),
 	/**
 	 *  Type the one human-initiated seed into a session, followed by Enter.
 	 * 
@@ -1328,21 +1346,21 @@ export const commands = {
 	 *  half-typed at the prompt. A keystroke can never take that path.
 	 * 
 	 *  Both parameters are untrusted, and neither gains authority here: `id` is an
-	 *  integer looked up in the manager, exactly as [`terminal_write`] looks it up,
+	 *  integer looked up in the facade, exactly as [`terminal_write`] looks it up,
 	 *  and `seed` becomes bytes in a PTY that the caller could already have written
 	 *  one keystroke at a time. It never reaches a path — the spill file's name is a
 	 *  UUID this process mints — and it is shell-quoted by the builder that composed
 	 *  it (`agentProvider.ts`), which this must preserve rather than redo.
 	 * 
-	 *  A session on Daedalus has no spill: its tty is the box's Linux one, whose
-	 *  line holds [`MAX_REMOTE_SEED_LINE`], and a seed that doesn't fit is refused
-	 *  rather than truncated.
+	 *  A session whose tty isn't this Mac's (Daedalus) has no spill: its line holds
+	 *  what [`SeedPolicy::Cap`] says, and a seed that doesn't fit is refused rather
+	 *  than truncated.
 	 */
-	terminalSeed: (id: number, seed: string) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_seed", { id, seed })),
+	terminalSeed: (id: number, seed: LaunchRequest) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_seed", { id, seed })),
 	/**  Resize a session's PTY to the visible grid. */
 	terminalResize: (id: number, cols: number, rows: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_resize", { id, cols, rows })),
 	/**
-	 *  Kill a session's child and free it. On Daedalus, as soon as the box can be
+	 *  Kill a session's child and free it. On a remote host, as soon as it can be
 	 *  told.
 	 */
 	terminalClose: (id: number) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_close", { id })),
@@ -1352,7 +1370,8 @@ export const commands = {
 	 *  This is what makes a session survive losing its view. The previous sink — an
 	 *  unmounted pane's channel, or a whole page that reloaded — is replaced, and
 	 *  the bytes the client is missing are written to `on_output` **before** this
-	 *  returns, so they arrive ahead of any live output on the same channel.
+	 *  returns, so they arrive ahead of any live output on the same channel (the
+	 *  facade holds back what the new sink is handed meanwhile).
 	 * 
 	 *  `anchor` is what the client claims to already have. When that claim can't be
 	 *  verified against the session's ring (a different stream, or a gap older than
@@ -1360,9 +1379,9 @@ export const commands = {
 	 *  client's own screen is better than anything this could synthesize, and the
 	 *  caller repaints from the running program instead.
 	 * 
-	 *  A session on Daedalus is caught up from the box's ring the same way; while
-	 *  the link is down the answer is `Reanchor` with nothing sent, `on_link` says
-	 *  `Reconnecting`, and the catch-up follows on the next connect.
+	 *  A session on a remote host is caught up from that host's ring the same way;
+	 *  while the link is down the answer is `Reanchor` with nothing sent, `on_link`
+	 *  says `Reconnecting`, and the catch-up follows on the next connect.
 	 * 
 	 *  Untrusted like any IPC value, and inert: `epoch` is compared for string
 	 *  equality against a value this process minted, `seq` indexes a byte count.
@@ -1389,9 +1408,12 @@ export const commands = {
 	 *  pane up from the stream — a reload now costs the view, not the work.
 	 * 
 	 *  Panes on Daedalus are handed over the same way: they live in this process
-	 *  too, beside the link. (After santree itself restarts there is nothing here
-	 *  to adopt; a pane opening under the same address finds its session on the
-	 *  box instead — `daedalus::terminals`.)
+	 *  too, beside the link. With a local santree server there is more to hand over:
+	 *  every session it holds, including ones no tab asked for since the app was
+	 *  relaunched, so this first waits (bounded) for the server to list them. (After
+	 *  santree itself restarts a Daedalus pane has nothing here to adopt; a pane
+	 *  opening under the same address finds its session on the box instead —
+	 *  `sessions::remote`.)
 	 * 
 	 *  The caller must close whatever it cannot host (a worktree deleted while the
 	 *  page was down); this reports everything rather than filtering, because only
@@ -1404,15 +1426,56 @@ export const commands = {
 	 */
 	terminalAdopt: (owner: string) => typedError<AdoptedSession[], CmdError>(__TAURI_INVOKE("terminal_adopt", { owner })),
 	/**
-	 *  Every live PTY session, for the Terminal settings panel.
+	 *  This Mac's terminal sessions with what the Terminal settings panel's server
+	 *  card needs beside them: whether the list is the whole of it (`complete` is
+	 *  false while a server that may hold more can't be asked) and which sessions
+	 *  are orphans — see [`orphans_of`].
 	 * 
-	 *  Read-only and cheap: a snapshot under the manager lock plus one non-blocking
-	 *  `try_wait` per session. It grants no authority the frontend doesn't have —
-	 *  it can already close any id — and it reveals nothing about a session's
-	 *  *contents*, only that it exists. This Mac's sessions only: the box's are
-	 *  its own to list.
+	 *  Read-only and cheap: in-app, a snapshot under the manager lock plus one
+	 *  non-blocking `try_wait` per session; on the local server, one listing per
+	 *  server. It grants no authority the frontend doesn't have — it can already
+	 *  close any id — and reveals nothing about a session's *contents*, only that
+	 *  it exists. This Mac's sessions only: the box's are its own to list. The db
+	 *  read is the set of tab ids the app itself stored, compared by string
+	 *  equality.
 	 */
-	terminalSessions: () => typedError<TerminalSession[], CmdError>(__TAURI_INVOKE("terminal_sessions")),
+	terminalInventory: () => typedError<TerminalInventory, CmdError>(__TAURI_INVOKE("terminal_inventory")),
+	/**
+	 *  What quitting the app would end, so the quit guard warns only about work that
+	 *  really goes: the in-app terminals — setup runs included, they are panes like
+	 *  the rest. With a local server the answer is none (its sessions outlive the
+	 *  app), so on a build that has one quitting never asks.
+	 */
+	quitSummary: () => __TAURI_INVOKE<QuitSummary>("quit_summary"),
+	/**
+	 *  The local server's state and any older servers still draining. A value, never
+	 *  an error: a server that is down is a state to show, not a toast.
+	 */
+	serverStatus: () => __TAURI_INVOKE<ServerStatus>("server_status"),
+	/**
+	 *  Start (or restart after a failure) the local server, with a fresh crash
+	 *  budget. `Err` carries the reason it still isn't running.
+	 */
+	serverStart: () => typedError<null, CmdError>(__TAURI_INVOKE("server_start")),
+	/**
+	 *  Stop the local server and start a fresh one: every terminal it holds ends
+	 *  (agents can be resumed from their tabs). The frontend confirms first, naming
+	 *  what will end; this takes no argument, so there is nothing to validate. Not a
+	 *  crash: it spends none of the respawn budget.
+	 */
+	serverRestart: () => typedError<null, CmdError>(__TAURI_INVOKE("server_restart")),
+	/**
+	 *  Stop the local server and leave it stopped, ending every terminal it holds.
+	 *  Confirmed on the frontend. Nothing starts it again until `server_start`.
+	 */
+	serverStop: () => typedError<null, CmdError>(__TAURI_INVOKE("server_stop")),
+	/**
+	 *  End an older, draining server and the terminals it still holds. Confirmed on
+	 *  the frontend. `revision` is only ever a *lookup key* into the servers the
+	 *  supervisor found by itself: one that is not a known draining server is
+	 *  refused, so it can't be used to name a socket, a path or a process.
+	 */
+	serverEndDraining: (revision: number) => typedError<null, CmdError>(__TAURI_INVOKE("server_end_draining", { revision })),
 };
 
 /** Events */
@@ -1420,6 +1483,7 @@ export const events = {
 	claudeRateLimitsChanged: makeEvent<ClaudeRateLimitsChanged>("claude-rate-limits-changed"),
 	daedalusLinkChanged: makeEvent<DaedalusLinkChanged>("daedalus-link-changed"),
 	reviewAiChanged: makeEvent<ReviewAiChanged>("review-ai-changed"),
+	serverStateChanged: makeEvent<ServerStateChanged>("server-state-changed"),
 	sessionStateChanged: makeEvent<SessionStateChanged>("session-state-changed"),
 	sessionUsageChanged: makeEvent<SessionUsageChanged>("session-usage-changed"),
 	updateProgress: makeEvent<UpdateProgress>("update-progress"),
@@ -2179,6 +2243,20 @@ export type DaedalusWorkspaceList = {
 };
 
 /**
+ *  An older server revision that is still running because it holds terminals.
+ *  It is left alone until its terminals end; a new server serves new ones.
+ */
+export type DrainingServer = {
+	revision: number,
+	/**  Terminals it still holds. */
+	sessions: SessionCount,
+	/**  Its process id, once it has answered `server.info`. */
+	pid: number | null,
+	/**  The santree release it was built with, once it has answered. */
+	version: string | null,
+};
+
+/**
  *  A stored analysis of the practice log: which habits to work on next, generated
  *  on demand rather than on session start.
  */
@@ -2332,11 +2410,17 @@ export type KeepAwakeStatus = {
 	active: boolean,
 };
 
+/**  The user's keystrokes, verbatim, as the webview sent them. */
+export type Keystrokes = string;
+
 /**
  *  Who wrote a session's latest prose — the "You:" / "Agent:" prefix the history
  *  row puts in front of [`WorktreeSession::last_message`].
  */
 export type LastMessageFrom = "You" | "Agent";
+
+/**  The launch line a human asked for, before it is prepared for a tty. */
+export type LaunchRequest = string;
 
 /**
  *  santree-CLI configuration (`.santree/metadata.json` + the CLI's global auth
@@ -2647,12 +2731,18 @@ export type Opener = {
 
 /**
  *  Whether a pane is reaching its session right now, pushed on its own
- *  channel beside the bytes. Only a session on Daedalus ever sends one: a local
- *  PTY is always reachable. `Reconnecting` is never an exit — the process is
- *  still running on the box, and the pane catches up from its anchor when the
- *  link returns; only the empty output chunk says a process ended.
+ *  channel beside the bytes. A local in-app PTY is always reachable and never
+ *  sends one. `Reconnecting` is never an exit — the process is still running
+ *  on the other side, and the pane catches up from its anchor when the link
+ *  returns; only the empty output chunk says a process ended.
+ * 
+ *  `Lost` is the one other thing that isn't an exit either: the host the
+ *  pane's session lived on is no longer the one answering (a server that was
+ *  stopped, killed or restarted), so the session is gone with the process
+ *  behind it. The empty chunk would close the tab, taking the pane's place
+ *  along with the news; `Lost` leaves the tab up, saying why.
  */
-export type PaneLink = "live" | "reconnecting";
+export type PaneLink = "live" | "reconnecting" | "lost";
 
 /**
  *  The detail panel payload for a selected PR: body, conversation, diff, checks.
@@ -3107,6 +3197,16 @@ export type PromptWorkItemSample = {
 	 *  its one failing annotation.
 	 */
 	body: string | null,
+};
+
+/**
+ *  `quit_summary`: what quitting the app would cost, so the quit guard warns
+ *  only about work that really ends (terminals the server keeps do not count;
+ *  a setup run is a terminal like the rest).
+ */
+export type QuitSummary = {
+	/**  Terminals that end when the app quits. */
+	terminalsEnd: number,
 };
 
 /**
@@ -3632,6 +3732,71 @@ export type ScriptInfo = {
 };
 
 /**
+ *  The state of santree's own local terminal server (the detached process that
+ *  keeps terminals alive across app restarts). Like [`DaedalusLink`], every
+ *  variant is a *state* to render, never an error: the commands answer with it
+ *  as a plain value so it never becomes a red toast.
+ */
+export type ServerState = 
+/**
+ *  Not in use: terminals run inside the app, and quitting ends them. No
+ *  server banner, no server controls.
+ */
+{ kind: "Off" } | 
+/**  Starting (or reconnecting to) the server; terminals wait for it. */
+{ kind: "Starting" } | 
+/**
+ *  A stop the user asked for is under way (Stop, or the first half of a
+ *  Restart).
+ */
+{ kind: "Stopping" } | 
+/**  The server is up and the app is attached to it. */
+{ kind: "Running"; 
+/**  The server build this app talks to (its socket's revision). */
+revision: number; 
+/**  The server's own version string. */
+version: string; pid: number; 
+/**
+ *  When the server booted, in milliseconds since the Unix epoch. An
+ *  `f64` on purpose: specta refuses `u64`/`i64` (they overflow JS
+ *  numbers) and an epoch-ms value is far inside f64's exact range.
+ */
+startedAtMs: number | null; 
+/**  Terminals the server holds right now. */
+liveSessions: number } | 
+/**
+ *  No server and none being started, e.g. it was stopped, or could not be
+ *  trusted or launched. `reason` is a sentence to show, with a way to start
+ *  it again.
+ */
+{ kind: "Down"; reason: string } | 
+/**
+ *  The server keeps dying right after it starts: santree stopped
+ *  restarting it. `reason` says why; starting it again is the user's call.
+ */
+{ kind: "Failing"; reason: string };
+
+/**
+ *  "The local server's state changed" — carries the new status, so the banner
+ *  and the Settings card need no refetch.
+ */
+export type ServerStateChanged = ServerStatus;
+
+/**  `server_status`: the current server plus any older ones still draining. */
+export type ServerStatus = {
+	state: ServerState,
+	draining: DrainingServer[],
+};
+
+/**
+ *  How many terminals a server holds, when that is a fact and when it isn't.
+ *  `Unknown` is a server that is running but didn't say (hung, slow, or its
+ *  socket was removed): it may hold agents, so the UI must never draw it as
+ *  `0`, which reads as "safe to end".
+ */
+export type SessionCount = { kind: "Known"; count: number } | { kind: "Unknown" };
+
+/**
  *  What a session's transcript says beyond the list row — read only when a row
  *  is expanded, because the full first prompt would bloat every list scan.
  */
@@ -4078,6 +4243,27 @@ export type TerminalAttached = {
 };
 
 /**
+ *  `terminal_inventory`: this Mac's terminal sessions as the Terminal settings
+ *  panel's server card needs them — the list, whether it is the whole of it, and
+ *  which of them no tab will ever show.
+ */
+export type TerminalInventory = {
+	sessions: TerminalSession[],
+	/**
+	 *  False when a server that may hold more sessions couldn't be asked. The
+	 *  list is then what is known, not what is running.
+	 */
+	complete: boolean,
+	/**
+	 *  Ids (in `sessions`) of live sessions labelled as a tab whose tab no
+	 *  longer exists, and that no pane is showing: a tab closed while its server
+	 *  was unreachable, or a worktree deleted under it. Nothing closes these on
+	 *  its own; the card offers to stop them.
+	 */
+	orphans: number[],
+};
+
+/**
  *  How the frontend asks for a new terminal. An empty `command` means the user's
  *  login shell.
  */
@@ -4128,10 +4314,10 @@ export type TerminalReplayMode = "exact" | "tail" | "reanchor";
 /**
  *  One live PTY session, for the Terminal settings panel.
  * 
- *  Deliberately a different shape from `TerminalUsage` (`resources.rs`), which
- *  answers "what is this costing" by joining the process table. This answers
- *  "what is running, and can I still reach it" — the lifecycle question, which
- *  is the one a reload made possible to get wrong.
+ *  Deliberately a different shape from `TerminalUsage`, which answers "what is
+ *  this costing" by joining the process table. This answers "what is running,
+ *  and can I still reach it" — the lifecycle question, which is the one a reload
+ *  made possible to get wrong.
  */
 export type TerminalSession = {
 	id: number,
@@ -4151,6 +4337,11 @@ export type TerminalSession = {
 	attached: boolean,
 	/**  Whether the root process still exists. */
 	alive: boolean,
+	/**
+	 *  The revision of the local server holding it, so the card can group
+	 *  sessions by server. `None` for a session in the app itself.
+	 */
+	serverRevision?: number | null,
 };
 
 /**

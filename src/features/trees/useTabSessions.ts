@@ -28,7 +28,7 @@ export function useTabSessions(
   closeTab: (id: string) => void,
 ): { closeWithSession: (tab: WorktreeTab) => void } {
   // The live PTY registry, not the tab rows — see the file comment.
-  const { tabs: sessions, close: endSession } = useTerminals();
+  const { tabs: sessions, close: endSession, heldRows, releaseRow } = useTerminals();
 
   // A tab is its process. Once that process exits its session vanishes from the
   // registry, and the tab goes with it rather than lingering as a dead one to ✕ by
@@ -47,22 +47,27 @@ export function useTabSessions(
     if (seen.current.worktreeId !== worktreeId) seen.current = { worktreeId, ids: new Set() };
     const { ids } = seen.current;
     for (const t of tabs) {
-      const alive = sessions.some((x) => x.refId === tabRefId(worktreeId, t.id));
+      const refId = tabRefId(worktreeId, t.id);
+      const alive = sessions.some((x) => x.refId === refId);
       if (alive) ids.add(t.id);
-      else if (ids.has(t.id)) {
+      // A held row is being resumed in place: its pane is coming back.
+      else if (ids.has(t.id) && !heldRows.has(refId)) {
         ids.delete(t.id);
         closeTab(t.id);
       }
     }
-  }, [sessions, tabs, worktreeId, closeTab]);
+  }, [sessions, heldRows, tabs, worktreeId, closeTab]);
 
   // Closing a tab tears its PTY session down (found by refId) too, so it doesn't
   // linger in the global Terminal tab, and the row goes with it — an agent tab's
   // stored session is forgotten by the backend. The conversation itself survives
   // on disk: Session history is how it comes back.
   const closeWithSession = (t: WorktreeTab) => {
-    const live = sessions.find((x) => x.refId === tabRefId(worktreeId, t.id));
+    const refId = tabRefId(worktreeId, t.id);
+    const live = sessions.find((x) => x.refId === refId);
     if (live) endSession(live.key);
+    // A row closed mid-resume has no pane coming back to end its hold.
+    releaseRow(refId);
     closeTab(t.id);
   };
 

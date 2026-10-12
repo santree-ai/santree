@@ -15,14 +15,7 @@ import type {
   DaedalusSettingAnswer,
   DaedalusSettingKey,
 } from "../../../bindings";
-import {
-  CheckIcon,
-  CloseIcon,
-  CopyIcon,
-  DaedalusLogo,
-  RefreshIcon,
-  WarningIcon,
-} from "../../../components/icons";
+import { CopyIcon, DaedalusLogo, RefreshIcon } from "../../../components/icons";
 import { copyText } from "../../../components/menuRows";
 import { Button, Toggle } from "../../../components/primitives";
 import { TurnOnSantree } from "../../../components/TurnOnSantree";
@@ -34,7 +27,7 @@ import {
   useSetDaedalusSetting,
 } from "../../../lib/queries";
 import { formatRelativeTime, isoMs, useLiveNow } from "../../../lib/relativeTime";
-import { Heading, KvRow } from "../widgets";
+import { Heading, KvRow, ToneGlyph } from "../widgets";
 
 export function DaedalusSection() {
   return (
@@ -49,27 +42,12 @@ export function DaedalusSection() {
   );
 }
 
-const TONE: Record<LinkTone, { className: string; name: string }> = {
-  ok: { className: "text-status-green", name: "OK" },
-  pending: { className: "text-muted-4", name: "Checking" },
-  warn: { className: "text-status-amber", name: "Needs attention" },
-  error: { className: "text-status-red", name: "Not connected" },
+const TONE_NAME: Record<LinkTone, string> = {
+  ok: "OK",
+  pending: "Checking",
+  warn: "Needs attention",
+  error: "Not connected",
 };
-
-function ToneGlyph({ tone }: { tone: LinkTone }) {
-  const { className, name } = TONE[tone];
-  const glyph = {
-    ok: <CheckIcon size={12} />,
-    pending: <RefreshIcon size={12} className="animate-spin" />,
-    warn: <WarningIcon size={12} />,
-    error: <CloseIcon size={12} />,
-  }[tone];
-  return (
-    <span role="img" aria-label={name} className={`mt-[3px] flex-none ${className}`}>
-      {glyph}
-    </span>
-  );
-}
 
 /** The link's state, live, with "Run check" to try again now. */
 function StatusCard() {
@@ -112,7 +90,7 @@ function StatusCard() {
         className="border-t border-line bg-surface px-4 py-3"
       >
         <div className="flex items-start gap-2.5">
-          <ToneGlyph tone={notice.tone} />
+          <ToneGlyph tone={notice.tone} name={TONE_NAME[notice.tone]} />
           <div className="min-w-0 flex-1">
             <div className="text-[12.5px] font-medium text-fg-3">
               {/* The action is the button below; the title names the state. */}
@@ -209,7 +187,7 @@ function ThisMacCard() {
 function Notice({ tone, text }: { tone: "warn" | "error"; text: string }) {
   return (
     <div className="flex items-start gap-2.5 px-4 py-3">
-      <ToneGlyph tone={tone} />
+      <ToneGlyph tone={tone} name={TONE_NAME[tone]} />
       <div className="min-w-0 flex-1 text-[12px] break-words text-fg-3">{text}</div>
     </div>
   );

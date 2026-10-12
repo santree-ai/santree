@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../target/bundle-resources/santree-server": "santree-server"
+    }
+  }
+}

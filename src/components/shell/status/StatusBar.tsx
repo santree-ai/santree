@@ -17,6 +17,7 @@ import { AgentsSegment } from "./AgentsSegment";
 import { KeepAwakeSegment } from "./KeepAwakeSegment";
 import { RefreshSegment } from "./RefreshSegment";
 import { ResourceSegment } from "./ResourceSegment";
+import { ServerSegment } from "./ServerSegment";
 import { SessionSegment } from "./SessionSegment";
 import { UpdateSegment } from "./UpdateSegment";
 import { UsageSegment } from "./UsageSegment";
@@ -28,6 +29,8 @@ export function StatusBar() {
       <UsageSegment />
       <SessionSegment />
       <div className="flex-1" />
+      {/* Trouble first: it renders only when the server needs a hand. */}
+      <ServerSegment />
       {/* Keep-awake leads the trailing cluster because it is the only segment
           here the user *sets*: the others report (resources, agents, an
           available update) and Refresh acts on the view. A control you flip

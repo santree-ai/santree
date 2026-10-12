@@ -131,8 +131,24 @@ pub fn header(version: &str, now: &str) -> String {
 
 /// Build the bundle and write it to `dest`. Returns what went in, so the caller
 /// can say where it landed and what it covers.
-pub fn write_bundle(dest: &Path, version: &str, now: &str, paths: &[PathBuf]) -> Result<Export> {
+pub fn write_bundle(
+    dest: &Path,
+    version: &str,
+    now: &str,
+    server_report: &str,
+    paths: &[PathBuf],
+) -> Result<Export> {
     let mut out = header(version, now);
+    // The local server's state and each server's `server.info`: the log says
+    // what happened, this says what is running now. Before the logs, because
+    // it is short and is what the first question about a terminal asks.
+    if !server_report.trim().is_empty() {
+        let _ = writeln!(out, "\n===== santree server =====");
+        out.push_str(server_report);
+        if !server_report.ends_with('\n') {
+            out.push('\n');
+        }
+    }
     let mut files = Vec::new();
     for path in paths {
         if !path.exists() {
@@ -219,6 +235,7 @@ mod tests {
             &dest,
             "0.1.6",
             "2026-09-08T12:00:00Z",
+            "",
             &log_paths(&dir, &dir),
         )
         .expect("bundle");
@@ -227,6 +244,60 @@ mod tests {
         assert!(text.contains("version:  0.1.6"));
         assert!(text.contains("hello"));
         assert!(!text.contains("santree-hook-errors.log"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The server writes its own log beside the app's; a report of a terminal
+    /// that misbehaved needs it, and the export must carry its tail without a
+    /// path of its own being named.
+    #[test]
+    fn the_servers_log_and_its_report_travel_with_the_export() {
+        let dir = std::env::temp_dir().join("santree-diag-server");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("santree.log"), b"app line\n").expect("write");
+        std::fs::write(dir.join("santree-server.log"), b"server line\n").expect("write");
+        std::fs::write(dir.join("santree-server-dev.log"), b"dev line\n").expect("write");
+        let dest = dir.join("out.log");
+        let report = "state: Running\n\nserver r2 (current)\n  server.info: ServerInfo { pid: 7 }";
+        let export = write_bundle(
+            &dest,
+            "0.2.0",
+            "2026-10-08T12:00:00Z",
+            report,
+            &log_paths(&dir, &dir),
+        )
+        .expect("bundle");
+        let text = std::fs::read_to_string(&dest).expect("read back");
+        assert!(text.contains("===== santree server ====="));
+        assert!(text.contains("ServerInfo { pid: 7 }"));
+        assert!(text.contains("server line"), "the server log's tail");
+        assert!(text.contains("dev line"));
+        assert_eq!(export.files.len(), 3);
+        assert!(
+            text.find("===== santree server =====").unwrap() < text.find("app line").unwrap(),
+            "the report precedes the logs"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_server_report_adds_no_section() {
+        let dir = std::env::temp_dir().join("santree-diag-no-server");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("santree.log"), b"x\n").expect("write");
+        let dest = dir.join("out.log");
+        write_bundle(
+            &dest,
+            "0.2.0",
+            "2026-10-08T12:00:00Z",
+            "  \n",
+            &log_paths(&dir, &dir),
+        )
+        .expect("bundle");
+        let text = std::fs::read_to_string(&dest).expect("read back");
+        assert!(!text.contains("santree server"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

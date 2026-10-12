@@ -18,8 +18,9 @@ use anyhow::{bail, Context, Result};
 
 /// The one process-table read.
 ///
-/// `-ax` is every process (ours are children of the app, but a `ps` restricted
-/// to the session would miss a terminal's daemonised children); `rss` is KiB on
+/// `-ax` is every process (ours are children of the app or of the local
+/// santree server, but a `ps` restricted to the session would miss a terminal's
+/// daemonised children); `rss` is KiB on
 /// both macOS and Linux; `stat` carries the zombie and foreground-process-group
 /// flags; `command` is the full argv and goes last because it contains spaces.
 ///

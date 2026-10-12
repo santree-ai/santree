@@ -246,6 +246,15 @@ pub mod m {
         /// One workspace's app icon. A feature, like `workspaces.list`;
         /// `not_found` when there is none.
         WorkspacesIcon = "workspaces.icon": WorkspacesIconParams => WorkspaceIcon;
+        /// The local santree server's own state. A feature: only that server
+        /// names it.
+        ServerInfo = "server.info": Empty => super::ServerInfo;
+        /// Hold the machine awake for as long as the server runs, or stop
+        /// holding it. A feature, like `server.info`.
+        ServerKeepAwake = "server.keepAwake": KeepAwakeParams => KeepAwakeResult;
+        /// Answer, then close every session and exit. A feature, like
+        /// `server.info`.
+        ServerStop = "server.stop": Empty => Empty;
     }
 }
 
@@ -289,8 +298,29 @@ impl HelloResult {
     /// Whether the host serves `M` — the check a client makes before calling a
     /// method that is a feature rather than part of every v1 host.
     pub fn supports<M: Method>(&self) -> bool {
-        self.features.iter().any(|f| f == M::NAME)
+        self.has(M::NAME)
     }
+
+    /// Whether `features` names `feature` — a method's wire name, or one of
+    /// the non-method features in [`feature`].
+    pub fn has(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+}
+
+/// Features that are not methods: a param or a behaviour a host may lack.
+/// Named in `hello`'s `features` beside the optional methods' wire names.
+pub mod feature {
+    /// `pty.open` honours `baseEnv`.
+    pub const PTY_BASE_ENV: &str = "pty.baseEnv";
+    /// A `pty.attach` replay of mode `tail` may begin with a short preamble of
+    /// DECSETs: the terminal modes in effect where the retained tail begins.
+    /// Display-side bytes only; `seq` still counts the stream, so the preamble
+    /// moves no position. The preamble comes from santree-pty's ring, so any
+    /// host on a santree-pty that has it sends one whether or not it names this
+    /// feature: never derive a stream position from a `tail` replay's length,
+    /// count from `seq`.
+    pub const PTY_MODES: &str = "pty.modes";
 }
 
 // ── pty ───────────────────────────────────────────────────────────────────
@@ -318,7 +348,29 @@ pub struct SessionInfo {
     pub epoch: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// What a `Debug` of anything carrying an environment shows of it: the NAMES.
+/// An environment holds secrets (a project's tokens, the app's whole ambient
+/// env), and a `{:?}` in a log or a panic message has no business printing them.
+pub struct EnvNames<'a>(pub &'a [(String, String)]);
+
+impl std::fmt::Debug for EnvNames<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(name, _)| name))
+            .finish()
+    }
+}
+
+/// A payload's length in place of its bytes (stdin can be anything).
+struct Len(usize);
+
+impl std::fmt::Debug for Len {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtyOpenParams {
     /// Absolute, on the server. Omitted = the daemon user's `$HOME`.
@@ -333,10 +385,36 @@ pub struct PtyOpenParams {
     /// `[[name, value], …]`.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// The environment the session should have inherited, `[[name, value], …]`:
+    /// the client's own, when the host runs with a minimal one (a local server
+    /// started by santree). When sent, it replaces the host process's own
+    /// environment — none of it shows through. Stripped of nested-session
+    /// markers like an inherited env; `env` goes on top. Omitted when empty, and only sent to a
+    /// host naming [`feature::PTY_BASE_ENV`] — an older host would drop it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_env: Vec<(String, String)>,
     pub owner: String,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_kind: Option<AgentKind>,
+}
+
+impl std::fmt::Debug for PtyOpenParams {
+    /// `env` and `baseEnv` by name only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PtyOpenParams")
+            .field("cwd", &self.cwd)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .field("env", &EnvNames(&self.env))
+            .field("base_env", &EnvNames(&self.base_env))
+            .field("owner", &self.owner)
+            .field("label", &self.label)
+            .field("agent_kind", &self.agent_kind)
+            .finish()
+    }
 }
 
 /// Where the client is in a session's stream — `santree_pty::Anchor` on the
@@ -401,7 +479,7 @@ pub struct PtyAdoptParams {
 
 /// `exec.run`: one process, argv only (no shell), always with
 /// `GIT_OPTIONAL_LOCKS=0` layered last.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecParams {
     /// Absolute, on the server.
@@ -415,6 +493,19 @@ pub struct ExecParams {
     pub stdin: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+}
+
+impl std::fmt::Debug for ExecParams {
+    /// `env` by name, `stdin` by length.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecParams")
+            .field("cwd", &self.cwd)
+            .field("argv", &self.argv)
+            .field("env", &self.env.as_deref().map(EnvNames))
+            .field("stdin", &self.stdin.as_deref().map(|b| Len(b.len())))
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
+    }
 }
 
 /// `exec.run`'s answer. Running past the timeout is not a result but a
@@ -505,7 +596,7 @@ pub struct FsStat {
 
 // ── hooks ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookPushParams {
     /// The hook event name (`Stop`, `SessionStart`, …).
     pub event: String,
@@ -515,6 +606,17 @@ pub struct HookPushParams {
     /// The hook's stdin (the agent's JSON payload), as bytes.
     #[serde(with = "b64")]
     pub stdin: Vec<u8>,
+}
+
+impl std::fmt::Debug for HookPushParams {
+    /// The hook's environment by name and its payload by length.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookPushParams")
+            .field("event", &self.event)
+            .field("env", &EnvNames(&self.env))
+            .field("stdin", &Len(self.stdin.len()))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -651,6 +753,42 @@ pub fn sniff_icon(body: &[u8]) -> Option<&'static str> {
     None
 }
 
+// ── server ────────────────────────────────────────────────────────────────
+
+/// `server.info`: the local santree server, as its Settings card shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerInfo {
+    /// The santree release the server was built with.
+    pub version: String,
+    /// Its compatibility revision: which server this is, as opposed to which
+    /// app shipped it (`santree_server::REVISION`).
+    pub revision: u32,
+    pub pid: u32,
+    /// Unix milliseconds.
+    pub started_at_ms: i64,
+    /// The binary it runs from.
+    pub exe: String,
+    /// PTY sessions whose process is still running.
+    pub live_sessions: usize,
+    /// Connections open, the asking one included.
+    pub clients: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeepAwakeParams {
+    pub on: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeepAwakeResult {
+    /// The machine is being held awake now.
+    pub active: bool,
+    /// This platform can be held awake at all (macOS); `false` answers every
+    /// `on` with `active: false`.
+    pub supported: bool,
+}
+
 // ── events ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -666,7 +804,7 @@ pub struct PtyExit {
 }
 
 /// One queued hook invocation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookEvent {
     pub seq: u64,
     /// When the daemon received it, in Unix milliseconds.
@@ -676,6 +814,19 @@ pub struct HookEvent {
     pub env: Vec<(String, String)>,
     #[serde(with = "b64")]
     pub stdin: Vec<u8>,
+}
+
+impl std::fmt::Debug for HookEvent {
+    /// The hook's environment by name and its payload by length.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookEvent")
+            .field("seq", &self.seq)
+            .field("at", &self.at)
+            .field("event", &self.event)
+            .field("env", &EnvNames(&self.env))
+            .field("stdin", &Len(self.stdin.len()))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1095,6 +1246,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env: vec![("A".into(), "1".into())],
+            base_env: vec![],
             owner: "o".into(),
             label: "tree:x".into(),
             agent_kind: None,
@@ -1111,6 +1263,14 @@ mod tests {
         round_trip(
             &with,
             r#"{"cwd":"/srv/web","command":"","args":[],"cols":80,"rows":24,"env":[["A","1"]],"owner":"o","label":"tree:x","agentKind":"Claude"}"#,
+        );
+        let based = PtyOpenParams {
+            base_env: vec![("PATH".into(), "/usr/bin".into())],
+            ..with
+        };
+        round_trip(
+            &based,
+            r#"{"cwd":"/srv/web","command":"","args":[],"cols":80,"rows":24,"env":[["A","1"]],"baseEnv":[["PATH","/usr/bin"]],"owner":"o","label":"tree:x","agentKind":"Claude"}"#,
         );
     }
 
@@ -1248,6 +1408,42 @@ mod tests {
     }
 
     #[test]
+    fn server_shapes() {
+        assert_eq!(
+            req::<m::ServerInfo>(1, &Empty),
+            r#"{"id":1,"m":"server.info","p":{}}"#
+        );
+        round_trip(
+            &ServerInfo {
+                version: "0.1.19".into(),
+                revision: 3,
+                pid: 4242,
+                started_at_ms: 1_791_000_000_000,
+                exe: "/Users/u/Library/Application Support/com.santree.desktop/server/r3/santree-server"
+                    .into(),
+                live_sessions: 2,
+                clients: 1,
+            },
+            r#"{"version":"0.1.19","revision":3,"pid":4242,"startedAtMs":1791000000000,"exe":"/Users/u/Library/Application Support/com.santree.desktop/server/r3/santree-server","liveSessions":2,"clients":1}"#,
+        );
+        assert_eq!(
+            req::<m::ServerKeepAwake>(2, &KeepAwakeParams { on: true }),
+            r#"{"id":2,"m":"server.keepAwake","p":{"on":true}}"#
+        );
+        round_trip(
+            &KeepAwakeResult {
+                active: false,
+                supported: false,
+            },
+            r#"{"active":false,"supported":false}"#,
+        );
+        assert_eq!(
+            req::<m::ServerStop>(3, &Empty),
+            r#"{"id":3,"m":"server.stop","p":{}}"#
+        );
+    }
+
+    #[test]
     fn responses_encode_as_documented() {
         assert_eq!(encode_ok(1, &Empty).unwrap(), r#"{"id":1,"ok":{}}"#);
         assert_eq!(
@@ -1344,5 +1540,46 @@ mod tests {
             bad.params::<PtyWriteParams>().unwrap_err().code,
             ErrorCode::BadRequest
         );
+    }
+
+    #[test]
+    fn debug_names_the_environment_and_never_shows_a_value() {
+        const SECRET: &str = "s3cr3t-value-0x42";
+        let env = || vec![("SOME_TOKEN".to_string(), SECRET.to_string())];
+        let open = PtyOpenParams {
+            env: env(),
+            base_env: env(),
+            ..PtyOpenParams::default()
+        };
+        let exec = ExecParams {
+            env: Some(env()),
+            stdin: Some(SECRET.as_bytes().to_vec()),
+            ..ExecParams::default()
+        };
+        let push = HookPushParams {
+            event: "Stop".into(),
+            env: env(),
+            stdin: SECRET.as_bytes().to_vec(),
+        };
+        let event = HookEvent {
+            seq: 1,
+            at: 0,
+            event: "Stop".into(),
+            env: env(),
+            stdin: SECRET.as_bytes().to_vec(),
+        };
+        for shown in [
+            format!("{open:?}"),
+            format!("{exec:?}"),
+            format!("{push:?}"),
+            format!("{event:?}"),
+            format!("{open:#?}"),
+        ] {
+            assert!(!shown.contains(SECRET), "a value leaked: {shown}");
+            assert!(
+                shown.contains("SOME_TOKEN"),
+                "names are what a log needs: {shown}"
+            );
+        }
     }
 }

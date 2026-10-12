@@ -53,8 +53,10 @@ export function useEmbeddedTerminal(opts: {
    * inline slot belongs to whatever terminal the user is actually looking at.
    */
   attach?: boolean;
+  /** The surface's own Resume, handed to a lost pane (see `TerminalEmbed.onResume`). */
+  onResume?: () => void;
 }): UseEmbeddedTerminalResult {
-  const { spec, onExited, attach = true } = opts;
+  const { spec, onExited, attach = true, onResume } = opts;
   const { tabs, ensure, close: closeTab, attachEmbed, detachEmbeds } = useTerminals();
 
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -69,6 +71,9 @@ export function useEmbeddedTerminal(opts: {
   const pane = useSplitPane();
   const activateRef = useRef(pane?.activate);
   activateRef.current = pane?.activate;
+  const onResumeRef = useRef(onResume);
+  onResumeRef.current = onResume;
+  const resumable = onResume !== undefined;
 
   // Pull the spec into primitive fields so the embed effect re-runs on real
   // changes (a new ticket/command) rather than on every render's fresh object
@@ -86,8 +91,26 @@ export function useEmbeddedTerminal(opts: {
     seenRef.current = false;
     const host = hostRef.current;
     if (!attach || !host) return;
-    return attachEmbed({ host, key, onActivate: () => activateRef.current?.() });
-  }, [title, cwd, command, seed, source, refId, argsKey, agentKey, attach, ensure, attachEmbed]);
+    return attachEmbed({
+      host,
+      key,
+      onActivate: () => activateRef.current?.(),
+      onResume: resumable ? () => onResumeRef.current?.() : undefined,
+    });
+  }, [
+    title,
+    cwd,
+    command,
+    seed,
+    source,
+    refId,
+    argsKey,
+    agentKey,
+    attach,
+    resumable,
+    ensure,
+    attachEmbed,
+  ]);
 
   // Seen-latch exit detection (see the file header).
   useEffect(() => {

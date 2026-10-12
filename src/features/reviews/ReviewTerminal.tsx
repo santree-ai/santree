@@ -19,6 +19,7 @@ export function ReviewTerminal({
   agent,
   attach,
   onExited,
+  onResume,
 }: {
   /** The PR's surface key — the tab's `refId`, the PTY's label and the durable
    *  row's `term_key`, one string. Which provider is reviewing travels in
@@ -30,11 +31,14 @@ export function ReviewTerminal({
   agent: AgentTabIdentity;
   attach: boolean;
   onExited: () => void;
+  /** The review's own Resume, for a lost pane's click (see `TerminalEmbed.onResume`). */
+  onResume?: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
     spec: { title, cwd, source: "review", refId: termKey, seed, agent },
     attach,
     onExited,
+    onResume,
   });
   return <div ref={hostRef} className="h-full w-full" />;
 }

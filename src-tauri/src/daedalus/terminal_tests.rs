@@ -8,37 +8,30 @@
 //! Every wait is on a condition — bytes on the pane, a state on the link, a
 //! session in the box's table — never on a guessed interval.
 
+// Tests type into, open and close terminals directly: clippy.toml's PTY rules
+// hold shipped code to its sanctioned sites.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tokio::sync::watch;
 
 use santree_core::domain::{DaedalusLink, RepoLocation};
 use santree_pty::{PtyManager, SessionId};
 use santree_remote_client::fake::{FakeAgent, FakeDaemon, FakeOptions};
 use santree_remote_client::proto::{Anchor, ReplayMode};
-use santree_remote_client::{ClientOptions, HostOptions};
 
 use super::host::{describe, DaedalusHost};
-use super::terminals::{self, Sinks, Spec};
 use crate::db::Db;
 use crate::repo;
+pub(super) use crate::sessions::testkit::{fast, until, Screen, WAIT};
+use crate::sessions::PaneLink;
+use crate::sessions::{Local, Spec, Terminals};
 use crate::stream::StreamEvent;
-use crate::terminal::{self, PaneLink, RawBytes, TerminalOpenOpts};
+use crate::terminal::{self, TerminalOpenOpts};
 use crate::worktree;
-
-pub(super) const WAIT: Duration = Duration::from_secs(20);
-
-pub(super) fn fast() -> HostOptions {
-    HostOptions {
-        backoff_min: Duration::from_millis(20),
-        backoff_max: Duration::from_millis(200),
-        hello_timeout: Duration::from_secs(5),
-        client: ClientOptions::default(),
-    }
-}
 
 pub(super) fn run_git(dir: &Path, args: &[&str]) {
     let out = std::process::Command::new("git")
@@ -124,127 +117,10 @@ fn link_through(agent: &FakeAgent) -> DaedalusHost {
     link
 }
 
-/// What a pane has been sent: its bytes, whether it was told the process
-/// exited, and every link state in order. Every change bumps `changed`, so a
-/// test waits on a condition over it rather than on time.
-#[derive(Clone)]
-pub(super) struct Screen {
-    out: Arc<Mutex<Vec<u8>>>,
-    exited: Arc<Mutex<bool>>,
-    links: Arc<Mutex<Vec<PaneLink>>>,
-    changed: Arc<watch::Sender<u64>>,
-}
-
-impl Screen {
-    pub(super) fn new() -> Self {
-        Self {
-            out: Arc::default(),
-            exited: Arc::default(),
-            links: Arc::default(),
-            changed: Arc::new(watch::channel(0).0),
-        }
-    }
-
-    pub(super) fn bump(&self) {
-        self.changed.send_modify(|n| *n += 1);
-    }
-
-    pub(super) fn output(&self, bytes: Vec<u8>) {
-        if bytes.is_empty() {
-            *self.exited.lock().unwrap() = true;
-        } else {
-            self.out.lock().unwrap().extend(bytes);
-        }
-        self.bump();
-    }
-
-    pub(super) fn link(&self, link: PaneLink) {
-        self.links.lock().unwrap().push(link);
-        self.bump();
-    }
-
-    pub(super) fn sinks(&self) -> Sinks {
-        let (out, link) = (self.clone(), self.clone());
-        Sinks {
-            output: Arc::new(move |bytes| out.output(bytes)),
-            link: Arc::new(move |state| link.link(state)),
-        }
-    }
-
-    /// The pane's channels as `terminal::open` takes them.
-    pub(super) fn channels(&self) -> (Channel<RawBytes>, Channel<PaneLink>) {
-        let (out, link) = (self.clone(), self.clone());
-        let output = Channel::new(move |body| {
-            if let InvokeResponseBody::Raw(bytes) = body {
-                out.output(bytes);
-            }
-            Ok(())
-        });
-        let links = Channel::new(move |body| {
-            if let InvokeResponseBody::Json(json) = body {
-                link.link(match json.as_str() {
-                    "\"live\"" => PaneLink::Live,
-                    "\"reconnecting\"" => PaneLink::Reconnecting,
-                    other => panic!("unexpected link state {other}"),
-                });
-            }
-            Ok(())
-        });
-        (output, links)
-    }
-
-    pub(super) fn text(&self) -> String {
-        String::from_utf8_lossy(&self.out.lock().unwrap()).into_owned()
-    }
-
-    pub(super) fn len(&self) -> u64 {
-        self.out.lock().unwrap().len() as u64
-    }
-
-    pub(super) fn count(&self, needle: &str) -> usize {
-        self.text().matches(needle).count()
-    }
-
-    pub(super) fn links(&self) -> Vec<PaneLink> {
-        self.links.lock().unwrap().clone()
-    }
-
-    pub(super) fn last_link(&self) -> Option<PaneLink> {
-        self.links.lock().unwrap().last().copied()
-    }
-
-    pub(super) fn exited(&self) -> bool {
-        *self.exited.lock().unwrap()
-    }
-
-    pub(super) async fn until(&self, what: &str, cond: impl Fn(&Screen) -> bool) {
-        let mut changed = self.changed.subscribe();
-        let met = tokio::time::timeout(WAIT, changed.wait_for(|_| cond(self))).await;
-        assert!(
-            met.is_ok(),
-            "timed out waiting for {what}; the pane has {:?}, links {:?}",
-            self.text(),
-            self.links()
-        );
-    }
-}
-
-/// Wait for state outside the pane (the box's PTY table): checked on every
-/// scheduler turn until it holds, bounded by [`WAIT`].
-pub(super) async fn until(what: &str, cond: impl Fn() -> bool) {
-    let met = tokio::time::timeout(WAIT, async {
-        while !cond() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    assert!(met.is_ok(), "timed out waiting for {what}");
-}
-
 /// A shell in the worktree on the box, as the "+" opens one.
 fn shell(server: &Server, label: &str) -> Spec {
     Spec {
-        cwd: server.worktree.to_string_lossy().into_owned(),
+        cwd: Some(server.worktree.to_string_lossy().into_owned()),
         command: "/bin/sh".into(),
         args: Vec::new(),
         env: vec![("TERM".into(), "xterm-256color".into())],
@@ -263,10 +139,20 @@ fn box_sessions(daemon: &FakeDaemon, label: &str) -> Vec<santree_pty::SessionInf
         .collect()
 }
 
+/// The facade as the app builds it with no server (`Mode::Off`): this Mac's
+/// terminals in `manager`, and the link's own Daedalus panes beside them.
+pub(super) fn in_app(manager: &PtyManager, link: &DaedalusHost) -> Terminals {
+    Terminals::new(
+        Local::InApp(manager.clone()),
+        link.terminals().clone(),
+        link.ids().clone(),
+    )
+}
+
 /// Type `line` + Enter into the pane.
 fn type_line(link: &DaedalusHost, id: SessionId, line: &str) {
     link.terminals()
-        .write(id, format!("{line}\n").into_bytes())
+        .write(id, crate::terminal::Keystrokes::typed(format!("{line}\n")))
         .unwrap();
 }
 
@@ -293,7 +179,7 @@ async fn a_daedalus_terminal_runs_on_the_box_and_rides_out_detach_and_a_dropped_
         )
         .await
         .unwrap();
-    assert!(terminals::is_remote(id), "a remote pane has a remote id");
+    assert!(link.terminals().holds(id), "a remote pane is Daedalus's");
     assert_eq!(screen.links(), [PaneLink::Live]);
     let on_box = box_sessions(&daemon, label);
     assert_eq!(on_box.len(), 1, "one PTY on the box");
@@ -465,7 +351,10 @@ async fn a_daedalus_terminal_survives_santree_restarting() {
     // A found session is already running its launch: the seed isn't typed.
     second
         .terminals()
-        .seed(id, "echo seeded-$((6+6))\r".into())
+        .seed(
+            id,
+            crate::terminal::LaunchLine::typed("echo seeded-$((6+6))\r"),
+        )
         .unwrap();
     type_line(&second, id, "echo typed-$((7+7))");
     back.until("typing reaches it", |s| s.count("typed-14") == 1)
@@ -496,6 +385,7 @@ async fn nothing_runs_locally_while_the_link_is_down() {
     assert_eq!(off, DaedalusLink::SantreeOff);
 
     let manager = PtyManager::new();
+    let terminals = in_app(&manager, &link);
     let label = "tree:AK-1:tab:t3";
     let opts = |agent_kind| TerminalOpenOpts {
         cwd: Some(server.worktree.to_string_lossy().into_owned()),
@@ -510,10 +400,10 @@ async fn nothing_runs_locally_while_the_link_is_down() {
 
     let screen = Screen::new();
     let (output, links) = screen.channels();
-    let id = terminal::open(&manager, &db, &link, opts(None), output, links)
+    let id = terminal::open(&terminals, &db, opts(None), output, links)
         .await
         .unwrap();
-    assert!(terminals::is_remote(id));
+    assert!(link.terminals().holds(id));
     assert_eq!(screen.links(), [PaneLink::Reconnecting]);
     type_line(&link, id, "echo lost-$((1+1))");
     assert!(manager.sessions().is_empty(), "no shell opened on this Mac");
@@ -524,9 +414,8 @@ async fn nothing_runs_locally_while_the_link_is_down() {
     let agent_screen = Screen::new();
     let (output, links) = agent_screen.channels();
     let agent_id = terminal::open(
-        &manager,
+        &terminals,
         &db,
-        &link,
         opts(Some(santree_core::domain::AgentKind::Claude)),
         output,
         links,
@@ -541,15 +430,21 @@ async fn nothing_runs_locally_while_the_link_is_down() {
         cwd: Some(format!("{}/../../etc", server.web.display())),
         ..opts(None)
     };
-    assert!(
-        terminal::open(&manager, &db, &link, climbing, output, links)
-            .await
-            .is_err()
-    );
+    assert!(terminal::open(&terminals, &db, climbing, output, links)
+        .await
+        .is_err());
 
     // Setup is refused with the link's own state.
     let (events, log) = recording_channel();
-    let setup = worktree::run_setup_streamed(&db, &link, &repo, "AK-1", events).await;
+    let setup = worktree::run_setup_streamed(
+        &db,
+        &link,
+        &crate::terminal::test_run_host(),
+        &repo,
+        "AK-1",
+        events,
+    )
+    .await;
     assert_eq!(setup.unwrap_err().to_string(), describe(&off));
     assert!(log.lock().unwrap().is_empty());
 
@@ -635,9 +530,16 @@ async fn a_daedalus_setup_script_runs_on_the_box() {
 
     // Nothing to run yet: said so, and a success.
     let (events, log) = recording_channel();
-    worktree::run_setup_streamed(&db, &link, &repo, "AK-1", events)
-        .await
-        .unwrap();
+    worktree::run_setup_streamed(
+        &db,
+        &link,
+        &crate::terminal::test_run_host(),
+        &repo,
+        "AK-1",
+        events,
+    )
+    .await
+    .unwrap();
     assert!(
         streamed(&log).contains("nothing to run"),
         "{}",
@@ -653,9 +555,16 @@ async fn a_daedalus_setup_script_runs_on_the_box() {
          echo \"wt=$SANTREE_WORKTREE_PATH root=$SANTREE_REPO_ROOT\"\n",
     );
     let (events, log) = recording_channel();
-    worktree::run_setup_streamed(&db, &link, &repo, "AK-1", events)
-        .await
-        .unwrap();
+    worktree::run_setup_streamed(
+        &db,
+        &link,
+        &crate::terminal::test_run_host(),
+        &repo,
+        "AK-1",
+        events,
+    )
+    .await
+    .unwrap();
     let out = streamed(&log);
     let wt = server.worktree.to_string_lossy();
     assert!(out.contains("tty=yes term=xterm-256color"), "{out}");
@@ -679,9 +588,16 @@ async fn a_daedalus_setup_script_runs_on_the_box() {
         .unwrap();
     write_init(&server, "#!/bin/sh\necho failing\nexit 3\n");
     let (events, log) = recording_channel();
-    worktree::run_setup_streamed(&db, &link, &repo, "AK-1", events)
-        .await
-        .unwrap();
+    worktree::run_setup_streamed(
+        &db,
+        &link,
+        &crate::terminal::test_run_host(),
+        &repo,
+        "AK-1",
+        events,
+    )
+    .await
+    .unwrap();
     assert!(streamed(&log).ends_with(r#"{"type":"done","ok":false}"#));
     assert_eq!(setup_ran(&db).await, 0);
     assert!(status_files(&server).is_empty());
@@ -696,7 +612,15 @@ async fn a_daedalus_setup_script_runs_on_the_box() {
     let running = {
         let (db, link, repo) = (db.clone(), link.clone(), repo.clone());
         tokio::spawn(async move {
-            worktree::run_setup_streamed(&db, &link, &repo, "AK-1", events).await
+            worktree::run_setup_streamed(
+                &db,
+                &link,
+                &crate::terminal::test_run_host(),
+                &repo,
+                "AK-1",
+                events,
+            )
+            .await
         })
     };
     let setup_label = "setup:AK-1";

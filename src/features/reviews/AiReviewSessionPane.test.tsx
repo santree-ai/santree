@@ -14,7 +14,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReviewPr } from "../../bindings";
 
-const spies = vi.hoisted(() => ({ terminal: vi.fn() }));
+const spies = vi.hoisted(() => ({
+  terminal: vi.fn(),
+  /** The Resume the terminal's embed hands a lost pane (`TerminalEmbed.onResume`). */
+  onResume: undefined as (() => void) | undefined,
+}));
+const latch = vi.hoisted(() => ({ ended: false, requestResume: vi.fn() }));
 const q = vi.hoisted(() => ({
   drafts: [] as Array<{ id: string; agentKind: "Claude" | "Codex" }>,
   session: {
@@ -34,8 +39,9 @@ const q = vi.hoisted(() => ({
 }));
 
 vi.mock("./ReviewTerminal", () => ({
-  ReviewTerminal: (props: { seed?: string }) => {
+  ReviewTerminal: (props: { seed?: string; onResume?: () => void }) => {
     spies.terminal(props.seed);
+    spies.onResume = props.onResume;
     return <div data-testid="terminal" />;
   },
 }));
@@ -43,10 +49,10 @@ vi.mock("./model", () => ({ useReviewsModel: () => ({ repo: "acme/app" }) }));
 vi.mock("./useReviewSessionLatch", () => ({
   useReviewSessionLatch: () => ({
     liveSession: false,
-    ended: false,
-    needsSeed: true,
+    ended: latch.ended,
+    needsSeed: !latch.ended,
     resumeRequested: false,
-    requestResume: vi.fn(),
+    requestResume: latch.requestResume,
   }),
 }));
 vi.mock("./ReviewSessionShared", () => ({
@@ -87,6 +93,9 @@ const pr = { id: "p1", number: 7, repo: "acme/app", headSha: "abc123" } as Revie
 
 beforeEach(() => {
   spies.terminal.mockClear();
+  spies.onResume = undefined;
+  latch.ended = false;
+  latch.requestResume.mockClear();
   q.drafts = [];
   q.session = {
     type: "fresh",
@@ -165,5 +174,38 @@ describe("AiReviewSessionPane", () => {
     render(<AiReviewSessionPane pr={pr} agentKind="Codex" visible onShowDrafts={vi.fn()} />);
     expect(screen.getByText("1 draft")).toBeInTheDocument();
     expect(screen.queryByText("2 drafts")).toBeNull();
+  });
+
+  it("hands its Resume to a lost pane: one click resumes once, and nothing resumes without one", () => {
+    q.launch = {
+      data: {
+        promptPath: "/data/prompts/acme-app-7.ai-review.md",
+        settingsPath: "/data/claude-hooks-ai-review.json",
+        mcpConfigPath: "/data/mcp/acme-app-7.mcp.json",
+      },
+      isSuccess: true,
+      isError: false,
+      isFetched: true,
+    };
+    // A fresh element each time: React skips re-rendering an identical one.
+    const pane = () => (
+      <AiReviewSessionPane pr={pr} agentKind="Claude" visible onShowDrafts={vi.fn()} />
+    );
+    const { rerender } = render(pane());
+    expect(spies.onResume).toBeDefined();
+
+    // The pane is lost and closes; the review lands on its ended offer. Nothing
+    // resumes until the lost pane's click arrives.
+    latch.ended = true;
+    rerender(pane());
+    expect(screen.getByText("AI review ended")).toBeInTheDocument();
+    expect(latch.requestResume).not.toHaveBeenCalled();
+
+    // The click, handed over by the layer once the lost pane is gone.
+    spies.onResume?.();
+    expect(latch.requestResume).toHaveBeenCalledTimes(1);
+    rerender(pane());
+    rerender(pane());
+    expect(latch.requestResume).toHaveBeenCalledTimes(1);
   });
 });

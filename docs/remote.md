@@ -212,7 +212,8 @@ reloads); a PTY session's own `owner` is the webview's page owner, as locally.
 `projectsRoot` is the absolute root the checkouts live under; `hookBin` the absolute
 path an agent's hook command runs (`<hookBin> hook <args>`), stable across host
 updates; `features` the wire names of the optional methods the host serves
-(`["workspaces.list", "workspaces.icon"]`) — a client checks it (`HelloResult::supports`) and shows
+(`["workspaces.list", "workspaces.icon"]` on Daedalus; a local server names
+`pty.baseEnv`, `pty.modes` and `server.*`) — a client checks it (`HelloResult::supports`) and shows
 "session host too old" rather than calling a missing one. All three are required.
 
 PTY (session info = `{id,pid,cwd,command,owner,label,agentKind,cols,rows,attached,
@@ -220,7 +221,7 @@ alive,epoch}`, `agentKind` ∈ `"Claude"|"Codex"|"Cursor"|"Opencode"|null`):
 
 | method | params | result |
 |---|---|---|
-| `pty.open` | `{cwd?,command,args,cols,rows,env:[[k,v]…],owner,label,agentKind?}` | info (empty `command` = login shell) |
+| `pty.open` | `{cwd?,command,args,cols,rows,env:[[k,v]…],baseEnv?:[[k,v]…],owner,label,agentKind?}` | info (empty `command` = login shell) |
 | `pty.attach` | `{id, anchor: {"at":{"epoch","seq"}} \| "fresh" \| "unknown"}` | `{mode:"exact"\|"tail"\|"reanchor",epoch,seq,data}` |
 | `pty.detach` | `{id}` | `{}` |
 | `pty.write` | `{id,data}` | `{}` |
@@ -254,6 +255,9 @@ Features (served only when `hello`'s `features` names them):
 |---|---|---|
 | `workspaces.list` | `{}` | `{root,generatedAt,workspaces:[{name,path,remote,branch,head,headAt,dirty,ahead,behind,sync}]}` |
 | `workspaces.icon` | `{name}` (unknown keys: `bad_request`) | `{contentType,data}` |
+| `server.info` | `{}` | `{version,revision,pid,startedAtMs,exe,liveSessions,clients}` |
+| `server.keepAwake` | `{on}` | `{active,supported}` |
+| `server.stop` | `{}` | `{}` (then closes every session and exits) |
 
 `root` is `projectsRoot`; `path` is `<root>/<name>`, `name` one plain component. Every
 optional is written as `null`, never omitted: `generatedAt` (RFC 3339; `null` = no
@@ -267,6 +271,35 @@ the project whose repo is that checkout. `contentType` is `image/png`,
 `data` the bytes, at most 64 KiB decoded. `not_found` when there is none, `busy`
 under load, `bad_request` for a `name` that isn't one plain component. Kept apart
 from `workspaces.list` so a poll never carries image bytes.
+
+`pty.baseEnv` is a feature too (named in `hello.features`, in
+`proto::feature::PTY_BASE_ENV`): `pty.open` honours `baseEnv`, the environment the
+session should inherit. When sent it **replaces** the host process's own
+environment (the nested-session markers are stripped from it, then `env` goes on
+top). The client sends it only to a host that names the feature, and a host may
+require it (`HostOptions.require_base_env`; the local server does). Daedalus's
+session host does not use it: a box's sessions stand in the box's environment, and
+the Mac's must never reach it. docs/server.md, "Environment".
+
+**Mode preamble** (feature `pty.modes`, `proto::feature::PTY_MODES`). A `tail`
+replay (anchor `fresh`) may begin with DECSETs for the terminal modes in effect
+where the retained tail begins (alt screen first, then application cursor keys
+and keypad, focus reporting, bracketed paste, the mouse protocol and encoding);
+the tail then moves the viewer on as it moved the original terminal. An exited
+session's preamble is the alt screen only; `exact` and `reanchor` replays carry
+none. The preamble comes from santree-pty's ring, so any host on that santree-pty
+sends it, whether or not it names the feature. A client that does arithmetic on a
+replay must count from `seq`: a `tail` replay's `data` can be longer than
+`seq - start` by the preamble. The tracker is `crates/pty/src/modes.rs`
+(docs/terminals.md, "What is built, and what is not").
+
+The `server.*` methods are the local santree server's (`crates/server`), which
+names them in `features` with `pty.baseEnv` and `pty.modes`. `revision` is its compatibility
+revision (`santree_server::REVISION`), `version` the santree release it was built
+with. `keepAwake` holds `caffeinate -d -i -w <server pid>` on macOS (`supported:
+false` elsewhere), so the machine stays awake while the server runs, not while the
+app does; it is idempotent both ways. `stop` answers first, then closes every
+session and exits 0.
 
 ### The agent ↔ session host link
 
@@ -284,9 +317,21 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
   `crates/pty`) is transport + client only (`agent`, `transport`, `client`, `host`, over the
   protocol types in `crates/remote-proto`):
   it knows nothing about repos. Its `fake` module (behind the `fake` feature, for
-  tests) is an in-process daemon
-  speaking the same protocol, backed by a real `PtyManager`, so the client and every
-  dispatch path are tested without a box.
+  tests) is an in-process daemon speaking the same protocol: **it is the
+  production host** (`crates/host`, package `santree-host`) served over an
+  in-memory link, so the client and every dispatch path are tested against the
+  code that runs on the local server and the box, without a box.
+- **Who may be spoken to is encoded, not implied.** A `Connector` returns a
+  `Link` that carries a `PeerTrust` (`Unverified | Agent | UidOnly | Signed { team }`)
+  it set *after* verifying the far end and *before* a byte was written
+  (`AgentConnector` ⇒ `Agent`, after `check_server`). `HostOptions.require` (a
+  `Required`: `Any | Agent | UidOnly | Signed`, default `Any`) is checked right after
+  `connect()` and before the client is built: a link that does not satisfy it is
+  dropped unread and the attempt is `ConnectError::Untrusted`, on every reconnect.
+  `HostOptions.hooks` (default `true`) says whether the host serves the hook
+  queue; a host with `hooks: false` (the local server, which is PTYs only) is
+  never sent `hooks.subscribe`. Daedalus requires `Agent`; no pane call is made
+  before a link has passed the check.
 - **One seam: `git::Checkout`** (`src-tauri/src/git/checkout.rs`) — a directory (a
   repo root or a worktree) and where it lives. Every `git.rs` function takes one,
   so each git operation is written once: `Checkout::git_with` (and `git`, the plain
@@ -392,14 +437,24 @@ prove the two meet. santree does not depend on `santree-remote-tls`.
 A terminal in a Daedalus project is a PTY on the box (`pty.open` in the
 checkout, which the host confines under `projectsRoot`), drawn by the same
 terminal layer as a local one — docs/terminals.md, "Remote sessions", has the
-pane's side. `terminal.rs` dispatches: a cwd inside a Daedalus project
-(`repo::daedalus_repo_at`, absolute and never climbing) goes to
-`daedalus/terminals.rs`, every other id and command stays on `PtyManager`.
+pane's side. The commands hold one facade, `sessions::Terminals`
+(`src-tauri/src/sessions/backend.rs`), and a cwd inside a Daedalus project
+(`repo::daedalus_repo_at`, absolute and never climbing) is `Route::Daedalus`:
+it goes to the Daedalus `RemoteTerminals` (`sessions/remote.rs`), every other new pane to the local backend (in-app or
+the local santree server, docs/server.md). The same `RemoteTerminals` code
+serves both remote hosts; a `Profile` carries what differs (`Profile::daedalus()`:
+`Gone::End`, no adopt-all, no `baseEnv`; the link's `Required::Agent` is the
+host's, `daedalus/host.rs`). Code outside `sessions/` must not branch on the
+backend (a review rule; nothing checks it).
 
-- **Ids.** A remote pane gets an app-side id from `terminals::FIRST_ID` (2³¹) up
-  — a range `PtyManager` never reaches — so `write`/`resize`/`close`/`attach`/
-  `detach` dispatch on the id alone. The box's own session id is bound to the
-  pane once it is opened or found.
+- **Ids.** A remote pane gets an app-side id from the app's one counter
+  (`IdRegistry`, `sessions/ids.rs`), from 2³¹, a range `PtyManager` never
+  reaches; each host answers whether it `holds(id)`, so
+  `write`/`resize`/`close`/`attach`/`detach` dispatch on the id alone and several
+  hosts coexist. The box's own
+  session id is bound to the pane once it is opened or found, together with the
+  host's `bootId`: a host that answers with another boot is not the host that
+  session lived on.
 - **Anchors.** Every byte forwarded advances the pane's anchor; `pty.attach`
   resumes from it and the box's ring answers `exact|tail|reanchor` exactly as
   the local ring does. The frontend's own `terminal_attach` (a remount, a
@@ -427,7 +482,8 @@ pane's side. `terminal.rs` dispatches: a cwd inside a Daedalus project
   tab closed while the link is down and never reconnected before santree quits
   leaves its session running on the box.
 - **Environment.** A remote pane gets `TERM` and nothing else from this Mac
-  (`terminal::remote_env`). `env::resolve_env` is this Mac's project
+  (`sessions::env::session_env` for `Route::Daedalus`; the Daedalus profile has
+  no `baseEnv`, which is what keeps the Mac's environment off the box). `env::resolve_env` is this Mac's project
   environment — values from this Mac's keychain and `.env` files read from this
   Mac's disk — and none of it is the box's to have; the shell there is the
   box's login shell under the session host, which runs with the operator's
@@ -439,8 +495,8 @@ pane's side. `terminal.rs` dispatches: a cwd inside a Daedalus project
 - **Untrusted bytes** (design S5): the pane's renderer is built untrusted —
   OSC 52 (clipboard writes) swallowed, OSC 8 links opened only as `http(s)`,
   remote text never rendered as HTML. The frontend decides it from the pane's
-  cwd before the first byte (`lib/daedalusLink` `onDaedalus`, the backend's
-  `on_daedalus`), which is why the terminal layer waits for the repo registry.
+  cwd before the first byte (`lib/daedalusLink` `onDaedalus`; the backend's
+  `repo::daedalus_repo_at`), which is why the terminal layer waits for the repo registry.
 - **Setup scripts** (`worktree::run_setup_streamed` → `daedalus/setup.rs`):
   `.santree/init.sh` in a PTY on the box, `bash -lc` around it in the worktree
   there, env `TERM` + `SANTREE_WORKTREE_PATH` + `SANTREE_REPO_ROOT`, streamed
@@ -454,8 +510,32 @@ pane's side. `terminal.rs` dispatches: a cwd inside a Daedalus project
   a run that never ends. Quitting santree leaves a running script to finish on
   the box; nothing records it.
 - **Compliance**: remote bytes enter a PTY only through `terminal.rs`'s
-  `write_pty` → the pane's one writer (`pty.write`), pinned by
-  `only_the_terminal_adapter_writes_bytes_into_a_pty`.
+  `write_pty` → the pane's one writer (`pty.write`), held by the compiler
+  (`terminal::input`'s types, `clippy.toml`'s `RemoteClient::pty_write` rule).
+
+## A second host: the local santree server
+
+Daedalus is not the only host that speaks protocol v1. On a signed build, this
+Mac's own terminals are held by the **local santree server** (`crates/server`), a
+detached process the app launches, so they outlive a quit, a crash or an update.
+It is served by the same `santree-host` crate, reached by the same
+`RemoteHost` and `RemoteTerminals`, over a unix socket instead of the agent's:
+**"Daedalus, on this Mac."** What differs, and where it is written down
+(docs/server.md):
+
+- **Transport and trust.** `ServerConnector` (`src-tauri/src/server/`) connects
+  to a per-revision socket, checks its owner, and verifies the server's code
+  signature (`PeerTrust::Signed`, or `UidOnly` for the unsigned opt-in) before any
+  byte; `HostOptions.require` enforces it. A connect that finds nothing is
+  `ConnectError::NotRunning`; a check that could not judge is
+  `ConnectError::Unverified`.
+- **Methods.** PTYs only (`Methods::PTY_ONLY`: no `exec`, `fs` or hooks, so
+  `HostOptions.hooks` is `false`), plus `server.info` / `server.keepAwake` /
+  `server.stop`, `pty.baseEnv` and `pty.modes`.
+- **Environment.** `baseEnv` (the app's env minus a deny-list, a property of the
+  server's profile, required by the server) and `env` (project secrets only).
+- **Behavior.** `Gone::Lost` instead of `Gone::End`, adopt-everything on first
+  connect, `PaneLink::Lost` with Resume, `Liveness { live, complete }`.
 
 ## Agents on the box
 
@@ -587,6 +667,18 @@ These, and `crates/pty`, are the crates the host side shares: the daedalus
 engine depends on them by git rev, so none of them depends on `santree-core`, Tauri
 or (by default) specta, and their public APIs are a contract with that repo.
 
+`crates/host` (package `santree-host`) — protocol v1's host side, served: PTY
+sessions that outlive their client (with per-session flow control), `exec.run`,
+`fs.*`, the hook queue, behind `Host`, `HostOptions`, `Caps`, `Methods`, and the
+embedder's `Extension` (extra methods); who may hold a link is the embedder's
+transport and accept-time check. Three
+embedders: the local server, the test daemon, and later Daedalus's session host
+(not consuming it yet, but the same contract: `rust-version = "1.95"`). See
+docs/server.md, "The shared host crate".
+
+`crates/server` (package `santree-server`) — the local santree server: `santree-host`
+on a unix socket plus the lifecycle (docs/server.md). Not shared with the engine.
+
 `crates/remote` (package `santree-remote-client`), which re-exports
 `santree-remote-proto` as `proto`:
 
@@ -595,17 +687,22 @@ or (by default) specta, and their public APIs are a contract with that repo.
   refusal).
 - `control.rs` — `AgentControl`: this machine's settings on the agent's own
   socket ("This Mac's settings").
-- `transport.rs` — the `Connector` seam, `Link`, `ConnectError` / `Refusal` and
+- `transport.rs` — the `Connector` seam, `Link` (with its `PeerTrust`),
+  `PeerTrust` / `Required` and `satisfies`, `ConnectError` / `Refusal` and
   `permanent()`, `memory_link()`.
 - `client.rs` — `RemoteClient`: framing (32 MiB line cap), concurrent calls, event
   routing (per-session receivers from `pty_attach`, one hooks receiver), link death
   after 45s of silence, `call_blocking` for sync callers.
-- `host.rs` — `RemoteHost`: its connector, `hello` (kept for `features`), the
+- `host.rs` — `RemoteHost` (`HostOptions { hooks, require, … }`): its connector,
+  `hello` (kept for `features`), the trust check on every connect, `peer()`, the
   `HostStatus` watch, backoff (the slow end at once for a permanent refusal), the
   hooks subscription carried across links (boot-tagged `HookDelivery`s, the cursor
   reset on a new `bootId`), the `Reconnected` broadcast.
-- `fake.rs` (feature `fake`) — the in-process daemon (a random `bootId` per
-  instance; `FakeDaemon::connector()` plugs it into a `RemoteHost` over memory), and
+- `fake.rs` (feature `fake`) — the in-process daemon: the production
+  `santree-host` over an in-memory link with every method group on (a random
+  `bootId` per instance; `FakeDaemon::connector()` plugs it into a `RemoteHost`
+  over memory; `FakeOptions.peer` / `set_peer` choose the `PeerTrust` its link
+  presents), and
   `FakeAgent`, a unix socket that writes the agent's first line and then hands the
   connection to a `FakeDaemon` — what the connector and the app's health,
   workspace and git tests connect through. `FakeDaemon::exec_log()` is the argv of
@@ -616,6 +713,15 @@ or (by default) specta, and their public APIs are a contract with that repo.
   `FakeAgentControl` stands in for `agent.sock`: it answers `settings.get` /
   `settings.set` as agent 0.25 does, over settings the test moves (`apply`,
   `fail`, `set_linked`, `set_may_change`, `set_outdated`).
+
+`src-tauri/src/sessions/` — where a terminal's process lives and how a pane
+reaches it: `mod.rs` (`Mode`, `server_mode`, `PaneLink`, `Liveness`, `Spec`),
+`backend.rs` (`Terminals`, the facade: `Local::{InApp, Server}` + the Daedalus
+`RemoteTerminals`, `Route`, the `LocalHosts` trait), `ids.rs` (`IdRegistry`,
+`HostKey`), `remote.rs` (`RemoteTerminals` + `Profile`, `Gone`: the remote panes —
+ids, anchors, re-attach on `Reconnected`, finding a session by address, adoption,
+the per-pane writer), `env.rs` (`session_env`: a pane's `env` and `baseEnv` per
+route). `tests.rs` drives it end to end over the test daemon.
 
 `src-tauri/src/daedalus/` (also `agents.rs`: "Agents on the box"; its tests,
 `agent_tests.rs`, run the launch, the relay, detection and the prompts over the
@@ -632,9 +738,9 @@ fake agent and daemon, whose `FakeOptions::env` gives the fake box a home and
   `client_within(wait)` (≤5 s while `Connecting`, `CONNECT_WAIT`) →
   `Result<Arc<RemoteClient>, NotConnected>`; the `DaedalusLinkChanged` event; the
   hook `Relay`.
-- `terminals.rs` — `RemoteTerminals`: the remote panes (ids, anchors, the
-  re-attach on `Reconnected`, finding a session again by address, the per-pane
-  writer). Owned by `DaedalusHost`, started by `resume`.
+- `host.rs` also owns the Daedalus `RemoteTerminals` (built with
+  `Profile::daedalus()` and the shared `IdRegistry`), started by `resume`; the
+  code itself lives in `sessions/remote.rs`.
 - `setup.rs` — `RemoteRuns`: setup scripts in a PTY on the box, keyed like
   `stream::RUNS`.
 - `settings.rs` — this Mac's settings through `AgentControl`, as values, and

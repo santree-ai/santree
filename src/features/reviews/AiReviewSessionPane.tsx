@@ -157,6 +157,11 @@ export function AiReviewSessionPane({
     [qc, repo, termKey, agentKind],
   );
 
+  const resumeNow = useCallback(() => {
+    dropCachedSession();
+    requestResume();
+  }, [dropCachedSession, requestResume]);
+
   if (ended) {
     return (
       <SessionEndedPane
@@ -170,10 +175,7 @@ export function AiReviewSessionPane({
             are saved. Pick the session back up to revise them.
           </>
         }
-        onResume={() => {
-          dropCachedSession();
-          requestResume();
-        }}
+        onResume={resumeNow}
       />
     );
   }
@@ -190,6 +192,9 @@ export function AiReviewSessionPane({
             agent={{ kind: resolvedAgent, repo, termKey }}
             attach={visible}
             onExited={dropCachedSession}
+            // A lost pane's Resume is this one, already clicked: the ended offer
+            // it would otherwise land on does not ask again.
+            onResume={resumeNow}
           />
         ) : launch.isError ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">

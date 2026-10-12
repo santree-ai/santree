@@ -20,6 +20,7 @@ import type { CSSProperties, ReactNode } from "react";
 
 import { useAppUi } from "../../state/AppContext";
 import { ChevronRightIcon } from "../icons";
+import { ServerBanner } from "./ServerBanner";
 import { Sidebar, TRAFFIC_LIGHTS_INSET } from "./Sidebar";
 import { StatusBar } from "./status/StatusBar";
 
@@ -56,6 +57,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         {!sidebarCollapsed && <Sidebar />}
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {sidebarCollapsed && <CollapsedRail onExpand={() => setSidebarCollapsed(false)} />}
+          {/* Terminals live on every view, so the server that holds them speaks
+              from the one frame they all share. */}
+          <ServerBanner />
           {children}
         </main>
       </div>

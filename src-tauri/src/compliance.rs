@@ -7,16 +7,21 @@
 //! half of it a machine can check, so a change that crosses one of those lines
 //! fails a test instead of shipping.
 //!
+//! Where a rule is about *who may call what* — bytes into a PTY, a PTY spawned,
+//! a pane opened — the compiler holds it, not a test: the input types in
+//! `terminal.rs` (`terminal::input`) and the `disallowed-methods` rules in the
+//! workspace's `clippy.toml`. What is tested here is only that those rules stay
+//! switched on and their exceptions stay where they are.
+//!
 //! Two kinds of test live here, in that order of preference:
 //!
 //! * **Behavioural** — call the real function and assert the invariant. Always
 //!   better: it survives any refactor that keeps the behaviour.
-//! * **Source scans** — for the "this pattern must never reappear" rules, where
-//!   what is forbidden is a call site existing at all, and no single function can
-//!   be asked about that. These read santree's own source from
-//!   `CARGO_MANIFEST_DIR`. Every scan strips comments first (see
-//!   [`strip_rust_comments`]), so a comment that merely *names* a forbidden
-//!   pattern — including the ones in this file — can never trip a test.
+//! * **Source scans** — for the "this must never reappear" rules that no type or
+//!   lint can state: a vendor's name, a credential file, a flag. These read
+//!   santree's own source from `CARGO_MANIFEST_DIR`. Every scan strips comments
+//!   first (see [`strip_rust_comments`]), so a comment that merely *names* a
+//!   forbidden pattern — including the ones in this file — can never trip a test.
 //!
 //! Not every claim in `COMPLIANCE.md` is checkable, and the ones that aren't are
 //! judgment calls ("human-initiated", "single-shot, under human review") that a
@@ -56,25 +61,192 @@ fn code(rel: &str) -> String {
     strip_rust_comments(&read(rel))
 }
 
-/// The part of a Rust file that ships: everything before its `#[cfg(test)] mod`.
+/// The part of a Rust file that ships: everything before its inline
+/// `#[cfg(test)] mod … {`, and nothing of a file only tests compile.
 /// Test fixtures legitimately contain SQL, hostile strings and vendor names that
 /// the scans below are hunting for.
 fn shipped(rel: &str) -> String {
-    let src = code(rel);
-    let mut from = 0usize;
-    while let Some(at) = src[from..].find("#[cfg(test)]") {
-        let start = from + at;
-        let rest = src[start + "#[cfg(test)]".len()..].trim_start();
-        if rest.starts_with("mod ") {
-            return src[..start].to_string();
-        }
-        from = start + 1;
+    if test_only(rel) {
+        return String::new();
     }
-    src
+    shipped_part(&code(rel))
 }
 
-/// Every `.rs` file santree itself writes: the app plus the three workspace
-/// crates, minus this one. (This file quotes the forbidden patterns in order to
+/// Files that are a test module whole: `<module>_tests.rs` beside the module
+/// it tests, and a crate's `tests.rs`. The name alone proves nothing — a shipped
+/// module called `x_tests.rs` would be exempt from every scan below — and neither
+/// does *a* declaration somewhere: the file only counts when the module that
+/// would load it (the one in its own directory) declares it behind
+/// `#[cfg(test)]`. A shipped `tests.rs` in a directory whose parent declares no
+/// such module is shipped code like any other.
+fn test_only(rel: &str) -> bool {
+    test_only_among(rel, cfg_test_files())
+}
+
+/// [`test_only`] over a set of declared test files.
+fn test_only_among(rel: &str, declared: &std::collections::HashSet<String>) -> bool {
+    let named_like_tests = rel
+        .strip_suffix(".rs")
+        .and_then(|r| r.rsplit('/').next())
+        .is_some_and(|stem| stem == "tests" || stem.ends_with("_tests"));
+    named_like_tests && declared.contains(rel)
+}
+
+/// Every file some source declares as `#[cfg(test)] mod name;`, as the repo path
+/// it would load from: below the declaring module's own directory.
+fn cfg_test_files() -> &'static std::collections::HashSet<String> {
+    static FILES: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    FILES.get_or_init(|| {
+        let mut files = std::collections::HashSet::new();
+        for (rel, src) in rust_sources() {
+            for name in declared_test_modules(&src) {
+                files.extend(module_files(&rel, &name));
+            }
+        }
+        files
+    })
+}
+
+/// The files `mod name;` in the source file `declaring` loads: `lib.rs`,
+/// `main.rs` and `mod.rs` load from their own directory, any other `x.rs` from
+/// the directory `x/` beside it.
+fn module_files(declaring: &str, name: &str) -> [String; 2] {
+    let (dir, file) = declaring.rsplit_once('/').unwrap_or(("", declaring));
+    let child_dir = if matches!(file, "lib.rs" | "main.rs" | "mod.rs") {
+        dir.to_string()
+    } else {
+        format!("{dir}/{}", file.trim_end_matches(".rs"))
+    };
+    [
+        format!("{child_dir}/{name}.rs"),
+        format!("{child_dir}/{name}/mod.rs"),
+    ]
+}
+
+/// The names `src` declares as `#[cfg(test)] [pub] mod name;`.
+fn declared_test_modules(src: &str) -> Vec<String> {
+    const GATE: &str = "#[cfg(test)]";
+    let flat = squashed(src);
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = flat[from..].find(GATE) {
+        let mut rest = &flat[from + at + GATE.len()..];
+        from += at + GATE.len();
+        for vis in ["pub(crate)", "pub(super)", "pub"] {
+            if let Some(after) = rest.strip_prefix(vis) {
+                rest = after;
+                break;
+            }
+        }
+        let Some(item) = rest.strip_prefix("mod") else {
+            continue;
+        };
+        let name = item
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(item.len());
+        if item[name..].starts_with(';') && name > 0 {
+            out.push(item[..name].to_string());
+        }
+    }
+    out
+}
+
+/// [`shipped`] over source already read. A `#[cfg(test)] mod tests;` is a
+/// one-line declaration of another file, and the code after it ships; a module
+/// with its body inline is removed by its own span — through its closing brace —
+/// and nothing else, so a test module written early in a file cannot hide the
+/// shipped code that follows it.
+fn shipped_part(src: &str) -> String {
+    const GATE: &str = "#[cfg(test)]";
+    let c: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut copied = 0usize;
+    let mut from = 0usize;
+    while let Some(at) = src[from..].find(GATE) {
+        let start = from + at;
+        let rest = src[start + GATE.len()..].trim_start();
+        from = start + 1;
+        let Some(item) = rest.strip_prefix("mod ") else {
+            continue;
+        };
+        let name = item
+            .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+            .unwrap_or(item.len());
+        if !item[name..].trim_start().starts_with('{') {
+            continue;
+        }
+        // `find` and `trim_start` speak bytes; the brace scan speaks chars.
+        let char_start = src[..start].chars().count();
+        let Some(open) = (char_start..c.len()).find(|&k| c[k] == '{') else {
+            continue;
+        };
+        let end = matching_brace(&c, open).map_or(c.len(), |close| close + 1);
+        if char_start < copied {
+            continue;
+        }
+        out.extend(&c[copied..char_start]);
+        copied = end;
+        from = src
+            .char_indices()
+            .nth(end)
+            .map_or(src.len(), |(byte, _)| byte);
+    }
+    out.extend(&c[copied..]);
+    out
+}
+
+/// The index of the `}` closing the `{` at `open`, skipping braces inside
+/// string and char literals. `None` when the source ends first.
+fn matching_brace(c: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    let mut scratch = String::new();
+    while i < c.len() {
+        match c[i] {
+            'r' if matches!(c.get(i + 1), Some('"') | Some('#')) => {
+                scratch.clear();
+                if let Some(next) = copy_raw_string(c, i, &mut scratch) {
+                    i = next;
+                    continue;
+                }
+            }
+            '"' => {
+                scratch.clear();
+                i = copy_quoted(c, i, '"', &mut scratch);
+                continue;
+            }
+            // A char literal only when it closes like one; else a lifetime.
+            '\'' if c.get(i + 1) == Some(&'\\') || c.get(i + 2) == Some(&'\'') => {
+                scratch.clear();
+                i = copy_quoted(c, i, '\'', &mut scratch);
+                continue;
+            }
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `src` with every whitespace character removed, so `. pty ( )` and a call
+/// split across lines (`host\n    .pty\n    ()`) read as `host.pty()`. Matched
+/// only against needles that are themselves written without whitespace; it is
+/// for finding a call, never for reading code.
+fn squashed(src: &str) -> String {
+    src.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Every `.rs` file santree itself writes: the app plus the workspace crates
+/// that carry its code (the protocol host and the remote client among them),
+/// minus this one. (This file quotes the forbidden patterns in order to
 /// forbid them, so scanning it would make every test below fail on its own
 /// rulebook.) Yields `(repo-relative path, comment-stripped source)`.
 fn rust_sources() -> Vec<(String, String)> {
@@ -84,6 +256,9 @@ fn rust_sources() -> Vec<(String, String)> {
         "crates/core/src",
         "crates/pty/src",
         "crates/hook/src",
+        "crates/host/src",
+        "crates/server/src",
+        "crates/remote/src",
     ] {
         collect_rust(&repo_root().join(dir), &mut out);
     }
@@ -502,6 +677,86 @@ fn f<'a>(x: &'a str) -> char { let q = '\''; let s = "said \" then // stopped"; 
         fn_body("fn g(x: u8) { if x { y } }\n", "g"),
         "{ if x { y } }"
     );
+
+    // A test module declared on one line hides nothing after it; one with its
+    // body inline is where the shipped part ends.
+    let declared = "mod a;\n#[cfg(test)]\nmod tests;\nfn after() {}\n";
+    assert!(shipped_part(declared).contains("fn after()"));
+    let inline = "fn before() {}\n#[cfg(test)]\nmod tests {\n    fn fixture() {}\n}\n";
+    let part = shipped_part(inline);
+    assert!(
+        part.contains("fn before()") && !part.contains("fixture"),
+        "{part}"
+    );
+    // An inline test module in the MIDDLE of a file hides only its own span:
+    // everything after it ships, and a string holding a brace doesn't end it.
+    let early = "fn before() {}\n#[cfg(test)]\nmod early {\n    fn fixture() { let s = \"}\"; let c = '}'; \
+                 if true { } }\n}\nfn after() { facade.seed(x); }\n\
+                 #[cfg(test)]\nmod late {\n    fn fixture_two() {}\n}\nfn last() {}\n";
+    let part = shipped_part(early);
+    assert!(
+        part.contains("fn before()")
+            && part.contains("fn after()")
+            && part.contains("facade.seed")
+            && part.contains("fn last()")
+            && !part.contains("fixture"),
+        "{part}"
+    );
+    assert!(test_only("crates/host/src/tests.rs"));
+    assert!(test_only("src-tauri/src/daedalus/agent_tests.rs"));
+    assert!(!test_only("crates/host/src/pty.rs"));
+    // A name that merely looks like a test module is not one: only a
+    // `#[cfg(test)]` declaration makes a file test-only.
+    assert_eq!(
+        declared_test_modules(
+            "#[cfg(test)]\nmod a_tests;\nmod plain_tests;\n#[cfg(test)]\npub(crate) mod b;\n\
+             #[cfg(test)]\nmod inline { }\n#[cfg(test)]\nfn not_a_mod() {}\n"
+        ),
+        ["a_tests", "b"]
+    );
+    assert!(!test_only("src-tauri/src/not_declared_anywhere_tests.rs"));
+
+    // Declared *somewhere* is not declared *here*: a shipped `tests.rs` or
+    // `x_tests.rs` whose own directory's module declares no such test module is
+    // shipped code, however many other directories do declare one.
+    let declared: std::collections::HashSet<String> = [
+        module_files("src-tauri/src/sessions/mod.rs", "tests"),
+        module_files("src-tauri/src/server/supervisor.rs", "tests"),
+        module_files("crates/host/src/lib.rs", "tests"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for real in [
+        "src-tauri/src/sessions/tests.rs",
+        "src-tauri/src/server/supervisor/tests.rs",
+        "crates/host/src/tests.rs",
+    ] {
+        assert!(test_only_among(real, &declared), "{real}");
+    }
+    for planted in [
+        // A shipped file with the name, in a directory that declares no test module.
+        "src-tauri/src/terminal/tests.rs",
+        "src-tauri/src/terminal_tests.rs",
+        "src-tauri/src/server/tests.rs",
+        // Not named like a test module at all, even though its directory declares one.
+        "src-tauri/src/sessions/remote.rs",
+        // Declared by a sibling directory's module, not its own.
+        "crates/remote/src/tests.rs",
+    ] {
+        assert!(
+            !test_only_among(planted, &declared),
+            "{planted} was exempted from every scan"
+        );
+    }
+    assert_eq!(
+        module_files("src-tauri/src/server/supervisor.rs", "tests")[0],
+        "src-tauri/src/server/supervisor/tests.rs"
+    );
+    assert_eq!(
+        module_files("src-tauri/src/sessions/mod.rs", "tests")[0],
+        "src-tauri/src/sessions/tests.rs"
+    );
 }
 
 // ── COMPLIANCE.md § No credential handling ──────────────────────────────────
@@ -782,37 +1037,23 @@ fn every_host_allowlist_is_matched_by_a_parsed_host_not_a_string_prefix() {
 // ── COMPLIANCE.md § Inherited nested-session markers ────────────────────────
 
 /// COMPLIANCE.md, "Inherited nested-session markers": the strip is a property of
-/// *spawning a process behind a PTY*, not of one module, and santree does that
-/// in two places.
+/// *spawning a process behind a PTY*. clippy.toml confines that spawn
+/// (`portable_pty::CommandBuilder::new`) to `crates/pty`, whose own behavioural
+/// tests prove it strips; what a lint cannot see is a second *copy* of the list.
 ///
-/// `crates/pty` owns the list and its own behavioural tests. What no test could
-/// see from inside that crate is the second spawn site: `stream.rs` runs setup
-/// scripts and builds behind their own PTY, and for as long as it existed it
-/// handed them the launching Claude session's id — and, worse,
-/// `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN`, a live IPC
-/// channel and its bearer token.
-///
-/// Both halves are asserted. Every spawn site must strip, and the marker names
-/// must live in exactly one file: a site that copies the list instead of
-/// importing it passes the first check on the day it lands and drifts silently
-/// from then on, which is precisely how this leak survived its own fix.
+/// A site that copies the marker names instead of importing them passes on the
+/// day it lands and drifts silently from then on, which is precisely how the
+/// messaging-token leak survived its own fix.
 #[test]
-fn every_pty_spawn_site_strips_the_inherited_session_markers() {
+fn the_inherited_session_markers_are_listed_once() {
     const OWNER: &str = "crates/pty/src/lib.rs";
-
-    let mut sites = 0;
-    for (path, src) in rust_sources() {
-        if src.contains("CommandBuilder::new(") {
-            sites += 1;
-            assert!(
-                src.contains("strip_inherited_session_markers"),
-                "{path} spawns a process behind a PTY without stripping the inherited \
-                 session markers; it would hand on the launching session's identity and \
-                 its messaging token"
-            );
-        }
-        // The list itself, not a copy of it. Shipped code only: a test may
-        // legitimately name one marker to prove the caller's own value wins.
+    assert!(
+        shipped(OWNER).contains("strip_inherited_session_markers"),
+        "{OWNER} no longer strips the inherited session markers where it spawns"
+    );
+    for (path, _) in rust_sources() {
+        // Shipped code only: a test may legitimately name one marker to prove
+        // the caller's own value wins.
         let shipped = shipped(&path);
         for marker in santree_pty::INHERITED_SESSION_MARKERS {
             assert!(
@@ -822,124 +1063,227 @@ fn every_pty_spawn_site_strips_the_inherited_session_markers() {
             );
         }
     }
-    assert!(
-        sites >= 2,
-        "the scan found {sites} PTY spawn sites; it is looking in the wrong place"
-    );
 }
 
-// ── COMPLIANCE.md § No automated control loop ───────────────────────────────
+// ── COMPLIANCE.md § No output-parsing influences input ──────────────────────
 
-/// COMPLIANCE.md, "No automated control loop" and "Where this is enforced in
-/// code": the backend streams bytes and never inspects them to decide what to
-/// type. `terminal.rs` is the one adapter over the PTY, and its two input
-/// commands — `terminal_write` for the user's keystrokes, `terminal_seed` for
-/// the single human-initiated launch line — are the only way bytes go *in*.
+/// Every rule in clippy.toml, as the paths it names. Most of COMPLIANCE.md's
+/// terminal rules are held by the compiler: the input types in `terminal.rs`
+/// (`terminal::input`) and these lints. A lint is only as good as its being
+/// switched on, so this list is checked against the file.
+const LINTED: [&str; 13] = [
+    "santree_pty::PtyManager::write",
+    "santree_pty::PtyManager::open",
+    "portable_pty::CommandBuilder::new",
+    "santree_host::Host::pty_input",
+    "santree_remote_client::RemoteClient::pty_write",
+    "santree_lib::sessions::Terminals::open",
+    "santree_lib::sessions::Terminals::attach",
+    "santree_lib::sessions::Terminals::adopt",
+    "santree_lib::sessions::Terminals::close",
+    "santree_lib::sessions::RemoteTerminals::open",
+    "santree_lib::sessions::RemoteTerminals::attach",
+    "santree_lib::sessions::RemoteTerminals::adopt",
+    "santree_lib::sessions::RemoteTerminals::close",
+];
+
+/// Where clippy.toml's rules are switched off, and how many times. A new entry,
+/// or a higher count, is a new way for bytes to enter a terminal or a pane to be
+/// opened, and wants a reviewer.
+const SANCTIONED: [(&str, usize); 12] = [
+    // `write_pty`'s two relays aside, the adapter's commands: run panes'
+    // open and close, `open`, `terminal_close`, `attach`, `terminal_adopt`.
+    ("src-tauri/src/terminal.rs", 6 + 1),
+    // The facade's arms (`open`, `close`, `attach`, `adopt`) and its in-app
+    // write, which takes only a `PtyInput`.
+    ("src-tauri/src/sessions/backend.rs", 5),
+    // A pane's writer: the one `pty.write` the app sends.
+    ("src-tauri/src/sessions/remote.rs", 1),
+    // The protocol host: its input thread's write, the `pty.write` handler's
+    // `pty_input`, the `pty.open` handler's spawn.
+    ("crates/host/src/pty.rs", 3),
+    // The one `CommandBuilder::new`, plus the crate's tests.
+    ("crates/pty/src/lib.rs", 1 + 1),
+    // Test modules, which drive terminals directly.
+    ("src-tauri/src/sessions/tests.rs", 1),
+    ("src-tauri/src/server/supervisor/tests.rs", 1),
+    ("src-tauri/src/daedalus/terminal_tests.rs", 1),
+    ("src-tauri/src/daedalus/agent_tests.rs", 1),
+    ("crates/host/src/tests.rs", 1),
+    ("crates/remote/src/tests.rs", 1),
+    ("crates/server/tests/serve.rs", 1),
+];
+
+/// Every `.rs` file in the workspace's crates, tests and all, comment-stripped.
+fn workspace_rust() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect_rust(&repo_root().join("src-tauri/src"), &mut out);
+    for entry in std::fs::read_dir(repo_root().join("crates")).expect("crates/") {
+        collect_rust(&entry.expect("crate dir").path(), &mut out);
+    }
+    out.retain(|(path, _)| path != "src-tauri/src/compliance.rs" && !path.contains("/target/"));
+    out
+}
+
+/// COMPLIANCE.md, "No output-parsing influences input" and "The santree server
+/// is session persistence": the only bytes santree types are the user's
+/// keystrokes and the one launch line, through `terminal.rs`'s `write_pty`, and
+/// a host types only a `pty.write` request's bytes.
 ///
-/// Both reach the PTY through the module's one `write_pty` helper, so counting
-/// `manager.write(` alone would no longer notice a *third* command: it would
-/// call the helper and leave that count at one. The helper's own call sites are
-/// therefore counted too, and a new writer has to come here and say why.
+/// The compiler holds most of it. `Keystrokes` and `LaunchRequest` have no Rust
+/// constructor — they exist only as `terminal_write`'s and `terminal_seed`'s
+/// deserialized arguments — and every path into a pane takes one, or a
+/// `PtyInput` made from one: the facade, a remote pane's queue (so its output
+/// pump cannot answer the program), the in-app write. clippy.toml forbids the
+/// raw writes and spawns beneath them everywhere but their sanctioned sites.
 ///
-/// Breaking this is the line the whole document exists to hold: a second module
-/// with PTY-write access is a module that can answer the agent on the user's
-/// behalf, and santree stops being a terminal emulator.
-///
-/// The write check matches on the receiver name (`manager` / `pty`, the two
-/// bindings a `PtyManager` is ever held under), so a rename needs this test
-/// updated. The module allowlist above it is what actually bounds who could
-/// introduce a new write in the first place.
+/// A lint can be switched off by an attribute, so the attributes are what this
+/// counts, along with the switches that would turn the lint off wholesale and
+/// the CI step that runs it.
 #[test]
-fn only_the_terminal_adapter_writes_bytes_into_a_pty() {
-    // Modules that may name the PTY manager at all. A new entry here is a new
-    // module able to reach a live terminal, and wants a reviewer.
-    const MAY_HOLD_A_PTY: [&str; 7] = [
-        "src-tauri/src/terminal.rs",  // the adapter itself
-        "src-tauri/src/commands.rs",  // hands it to resource accounting
-        "src-tauri/src/lib.rs",       // registers it as managed state
-        "src-tauri/src/resources.rs", // sums each session's process tree
-        "src-tauri/src/update.rs",    // closes every session before restarting
-        // Tests only: proves a Daedalus terminal opens nothing on this Mac.
-        "src-tauri/src/daedalus/terminal_tests.rs",
-        // Tests only: the same, for a Daedalus project's agents.
-        "src-tauri/src/daedalus/agent_tests.rs",
-    ];
-    // `agent_procs.rs` deliberately does NOT appear above: it reads the process
-    // table, not the manager, and takes its pane roots as plain
-    // `(LiveTerminal, pid)` pairs — a term_key, the provider in that pane, and a
-    // pid — from `terminal::pane_roots`. Keeping it unable to name a PtyManager
-    // is what makes "observation only" structural rather than a promise.
-
-    for (path, src) in rust_sources() {
-        if path.starts_with("crates/pty/") {
-            continue;
-        }
-        if src.contains("PtyManager") {
-            assert!(
-                MAY_HOLD_A_PTY.contains(&path.as_str()),
-                "{path} reaches the PTY manager. Everything that talks to a terminal goes \
-                 through terminal.rs; add it here only with a reason."
-            );
-        }
-        for receiver in ["manager.write(", "pty.write("] {
-            assert!(
-                !src.contains(receiver) || path == "src-tauri/src/terminal.rs",
-                "{path} writes into a PTY. Only `terminal_write` may, and only with bytes \
-                 the human typed or the one seed they asked for."
-            );
-        }
-    }
-
-    let terminal = shipped("src-tauri/src/terminal.rs");
-    assert_eq!(
-        terminal.matches("manager.write(").count(),
-        1,
-        "terminal.rs should hold exactly one PTY write — the `write_pty` helper that \
-         `terminal_write` and `terminal_seed` both go through"
-    );
-    // One definition plus exactly two callers. A third is a third way for bytes
-    // to enter a terminal, which is the thing this whole test exists to notice.
-    assert_eq!(
-        terminal.matches("write_pty(").count(),
-        3,
-        "write_pty should have exactly two callers — `terminal_write` (the user's \
-         keystrokes) and `terminal_seed` (the one human-initiated launch line). A new \
-         one is a new way to answer the agent on the user's behalf: name it here, with \
-         a reason, or route it through one of the two."
-    );
-
-    // A terminal on Daedalus is the same PTY one hop further, so it gets the
-    // same rule: its bytes go in through `pty.write`, which only the pane's own
-    // writer in `daedalus/terminals.rs` sends, and that writer is fed only by
-    // `write_pty` above — the one `remote.write(` / `remote.seed(` pair.
-    const REMOTE: &str = "src-tauri/src/daedalus/terminals.rs";
-    for (path, _) in rust_sources() {
-        if path.ends_with("_tests.rs") {
-            continue;
-        }
-        let shipped = shipped(&path);
+fn the_lint_exceptions_are_exactly_the_sanctioned_sites() {
+    let config = read("clippy.toml");
+    for path in LINTED {
         assert!(
-            !shipped.contains(".pty_write(") || path == REMOTE,
-            "{path} writes into a PTY on Daedalus. Only a pane's writer in {REMOTE} may, \
-             fed by `write_pty`."
+            config.contains(&format!("path = \"{path}\"")),
+            "clippy.toml no longer forbids `{path}`"
         );
-        for call in [".terminals().write(", ".terminals().seed("] {
+    }
+    assert!(
+        read(".github/workflows/ci.yml")
+            .contains("cargo clippy --workspace --all-targets -- -D warnings"),
+        "CI no longer runs clippy over the whole workspace with warnings denied, \
+         which is what makes clippy.toml's rules hold"
+    );
+
+    let sources = workspace_rust();
+    assert!(
+        sources.len() > 60,
+        "only {} files found — the walk is looking in the wrong place",
+        sources.len()
+    );
+    for (path, src) in &sources {
+        // The old lint name (`disallowed_method`) still works, so the prefix
+        // counts both.
+        let found = src.matches("disallowed_method").count();
+        let allowed = SANCTIONED
+            .iter()
+            .find(|(file, _)| file == path)
+            .map_or(0, |(_, n)| *n);
+        assert_eq!(
+            found, allowed,
+            "{path} switches clippy.toml's rules off at {found} sites; {allowed} sanctioned. \
+             Bytes enter a terminal through `write_pty` alone, and a pane is opened, \
+             attached, adopted and closed by the adapter: name a new exception in \
+             SANCTIONED, with a reason, or route the call through the one that exists."
+        );
+        for blanket in ["clippy::all", "clippy::style", "(warnings)", "(warnings,"] {
             assert!(
-                !shipped.contains(call),
-                "{path} types into a Daedalus terminal around `write_pty`"
+                !src.contains(blanket),
+                "{path} names `{blanket}`, which would switch clippy.toml's rules off with \
+                 everything else"
             );
         }
     }
-    assert_eq!(
-        shipped(REMOTE).matches(".pty_write(").count(),
-        1,
-        "{REMOTE} should hold exactly one `pty.write` — its panes' writer"
+    for entry in std::fs::read_dir(repo_root().join("crates"))
+        .expect("crates/")
+        .map(|e| e.expect("crate dir").path().join("Cargo.toml"))
+        .chain([
+            repo_root().join("Cargo.toml"),
+            repo_root().join("src-tauri/Cargo.toml"),
+        ])
+        .filter(|p| p.exists())
+    {
+        for line in read_path(&entry).lines().map(str::trim) {
+            assert!(
+                !(line.contains("disallowed")
+                    || line.starts_with("style")
+                    || line.starts_with("all ")
+                    || line.starts_with("all=")),
+                "{} sets a clippy lint level that switches clippy.toml's rules off: {line}",
+                entry.display()
+            );
+        }
+    }
+}
+
+/// `pty.write` is a protocol method, so besides the client's `pty_write`
+/// (linted above) it can be sent as a raw typed call, `call::<m::PtyWrite>`.
+/// `call` is generic and has ten legitimate users, and linting the type would
+/// also flag its definition inside `santree-remote-proto`, a crate the Daedalus
+/// engine consumes; so the method's name is what is confined: the protocol
+/// crate that defines it, the client that sends it, the host that serves it.
+#[test]
+fn only_the_client_and_the_host_name_the_pty_write_method() {
+    for (path, src) in workspace_rust() {
+        let may = path.starts_with("crates/host/")
+            || path.starts_with("crates/remote-proto/")
+            || path == "crates/remote/src/client.rs";
+        assert!(
+            may || !(src.contains("PtyWrite") || src.contains("\"pty.write\"")),
+            "{path} names the `pty.write` method. Bytes reach a remote terminal through \
+             `RemoteClient::pty_write`, from a pane's writer alone."
+        );
+    }
+}
+
+/// Vendor environment variable names (or prefixes) the session environment
+/// builder must never mention.
+const VENDOR_VARIABLES: [&str; 6] = ["ANTHROPIC", "OPENAI", "GH_", "GITHUB_", "LINEAR", "CLAUDE_"];
+
+/// The vendor variables `src` names in code or in a string.
+fn vendor_variables(src: &str) -> Vec<&'static str> {
+    VENDOR_VARIABLES
+        .into_iter()
+        .filter(|v| src.contains(v))
+        .collect()
+}
+
+/// COMPLIANCE.md, "The santree server": `baseEnv` is a name-blind pass-through
+/// of the app's own environment minus a deny-list of santree's and the loader's
+/// prefixes and the nested-session markers — exactly what an in-app terminal
+/// inherits. The moment the builder names a vendor's variable it is selecting,
+/// reading or shaping an agent CLI's credentials, which COMPLIANCE.md forbids;
+/// the only vendor names it may touch are the markers it takes, by reference,
+/// from `santree-pty`.
+#[test]
+fn the_session_environment_builder_names_no_vendor_variable() {
+    let env = shipped("src-tauri/src/sessions/env.rs");
+    assert!(
+        env.contains("INHERITED_SESSION_MARKERS"),
+        "env.rs no longer takes the markers from santree-pty; the premise of this \
+         test (it names no vendor variable itself) needs rereading"
     );
     assert_eq!(
-        terminal.matches("remote.write(").count() + terminal.matches("remote.seed(").count(),
-        2,
-        "`write_pty` is the one caller of a remote pane's `write` and `seed`"
+        vendor_variables(&env),
+        Vec::<&str>::new(),
+        "sessions/env.rs names a vendor's environment variable: baseEnv is a name-blind \
+         pass-through, and resolve_env's secrets travel in `env` alone"
     );
+    // The server's own spawn environment is a fixed allowlist of the few names it
+    // needs; a vendor's variable there is a selection, and `supervisor.rs` builds
+    // the connection it is judged over.
+    for path in [
+        "src-tauri/src/server/spawn.rs",
+        "src-tauri/src/server/supervisor.rs",
+    ] {
+        assert_eq!(
+            vendor_variables(&shipped(path)),
+            Vec::<&str>::new(),
+            "{path} names a vendor's environment variable: the server starts with HOME, USER, \
+             LOGNAME, TMPDIR, LANG and a fixed PATH, and the app's baseEnv is a pass-through"
+        );
+    }
+    // The rule fires on the things it is for.
+    for planted in [
+        "if name == \"ANTHROPIC_API_KEY\" { keep }",
+        "name.starts_with(\"CLAUDE_\")",
+        "[\"GH_TOKEN\", \"GITHUB_TOKEN\"]",
+        "env.get(\"OPENAI_API_KEY\")",
+        "\"LINEAR_API_KEY\"",
+    ] {
+        assert!(!vendor_variables(planted).is_empty(), "missed {planted}");
+    }
 }
 
 // ── COMPLIANCE.md § Session-state hooks + status line ───────────────────────

@@ -1,42 +1,64 @@
 //! Run a long command in the background and stream its output to a read-only view.
 //!
-//! The shape every caller wants: kick off a build / setup script, watch it live,
-//! stop it, and keep the output afterwards — *without* handing the user an
-//! interactive shell. That's deliberately not [`crate::terminal`]: a PTY session
-//! there is a tab the user types into, whose lifetime is the tab's. Here the
-//! process is owned by this module, the view is read-only, and the frontend keeps
-//! the transcript after it exits.
+//! The shape every caller wants: kick off a setup script, watch it live, stop it,
+//! and keep the output afterwards — *without* handing the user an interactive
+//! shell. That's deliberately not a tab: a tab is a PTY the user types into,
+//! whose lifetime is the tab's. Here the process is a pane nobody types into, the
+//! view is read-only, and the frontend keeps the transcript after it exits.
+//!
+//! **The process is a terminal pane.** A run is opened through [`RunHost`] — the
+//! terminal adapter's handle on the same facade every terminal uses — so on a
+//! build with the local santree server its PTY lives *in the server* and outlives
+//! a quit, a crash or an update, exactly as an agent's does; without one it is an
+//! in-app PTY and ends with the app. This module never knows which (docs/server.md,
+//! "Setup runs"): no branch on the backend lives here, and a run writes nothing
+//! into its PTY.
+//!
+//! **A run outlives the app the way a pane does, and no further.** A run is a
+//! pane labelled `run:<key>#<id>` (unique per run, so a leftover process of an
+//! older run can never be mistaken for a new one) whose script ends by leaving
+//! its exit code in a status file — the host has no exit status to read
+//! (`pty.exitStatus` is not built), and the same wrapper does the job on the box
+//! for a Daedalus project. While this process follows it, a run has its Stop,
+//! its [`DEADLINE`] and its result. A run that is still going when the app quits
+//! keeps running on the local server and is not followed again: it is listed in
+//! Settings → Terminal, where it can be ended, and a new run of its key is
+//! refused while it lives (the caller asks [`RunHost::any_live`]).
 //!
 //! Output is streamed as raw PTY **chunks**, escape codes and all, so the view can
-//! render exactly what the tool printed (colours, progress redraws). Callers used to
-//! strip ANSI and split lines here; that threw away the colour a build's output is
-//! largely made of, and each caller had to reimplement `\r` handling.
-//!
-//! Why a PTY rather than pipes: nearly every build tool block-buffers its output and
-//! turns colour off when stdout isn't a TTY. Over a pipe `pnpm tauri build` looks
-//! frozen for minutes and arrives monochrome.
+//! render exactly what the tool printed (colours, progress redraws). Why a PTY
+//! rather than pipes: nearly every build tool block-buffers its output and turns
+//! colour off when stdout isn't a TTY.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use anyhow::Result;
+use futures::future::BoxFuture;
 use serde::Serialize;
 use specta::Type;
-use tauri::ipc::Channel;
+use tokio::sync::{mpsc, watch};
+
+use crate::sessions::{PaneId, PaneLink, Sinks};
 
 /// A backstop against a command that will *never* finish (waiting on stdin nobody
 /// can answer, a wedged network mount) — not a performance budget. Stop is the
 /// normal way out. Generous: a cold `cargo build --release` is genuinely slow.
 ///
+/// It is the app that enforces it, from when this process started the run: a
+/// run still going when the app quits has none after that (it is ended from
+/// Settings → Terminal). A timer in the server would need a protocol feature and
+/// a server revision for a backstop. Shared with the Daedalus runs
+/// (`daedalus::setup`).
+///
 /// It is also, unavoidably, how long a *wedged* run looks like a hang: an hour
 /// reads as "forever" to anyone watching. See [`pty_guard`] for the test-side
 /// consequence.
 #[cfg(not(test))]
-const DEADLINE: Duration = Duration::from_secs(60 * 60);
+pub(crate) const DEADLINE: Duration = Duration::from_secs(60 * 60);
 
 /// Under test the backstop is seconds, not an hour.
 ///
@@ -48,7 +70,7 @@ const DEADLINE: Duration = Duration::from_secs(60 * 60);
 /// backstop load-bearing, so the two constants belong together: a wedge now costs
 /// half a minute and names itself.
 #[cfg(test)]
-const DEADLINE: Duration = Duration::from_secs(30);
+pub(crate) const DEADLINE: Duration = Duration::from_secs(30);
 
 /// Serializes every test in this crate that allocates a real PTY.
 ///
@@ -60,9 +82,8 @@ const DEADLINE: Duration = Duration::from_secs(30);
 /// the second population of PTY allocators in the workspace and had no guard.
 ///
 /// The symptom is load-dependent and does not reproduce on an idle machine, which
-/// is what makes it expensive to diagnose twice: under contention a setup run can
-/// park in its read loop, and nothing frees it until [`DEADLINE`] — an hour later.
-/// So this bounds how many of these can be in flight at once. The hang it prevents
+/// is what makes it expensive to diagnose twice. So this bounds how many of these
+/// can be in flight at once. The hang it prevents
 /// is contention, not a deadlock — but the guard could introduce a real one, which
 /// is why it is async:
 ///
@@ -77,19 +98,8 @@ pub(crate) async fn pty_guard() -> tokio::sync::MutexGuard<'static, ()> {
     SERIAL.lock().await
 }
 
-/// The one lock behind both guards. Two statics would serialize each population
-/// against itself and neither against the other, which is no guard at all.
 #[cfg(test)]
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// [`pty_guard`] for the plain `#[test]` fns in this module, which allocate the
-/// same PTYs from no runtime at all. `blocking_lock` panics if called *inside* a
-/// runtime, which is precisely the misuse it should catch: an async test reaching
-/// for this instead of awaiting the guard above.
-#[cfg(test)]
-pub(crate) fn pty_guard_blocking() -> tokio::sync::MutexGuard<'static, ()> {
-    SERIAL.blocking_lock()
-}
 
 /// The grid a run *starts* on, before any pane has reported its width — a run can be
 /// kicked off with its pane hidden or not yet mounted, so there's nothing to measure
@@ -98,6 +108,25 @@ pub(crate) fn pty_guard_blocking() -> tokio::sync::MutexGuard<'static, ()> {
 /// closed tab still reads correctly.
 pub const COLS: u16 = 120;
 pub const ROWS: u16 = 40;
+
+/// What a run's PTY is labelled with: the prefix that keeps a run apart from
+/// every terminal tab, investigation and review (`tree:`, `triage:`, `ai-review:`,
+/// `login:`). Nothing else may open a pane under it, and a page adopting what an
+/// earlier page left running is never handed one (see [`is_run_label`]).
+pub const LABEL_PREFIX: &str = "run:";
+
+/// The label of the run `run_id` of `key`: unique per run on purpose. A stable
+/// label per key would let a new run's open *claim* a leftover live process of a
+/// stopped one (the facade hands an address's session to whoever asks for it) and
+/// follow a script that is not its own.
+pub fn run_label(key: &str, run_id: &str) -> String {
+    format!("{LABEL_PREFIX}{key}#{run_id}")
+}
+
+/// Whether a pane's label names a run rather than a terminal.
+pub fn is_run_label(label: &str) -> bool {
+    label.starts_with(LABEL_PREFIX)
+}
 
 /// A streamed run event. `Chunk` is raw PTY output — arbitrary bytes as they
 /// arrive, *not* line-aligned and with escape sequences intact; the view feeds it
@@ -109,27 +138,119 @@ pub enum StreamEvent {
     Done { ok: bool },
 }
 
+/// Where a run's output goes: whole UTF-8, as it arrives.
+pub type Text = Arc<dyn Fn(String) + Send + Sync>;
+
+/// What a run is started with.
+#[derive(Clone)]
+pub struct Launch {
+    /// The pane's label ([`run_label`]).
+    pub label: String,
+    /// The directory it runs in, on this Mac.
+    pub cwd: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// Where the script's exit code is left ([`WRAPPER`]).
+    pub status: String,
+}
+
+/// The env by name only: its values are the project's environment, which can
+/// hold secrets, and a launch ends up in the log.
+impl std::fmt::Debug for Launch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Launch")
+            .field("label", &self.label)
+            .field("cwd", &self.cwd)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &self.env.iter().map(|(k, _)| k).collect::<Vec<_>>())
+            .field("status", &self.status)
+            .finish()
+    }
+}
+
+/// What the PTY runs: the script as `$0`, its status file as `$1`. The status
+/// is written only when the script ends on its own; a killed run leaves none,
+/// which reads as a failure. The Daedalus runs use the same one.
+pub(crate) const WRAPPER: &str = r#""$0"; s=$?; printf '%s' "$s" > "$1"; exit "$s""#;
+
+impl Launch {
+    /// `script` run to completion under a login shell, its exit code left in
+    /// `status`. A command *line* under `bash -lc` rather than the script
+    /// alone: these are developer scripts that want the login shell's PATH —
+    /// `pnpm` from a version manager, `cargo` from rustup, whatever direnv/nix
+    /// put there. Nothing here is IPC-supplied; every caller builds its own
+    /// literal.
+    ///
+    /// `env` is the project's environment and santree's own variables; the
+    /// colour-capable `TERM` goes last — this is why we bothered with a PTY.
+    /// Deliberately *not* `COLUMNS`: it's a snapshot taken at spawn, and a
+    /// `SIGWINCH` can't update it. A tool that prefers the env var over the tty's
+    /// own size would stay pinned to the starting grid for the whole run, which
+    /// is exactly the behaviour [`Runs::resize`] exists to remove.
+    pub fn script(
+        label: String,
+        cwd: &Path,
+        script: &Path,
+        status: &str,
+        mut env: Vec<(String, String)>,
+    ) -> Self {
+        env.push(("TERM".into(), "xterm-256color".into()));
+        Self {
+            label,
+            cwd: cwd.to_string_lossy().into_owned(),
+            command: "/bin/bash".into(),
+            args: vec![
+                "-lc".into(),
+                WRAPPER.into(),
+                script.to_string_lossy().into_owned(),
+                status.to_string(),
+            ],
+            env,
+            status: status.to_string(),
+        }
+    }
+}
+
+/// The terminals a run is a pane of. Implemented by the terminal adapter over the
+/// facade (`terminal::TerminalRuns`); defined here so this module — which must
+/// not name the facade — and its tests need no real one.
+pub trait RunHost: Send + Sync {
+    /// Start `launch` as a pane on this Mac. Its output, and an empty chunk when
+    /// it exits, go to `sinks`.
+    fn open(&self, launch: Launch, size: (u16, u16), sinks: Sinks)
+        -> BoxFuture<'_, Result<PaneId>>;
+
+    /// Whether a pane whose label starts with `prefix` has a live process:
+    /// `None` when the host can't say in full (`Liveness::knows`).
+    fn any_live(&self, prefix: &str) -> BoxFuture<'_, Option<bool>>;
+
+    /// End the pane's process, as soon as its host can be told.
+    fn close(&self, pane: PaneId);
+
+    /// Re-grid the pane's PTY; whether there was a pane to re-grid.
+    fn resize(&self, pane: PaneId, cols: u16, rows: u16) -> bool;
+}
+
 /// The commands running right now, keyed by an opaque caller-chosen string (setup
-/// keys by repo+issue, the dev build by checkout path). A process-wide singleton
-/// rather than Tauri state, because the blocking reader thread outlives any borrow.
+/// keys by repo+issue). A process-wide singleton rather than Tauri state, because
+/// a run's task outlives any borrow.
 ///
-/// Without this registry nothing can see the child: quitting mid-run orphans the
-/// command and everything it spawned, a hung run pins a blocking-pool thread with no
-/// way to recover, and the view sits at "running" forever.
+/// This is the exclusivity within this process: one run per key, claimed before
+/// anything is started.
 pub static RUNS: LazyLock<Runs> = LazyLock::new(Runs::default);
 
-/// One registered run. The child is spawned on the blocking pool a moment *after*
-/// the slot is claimed, so the killer arrives late — but the `id` names the run for
-/// its whole life, which is what keeps a finished run from evicting the entry of a
-/// newer one started under the same key.
+/// One registered run. The pane exists a moment *after* the slot is claimed, but
+/// the `id` names the run for its whole life, which is what keeps a finished run
+/// from evicting the entry of a newer one started under the same key.
 struct Run {
     id: u64,
-    killer: Option<Box<dyn ChildKiller + Send + Sync>>,
-    /// The PTY master, kept so the grid can follow the pane showing it. Resizing it
-    /// is what makes the *running* tool re-wrap: it's a `TIOCSWINSZ` plus a
-    /// `SIGWINCH`, which cargo/vite re-read exactly as they would in a real terminal
-    /// being dragged wider.
-    master: Option<Box<dyn MasterPty + Send>>,
+    /// The pane and the host that can end or re-grid it, once it exists.
+    pane: Option<(Arc<dyn RunHost>, PaneId)>,
+    /// Flipped to `true` when the run is stopped, so a task parked on something
+    /// else (an open that hasn't returned) learns of it.
+    stop: watch::Sender<bool>,
 }
 
 /// A claimed "something is running under this key" slot, held for one run's lifetime.
@@ -137,18 +258,49 @@ struct Run {
 /// Claiming is the check *and* the insert under a single lock: a `contains`-then-
 /// `insert` split let two calls both get past the guard and stack two processes over
 /// the same directory. Dropping the guard frees the slot on every path out of a run —
-/// a failed PTY alloc, an early return, a panic on the blocking pool — so a slot
-/// can't leak and wedge the view at "already running" forever.
-pub struct Slot<'a> {
-    /// The registry to release back into. Borrowed rather than assumed to be the
+/// a failed open, an early return, a panic — so a slot can't leak and wedge the view
+/// at "already running" forever.
+pub struct Slot {
+    /// The registry to release back into. Held rather than assumed to be the
     /// [`RUNS`] singleton so the registry's exclusion and identity rules can be
     /// tested against a private instance instead of process-wide shared state.
-    runs: &'a Runs,
+    runs: Arc<Registry>,
     key: String,
     id: u64,
+    stop: watch::Receiver<bool>,
 }
 
-impl Drop for Slot<'_> {
+impl Slot {
+    /// Hand the run's pane to its slot. `false` when the slot is already gone —
+    /// a Stop (or a removal) landed between the reserve and the open — and the
+    /// caller must then end the pane it just started, since nothing else holds a
+    /// handle on it.
+    fn attach(&self, host: &Arc<dyn RunHost>, pane: PaneId) -> bool {
+        let mut runs = self.runs.lock();
+        match runs.get_mut(&self.key) {
+            Some(run) if run.id == self.id => {
+                run.pane = Some((host.clone(), pane));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attach_for_test(&self, host: &Arc<dyn RunHost>, pane: PaneId) -> bool {
+        self.attach(host, pane)
+    }
+
+    /// Resolves when the run is stopped; never when it simply ends.
+    async fn stopped(&self) {
+        let mut stop = self.stop.clone();
+        if stop.wait_for(|stopped| *stopped).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+impl Drop for Slot {
     fn drop(&mut self) {
         self.runs.release(self);
     }
@@ -156,63 +308,71 @@ impl Drop for Slot<'_> {
 
 #[derive(Default)]
 pub struct Runs {
+    registry: Arc<Registry>,
+}
+
+#[derive(Default)]
+struct Registry {
     runs: Mutex<HashMap<String, Run>>,
     next_id: AtomicU64,
 }
 
-impl Runs {
+impl Registry {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Run>> {
         self.runs.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Free a finished run's slot — but only when it's still *that* run's. A cancel
+    /// followed by a re-run puts a newer run under the same key, and an identity-less
+    /// remove would evict it: its process would then be unkillable.
+    fn release(&self, slot: &Slot) {
+        let mut runs = self.lock();
+        if runs.get(&slot.key).is_some_and(|run| run.id == slot.id) {
+            runs.remove(&slot.key);
+        }
+    }
+}
+
+impl Runs {
     /// Claim the slot for `key`, or `None` when something is already running under
     /// it — re-running would stack a second process over the same directory.
-    pub fn reserve(&self, key: &str) -> Option<Slot<'_>> {
-        let mut runs = self.lock();
+    pub fn reserve(&self, key: &str) -> Option<Slot> {
+        let mut runs = self.registry.lock();
         if runs.contains_key(key) {
             return None;
         }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.registry.next_id.fetch_add(1, Ordering::Relaxed);
+        let (stop, stopped) = watch::channel(false);
         runs.insert(
             key.to_string(),
             Run {
                 id,
-                killer: None,
-                master: None,
+                pane: None,
+                stop,
             },
         );
         Some(Slot {
-            runs: self,
+            runs: self.registry.clone(),
             key: key.to_string(),
             id,
+            stop: stopped,
         })
+    }
+
+    /// Whether `pane` is some run's. A run's pane is the app's own: no page may
+    /// attach, detach, write to or re-grid it, which would take its output from
+    /// the task following it.
+    pub fn owns(&self, pane: PaneId) -> bool {
+        self.registry
+            .lock()
+            .values()
+            .any(|run| run.pane.as_ref().is_some_and(|(_, id)| *id == pane))
     }
 
     /// Whether a run is currently registered under `key`.
     #[cfg(test)]
     pub fn is_running(&self, key: &str) -> bool {
-        self.lock().contains_key(key)
-    }
-
-    /// Hand the spawned child's killer to its slot. `false` when the slot is already
-    /// gone — a Stop (or an app quit) landed between the reserve and the spawn — and
-    /// the caller must then kill the child it just started, since nothing else holds
-    /// a handle on it.
-    fn attach(
-        &self,
-        slot: &Slot<'_>,
-        killer: Box<dyn ChildKiller + Send + Sync>,
-        master: Box<dyn MasterPty + Send>,
-    ) -> bool {
-        let mut runs = self.lock();
-        match runs.get_mut(&slot.key) {
-            Some(run) if run.id == slot.id => {
-                run.killer = Some(killer);
-                run.master = Some(master);
-                true
-            }
-            _ => false,
-        }
+        self.registry.lock().contains_key(key)
     }
 
     /// Re-grid a running command's PTY to match the pane showing it.
@@ -226,217 +386,196 @@ impl Runs {
     /// `false` when no run is registered under `key` — the pane outlives the run, so
     /// a resize after a build finishes is expected, not an error.
     pub fn resize(&self, key: &str, cols: u16, rows: u16) -> bool {
-        let runs = self.lock();
-        let Some(master) = runs.get(key).and_then(|run| run.master.as_ref()) else {
+        let target = self
+            .registry
+            .lock()
+            .get(key)
+            .and_then(|run| run.pane.clone());
+        let Some((host, pane)) = target else {
             return false;
         };
         // A zero dimension is a degenerate grid some tools divide by; the pane can
         // briefly measure one while it's laying out.
-        master
-            .resize(PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .is_ok()
+        host.resize(pane, cols.max(1), rows.max(1))
     }
 
-    /// Free a finished run's slot — but only when it's still *that* run's. A cancel
-    /// followed by a re-run puts a newer run under the same key, and an identity-less
-    /// remove would evict it: its process would then be unkillable (neither Stop nor
-    /// `kill_all` on quit could see it).
-    fn release(&self, slot: &Slot<'_>) {
-        let mut runs = self.lock();
-        if runs.get(&slot.key).is_some_and(|run| run.id == slot.id) {
-            runs.remove(&slot.key);
-        }
-    }
-
-    /// Kill one running command. The read loop then hits EOF and the run finishes
-    /// normally (as a failure), so the view leaves "running" on its own. A run
-    /// cancelled before its child exists is stopped by the slot's absence: its
-    /// `attach` fails and the spawner kills the child immediately.
+    /// Stop one running command. Its pane is closed and the run finishes as a
+    /// failure, so the view leaves "running" on its own.
+    ///
+    /// A run that has no pane *yet* (still starting) keeps its slot: its
+    /// process may be about to exist, and freeing the key would let a second
+    /// script start over it. It is only flagged stopped, and the task starting
+    /// it closes the pane the moment it has one, then frees the key.
     pub fn cancel(&self, key: &str) -> bool {
-        let mut runs = self.lock();
-        match runs.remove(key) {
-            Some(run) => {
-                if let Some(mut killer) = run.killer {
-                    let _ = killer.kill();
+        let mut runs = self.registry.lock();
+        let Some(run) = runs.get(key) else {
+            return false;
+        };
+        run.stop.send_replace(true);
+        if run.pane.is_none() {
+            return true;
+        }
+        let run = runs.remove(key);
+        drop(runs);
+        if let Some((host, pane)) = run.and_then(|run| run.pane) {
+            host.close(pane);
+        }
+        true
+    }
+}
+
+/// What the run's pane tells the task following it.
+enum Signal {
+    /// The process exited (the empty chunk).
+    Exit,
+    Link(PaneLink),
+}
+
+/// The sinks of a run's pane: output to `on_text` as whole UTF-8, and the pane's
+/// own news to `signals`.
+///
+/// `carry` holds a trailing partial UTF-8 sequence: a read can split a multi-byte
+/// character (and does, on the box-drawing and emoji build tools print), and
+/// decoding each read independently would emit a replacement char for each half.
+///
+/// These run inside the pane's own lock, so they only forward: no await, no
+/// call back into the terminals.
+fn sinks(on_text: Text, signals: mpsc::UnboundedSender<Signal>) -> Sinks {
+    let carry = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let output = {
+        let (on_text, signals) = (on_text, signals.clone());
+        Arc::new(move |bytes: Vec<u8>| {
+            let mut carry = carry.lock().unwrap_or_else(|e| e.into_inner());
+            if bytes.is_empty() {
+                if !carry.is_empty() {
+                    // EOF with an incomplete sequence still pending — emit it
+                    // lossily rather than dropping the tail of the output.
+                    on_text(String::from_utf8_lossy(&carry).into_owned());
+                    carry.clear();
                 }
-                true
+                let _ = signals.send(Signal::Exit);
+                return;
             }
-            None => false,
-        }
-    }
-
-    /// Kill every running command — called on app exit, beside `PtyManager::close_all`,
-    /// so a quit mid-run doesn't leave a build and its children running headless.
-    pub fn kill_all(&self) {
-        let mut runs = self.lock();
-        for (_, run) in runs.drain() {
-            if let Some(mut killer) = run.killer {
-                let _ = killer.kill();
+            carry.extend_from_slice(&bytes);
+            let text = take_utf8(&mut carry);
+            if !text.is_empty() {
+                on_text(text);
             }
-        }
-    }
+        })
+    };
+    let link = Arc::new(move |link: PaneLink| {
+        let _ = signals.send(Signal::Link(link));
+    });
+    Sinks { output, link }
 }
 
-/// What to run: a shell command line, its working directory, and extra environment.
-///
-/// A command *line* (run via `bash -lc`) rather than an argv: these are developer
-/// commands that want the login shell's PATH — `pnpm` from a version manager,
-/// `cargo` from rustup, whatever direnv/nix put there. Nothing here is
-/// IPC-supplied; every caller in this app builds its own literal.
-pub struct Spec<'a> {
-    pub command: String,
-    pub cwd: &'a Path,
-    pub env: Vec<(String, String)>,
+/// The exit code a finished run left in its status file. `None` when there is
+/// none — the run was stopped or killed, hasn't ended, or the write is mid-flight.
+async fn read_status(path: &str) -> Option<i32> {
+    tokio::fs::read_to_string(path)
+        .await
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
-/// The command a run spawns behind its PTY.
-///
-/// This is santree's *second* PTY spawn site — `crates/pty` owns the first — and
-/// so it carries the same obligation: `CommandBuilder::new` copies santree's own
-/// ambient environment, which includes whatever agent session launched santree.
-/// [`santree_pty::strip_inherited_session_markers`] drops those markers here for
-/// exactly the reason it drops them there (see COMPLIANCE.md, "Inherited
-/// nested-session markers"): a setup script or build that inherits
-/// `CLAUDE_CODE_CHILD_SESSION` runs as somebody's nested session, and the two
-/// messaging markers are a live IPC socket and its bearer token. The list is
-/// imported, never copied — a local copy is how the two sites drift.
-///
-/// The strip goes before `spec.env`, so a caller that deliberately sets one of
-/// those names still wins, the same ordering `crates/pty` uses for the user's
-/// own Settings → Environment.
-fn build_command(spec: &Spec<'_>) -> CommandBuilder {
-    // `-l` so the command sees the login shell's PATH (nvm/rustup/nix shims), which
-    // a bare non-interactive shell doesn't get — `pnpm: command not found` otherwise.
-    let mut cmd = CommandBuilder::new("/bin/bash");
-    cmd.args(["-lc", &spec.command]);
-    cmd.cwd(spec.cwd);
-    santree_pty::strip_inherited_session_markers(&mut cmd);
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
-    }
-    // Claim a colour-capable terminal — this is why we bothered with a PTY.
-    cmd.env("TERM", "xterm-256color");
-    // Deliberately *not* setting COLUMNS: it's a snapshot taken at spawn, and a
-    // `SIGWINCH` can't update it. A tool that prefers the env var over the tty's own
-    // size would stay pinned to the starting grid for the whole run, which is exactly
-    // the behaviour [`Runs::resize`] exists to remove. With a real PTY on stdout,
-    // cargo/vite/tsc all ask the kernel instead, and get the live answer.
-    cmd
-}
-
-/// Run `spec` under a PTY, streaming its output to `ev`, and report whether it
-/// exited successfully. Blocking — call it from `spawn_blocking`. The slot must
-/// already be claimed (see [`Runs::reserve`]); it's released when this returns.
-pub fn run(spec: Spec<'_>, slot: Slot<'_>, ev: &Channel<StreamEvent>) -> bool {
-    let pair = match native_pty_system().openpty(PtySize {
-        rows: ROWS,
-        cols: COLS,
-        pixel_width: 0,
-        pixel_height: 0,
-    }) {
-        Ok(p) => p,
+/// Start `launch` and follow it to its end; whether the script exited 0. The
+/// slot must already be claimed ([`Runs::reserve`]); it's released when this
+/// returns.
+pub async fn start(host: &Arc<dyn RunHost>, slot: Slot, launch: Launch, on_text: Text) -> bool {
+    let status = launch.status.clone();
+    let (tx, signals) = mpsc::unbounded_channel();
+    let pane = match host
+        .open(launch, (COLS, ROWS), sinks(on_text.clone(), tx))
+        .await
+    {
+        Ok(pane) => pane,
         Err(e) => {
-            send_text(ev, &format!("failed to allocate pty: {e}\r\n"));
+            on_text(format!("failed to start: {e:#}\r\n"));
             return false;
         }
     };
-
-    let cmd = build_command(&spec);
-
-    let mut child = match pair.slave.spawn_command(cmd) {
-        Ok(c) => c,
-        Err(e) => {
-            send_text(ev, &format!("failed to start: {e}\r\n"));
-            return false;
-        }
-    };
-    // Drop the slave so the master reader hits EOF once the command *and* its
-    // children (which inherit the slave) exit — otherwise the read loop hangs.
-    drop(pair.slave);
-
-    let mut reader = match pair.master.try_clone_reader() {
-        Ok(r) => r,
-        Err(e) => {
-            send_text(ev, &format!("failed to read output: {e}\r\n"));
-            let _ = child.kill();
-            // Reap it too. `kill` only signals; without the `wait` the child stays
-            // a zombie holding a process-table slot for the life of the app, and
-            // this path fires exactly when the machine is already short of the
-            // resources that would cause it. The sibling failure path below
-            // (`attach`) already does both — this one had drifted.
-            let _ = child.wait();
-            return false;
-        }
-    };
-
-    // A Stop (or an app quit) can land between claiming the slot and getting here —
-    // the registry then holds nothing that could kill this child, so stop it ourselves.
-    // The master goes in beside the killer so a pane can re-grid the run (see
-    // [`Runs::resize`]); the reader was already cloned off it above.
-    if !slot.runs.attach(&slot, child.clone_killer(), pair.master) {
-        let _ = child.kill();
-        let _ = child.wait();
+    // A Stop can land between claiming the slot and getting here — the registry
+    // then holds nothing that could end this pane, so end it ourselves.
+    if !slot.attach(host, pane) {
+        host.close(pane);
         return false;
     }
-
-    // Backstop for a command that never finishes at all. Killing the child closes the
-    // last handle on the slave, which is what unblocks the read loop below —
-    // `reader.read` has no timeout of its own. The watchdog parks on a channel it
-    // never receives from, so it wakes the moment this function returns (dropping
-    // `done`) rather than sleeping out the full deadline after a fast run. It kills
-    // only the child it holds a killer for; the registry entry is the slot's to free.
-    let (done, finished) = std::sync::mpsc::channel::<()>();
-    {
-        let mut killer = child.clone_killer();
-        let key = slot.key.clone();
-        std::thread::spawn(move || {
-            if finished.recv_timeout(DEADLINE) != Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-                return; // the run finished on its own
-            }
-            log::warn!("run {key} exceeded {}s — killing it", DEADLINE.as_secs());
-            let _ = killer.kill();
-        });
+    match follow(host, &slot, pane, signals, &status, &on_text).await {
+        Some(ok) => ok,
+        // The pane stopped reporting without an exit: it was closed from
+        // elsewhere (Settings → Terminal). Whatever the script left is the
+        // answer; a process still alive would refuse the next run of the key
+        // (`RunHost::any_live`), so freeing the slot here is safe.
+        None => read_status(&status).await == Some(0),
     }
+}
 
-    // Forward raw bytes as they arrive. `carry` holds a trailing partial UTF-8
-    // sequence: a read can split a multi-byte character (and does, on the box-drawing
-    // and emoji build tools print), and decoding each read independently would emit a
-    // replacement char for each half.
-    let mut buf = [0u8; 8192];
-    let mut carry: Vec<u8> = Vec::new();
+/// Follow an attached pane until its process is over: `Some(true)` when the
+/// script exited 0, `Some(false)` when it didn't, `None` when the pane stopped
+/// reporting without ending — that is not an exit, and the caller decides.
+///
+/// Neither a dropped link nor a slow host ends a run: the pane re-attaches from
+/// its anchor on its own (nothing is lost), and what is concluded is only ever
+/// what the process did — its exit, the host that held it being gone, a Stop, or
+/// the [`DEADLINE`]. A Stop is looked at first, so it wins a race with an exit.
+async fn follow(
+    host: &Arc<dyn RunHost>,
+    slot: &Slot,
+    pane: PaneId,
+    mut signals: mpsc::UnboundedReceiver<Signal>,
+    status: &str,
+    on_text: &Text,
+) -> Option<bool> {
+    let timer = tokio::time::sleep(DEADLINE);
+    tokio::pin!(timer);
+    let mut link = PaneLink::Live;
+    let mut expired = false;
     loop {
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                carry.extend_from_slice(&buf[..n]);
-                let text = take_utf8(&mut carry);
-                if !text.is_empty() {
-                    let _ = ev.send(StreamEvent::Chunk { text });
+        tokio::select! {
+            biased;
+            () = slot.stopped() => {
+                // Idempotent when the Stop already closed it (and the only close
+                // there is when the pane was found after the Stop).
+                host.close(pane);
+                return Some(false);
+            }
+            signal = signals.recv() => match signal {
+                Some(Signal::Link(PaneLink::Lost)) => {
+                    // The host that held it is gone, and the process with it.
+                    let code = read_status(status).await;
+                    if code.is_none() {
+                        on_text("\r\nThe santree server this run was on is gone; the run ended with it.\r\n".into());
+                    }
+                    return Some(code == Some(0));
+                }
+                // It exited: the code, if the script got that far, is the answer.
+                Some(Signal::Exit) => return Some(read_status(status).await == Some(0)),
+                // Every sink of the pane is gone with nothing said: a page took
+                // it, or it was closed from elsewhere.
+                None => return None,
+                Some(Signal::Link(now)) => {
+                    link = now;
+                    if expired && link == PaneLink::Live {
+                        host.close(pane);
+                        return Some(read_status(status).await == Some(0));
+                    }
+                }
+            },
+            () = &mut timer, if !expired => {
+                expired = true;
+                log::warn!("setup run exceeded {}s — stopping it", DEADLINE.as_secs());
+                // Ending it is a message to the host: with the link down it
+                // cannot be sent, so wait for the link rather than conclude.
+                if link == PaneLink::Live {
+                    host.close(pane);
+                    // It may have finished in the same breath.
+                    return Some(read_status(status).await == Some(0));
                 }
             }
         }
     }
-    if !carry.is_empty() {
-        // EOF with an incomplete sequence still pending — emit it lossily rather
-        // than dropping the tail of the output.
-        send_text(ev, &String::from_utf8_lossy(&carry));
-    }
-
-    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
-    drop(slot); // free the registry entry — but only if it's still this run's
-    drop(done); // wake the watchdog so it doesn't outlive the run
-    ok
-}
-
-fn send_text(ev: &Channel<StreamEvent>, text: &str) {
-    let _ = ev.send(StreamEvent::Chunk {
-        text: text.to_string(),
-    });
 }
 
 /// Split off everything in `buf` that forms complete UTF-8, leaving a trailing
@@ -466,96 +605,91 @@ pub(crate) fn take_utf8(buf: &mut Vec<u8>) -> String {
     }
 }
 
+/// A scripted [`RunHost`] for tests of the runs and of what settles them.
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A host that does what a test tells it to: it answers `any_live` with a
+    /// scripted answer, keeps the sinks it was given (so a test can play the
+    /// pane's output, link and exit) and records what it was asked to close
+    /// and re-grid.
+    pub(crate) struct FakeHost {
+        pub live: Mutex<Option<bool>>,
+        pub sinks: Mutex<Option<Sinks>>,
+        pub closed: Mutex<Vec<PaneId>>,
+        pub resized: Mutex<Vec<(PaneId, u16, u16)>>,
+        pub opened: AtomicUsize,
+    }
+
+    /// The pane id every open of a [`FakeHost`] answers.
+    pub(crate) const PANE: PaneId = 3;
+
+    impl FakeHost {
+        pub fn new() -> Arc<Self> {
+            Arc::new(Self {
+                live: Mutex::new(Some(false)),
+                sinks: Mutex::new(None),
+                closed: Mutex::default(),
+                resized: Mutex::default(),
+                opened: AtomicUsize::new(0),
+            })
+        }
+
+        /// What `any_live` answers from now on.
+        pub fn set_live(&self, live: Option<bool>) {
+            *self.live.lock().unwrap() = live;
+        }
+
+        /// The pane's side of its sinks, once something attached.
+        pub fn pane(&self) -> Sinks {
+            self.sinks.lock().unwrap().clone().expect("a pane attached")
+        }
+
+        pub fn closed(&self) -> Vec<PaneId> {
+            self.closed.lock().unwrap().clone()
+        }
+
+        /// Wait until a run has opened its pane here.
+        pub async fn attached(&self) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.sinks.lock().unwrap().is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the run opened its pane");
+        }
+    }
+
+    impl RunHost for FakeHost {
+        fn open(&self, _: Launch, _: (u16, u16), sinks: Sinks) -> BoxFuture<'_, Result<PaneId>> {
+            self.opened.fetch_add(1, Ordering::SeqCst);
+            *self.sinks.lock().unwrap() = Some(sinks);
+            Box::pin(async { Ok(PANE) })
+        }
+
+        fn any_live(&self, _: &str) -> BoxFuture<'_, Option<bool>> {
+            let answer = *self.live.lock().unwrap();
+            Box::pin(async move { answer })
+        }
+
+        fn close(&self, pane: PaneId) {
+            self.closed.lock().unwrap().push(pane);
+        }
+
+        fn resize(&self, pane: PaneId, cols: u16, rows: u16) -> bool {
+            self.resized.lock().unwrap().push((pane, cols, rows));
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::fake::FakeHost;
     use super::*;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-
-    /// Stands in for a spawned child, recording that it was killed — the registry's
-    /// rules are about *which* killer gets called and when, which is testable
-    /// without any of `run`'s process machinery.
-    #[derive(Debug, Clone, Default)]
-    struct FakeKiller(Arc<AtomicBool>);
-
-    impl FakeKiller {
-        fn killed(&self) -> bool {
-            self.0.load(Ordering::SeqCst)
-        }
-        fn boxed(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            Box::new(self.clone())
-        }
-    }
-
-    impl ChildKiller for FakeKiller {
-        fn kill(&mut self) -> std::io::Result<()> {
-            self.0.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            self.boxed()
-        }
-    }
-
-    /// COMPLIANCE.md, "Inherited nested-session markers", at the spawn site that
-    /// is *not* `crates/pty`.
-    ///
-    /// A background run is a real process behind a real PTY, and it inherits
-    /// santree's ambient environment exactly the way a session does — including
-    /// the launching Claude session's id and, worse, its messaging socket and
-    /// bearer token. This site had the leak for as long as it existed: the strip
-    /// lived only in `crates/pty::build_command`, which a setup script or a build
-    /// never goes through.
-    ///
-    /// Asserted against the shared `INHERITED_SESSION_MARKERS` rather than a
-    /// local list, so a marker added to the canonical one is covered here the day
-    /// it lands instead of the day someone remembers this file.
-    #[test]
-    fn a_background_run_does_not_inherit_the_launching_sessions_markers() {
-        static SERIAL: Mutex<()> = Mutex::new(());
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Stand in for a santree launched from inside an agent session.
-        let restore: Vec<(&str, Option<String>)> = santree_pty::INHERITED_SESSION_MARKERS
-            .iter()
-            .map(|name| (*name, std::env::var(name).ok()))
-            .collect();
-        for name in santree_pty::INHERITED_SESSION_MARKERS {
-            std::env::set_var(name, "inherited-from-our-launcher");
-        }
-
-        let cmd = build_command(&Spec {
-            command: "pnpm build".into(),
-            cwd: Path::new("/"),
-            // A caller that deliberately sets one of those names still wins, the
-            // same ordering `crates/pty` gives the user's own environment.
-            env: vec![("CLAUDECODE".into(), "caller-said-so".into())],
-        });
-
-        for name in santree_pty::INHERITED_SESSION_MARKERS {
-            if *name == "CLAUDECODE" {
-                continue;
-            }
-            assert_eq!(
-                cmd.get_env(name),
-                None,
-                "{name} reached a background run; it must be stripped here too"
-            );
-        }
-        assert_eq!(
-            cmd.get_env("CLAUDECODE"),
-            Some(std::ffi::OsStr::new("caller-said-so"))
-        );
-        // The strip is surgical: a run still needs the login environment.
-        assert!(cmd.get_env("PATH").is_some(), "PATH is still inherited");
-
-        for (name, value) in restore {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
-    }
 
     #[test]
     fn take_utf8_holds_a_split_multibyte_char_until_it_completes() {
@@ -589,6 +723,31 @@ mod tests {
         assert!(format!("{out}{rest}").ends_with('b'));
     }
 
+    fn host_of(fake: &Arc<FakeHost>) -> Arc<dyn RunHost> {
+        fake.clone()
+    }
+
+    /// Output collected as a run's view would get it.
+    fn collector() -> (Text, Arc<Mutex<String>>) {
+        let seen: Arc<Mutex<String>> = Arc::default();
+        let into = seen.clone();
+        (
+            Arc::new(move |text| into.lock().unwrap().push_str(&text)),
+            seen,
+        )
+    }
+
+    /// A status file path nothing else uses, with `code` in it when given.
+    fn status_file(name: &str, code: Option<&str>) -> String {
+        let path =
+            std::env::temp_dir().join(format!("santree-stream-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        if let Some(code) = code {
+            std::fs::write(&path, code).unwrap();
+        }
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn reserve_is_exclusive_per_key_and_frees_on_drop() {
         let runs = Runs::default();
@@ -604,20 +763,21 @@ mod tests {
 
     /// A finished run must only free *its own* entry. Cancel + re-run puts a newer
     /// run under the same key; an identity-less remove evicted it, leaving a live
-    /// process that neither Stop nor `kill_all` could ever see.
+    /// process that neither Stop nor a resize could ever see.
     #[test]
     fn a_finished_run_never_evicts_a_newer_one() {
         let runs = Runs::default();
+        let fake = FakeHost::new();
+        let host = host_of(&fake);
         let old = runs.reserve("k").unwrap();
-        let old_killer = FakeKiller::default();
-        assert!(runs.attach(&old, old_killer.boxed(), test_master()));
+        assert!(old.attach(&host, 1));
 
-        // Stop → the old run is killed and its entry dropped, so a re-run can claim.
+        // Stop → the old run's pane is closed and its entry dropped, so a re-run
+        // can claim.
         assert!(runs.cancel("k"));
-        assert!(old_killer.killed());
+        assert_eq!(fake.closed(), [1]);
         let new = runs.reserve("k").expect("re-run claims the free slot");
-        let new_killer = FakeKiller::default();
-        assert!(runs.attach(&new, new_killer.boxed(), test_master()));
+        assert!(new.attach(&host, 2));
 
         // The cancelled run only now notices and finishes.
         drop(old);
@@ -625,62 +785,9 @@ mod tests {
             runs.is_running("k"),
             "the re-run's slot must survive the old run's release"
         );
-
-        runs.kill_all();
-        assert!(new_killer.killed(), "the re-run is still killable on quit");
+        assert!(runs.cancel("k"), "the re-run is still stoppable");
+        assert_eq!(fake.closed(), [1, 2]);
         drop(new);
-    }
-
-    /// The reason this module exists: a real run's output reaches the view with its
-    /// escape codes intact. The old setup runner stripped ANSI and split lines, which
-    /// is exactly the colour a build's output is made of. Goes through a real PTY, so
-    /// it also proves the command sees a TTY (`test -t 1`) — without one most build
-    /// tools turn colour off before we ever get the chance to keep it.
-    #[test]
-    fn a_real_run_streams_colour_and_reports_success() {
-        let _serial = pty_guard_blocking();
-        let runs = Runs::default();
-        let slot = runs.reserve("colour").unwrap();
-        let log: std::sync::Arc<Mutex<Vec<String>>> = Default::default();
-        let sink = log.clone();
-        let channel = Channel::new(move |body| {
-            if let tauri::ipc::InvokeResponseBody::Json(json) = body {
-                sink.lock().unwrap().push(json);
-            }
-            Ok(())
-        });
-
-        let ok = run(
-            Spec {
-                command: "test -t 1 && printf '\\033[32mgreen\\033[0m\\r\\n'".into(),
-                cwd: Path::new("/"),
-                env: Vec::new(),
-            },
-            slot,
-            &channel,
-        );
-
-        assert!(ok, "the command exited successfully");
-        let sent = log.lock().unwrap().join("");
-        // JSON-escaped: ESC is  and the text is not stripped or reflowed.
-        assert!(sent.contains("u001b[32m"), "colour must survive: {sent}");
-        assert!(sent.contains("green"), "{sent}");
-    }
-
-    /// A real PTY master for the registry to hold. Cheap (a pair of fds) and the
-    /// genuine type, so these tests exercise the same storage the spawner uses.
-    ///
-    /// Callers must hold [`pty_guard`] — this allocates from the same finite table.
-    fn test_master() -> Box<dyn MasterPty + Send> {
-        native_pty_system()
-            .openpty(PtySize {
-                rows: ROWS,
-                cols: COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("openpty")
-            .master
     }
 
     /// A pane can only re-grid a run that's actually registered — and it asks on
@@ -688,34 +795,259 @@ mod tests {
     /// be an ordinary "no", not an error the view has to special-case.
     #[test]
     fn resize_reaches_a_live_run_and_ignores_a_finished_one() {
-        let _serial = pty_guard_blocking();
         let runs = Runs::default();
+        let fake = FakeHost::new();
+        let host = host_of(&fake);
         assert!(!runs.resize("k", 200, 50), "no run under the key yet");
 
         let slot = runs.reserve("k").unwrap();
         assert!(
             !runs.resize("k", 200, 50),
-            "reserved but not spawned — there's no pty to grid yet"
+            "reserved but not started — there's no pane to grid yet"
         );
-        assert!(runs.attach(&slot, FakeKiller::default().boxed(), test_master()));
+        assert!(slot.attach(&host, 5));
         assert!(runs.resize("k", 200, 50), "a live run takes the new grid");
+        assert!(runs.resize("k", 0, 0), "a degenerate grid is clamped");
+        assert_eq!(*fake.resized.lock().unwrap(), [(5, 200, 50), (5, 1, 1)]);
 
         drop(slot);
         assert!(!runs.resize("k", 200, 50), "the run is gone");
     }
 
-    /// Stop can land in the window between claiming the slot and spawning the child.
-    /// `attach` then fails, which is how the spawner learns to kill what it started —
-    /// nothing else holds a handle on it.
+    /// Stop can land in the window between claiming the slot and opening the pane.
+    /// `attach` then fails, which is how the starter learns to end what it started
+    /// — nothing else holds a handle on it.
     #[test]
-    fn a_slot_cancelled_before_the_spawn_refuses_the_killer() {
-        let _serial = pty_guard_blocking();
+    fn a_slot_cancelled_before_the_pane_exists_is_stopped_when_the_pane_arrives() {
         let runs = Runs::default();
+        let host = host_of(&FakeHost::new());
         let slot = runs.reserve("k").unwrap();
-        assert!(runs.cancel("k"), "stopped while still spawning");
+        assert!(runs.cancel("k"), "stopped while still starting");
         assert!(
-            !runs.attach(&slot, FakeKiller::default().boxed(), test_master()),
-            "the child has nowhere to register — its spawner must kill it"
+            runs.reserve("k").is_none(),
+            "still claimed until its pane is closed"
         );
+        assert!(slot.attach(&host, 9), "the pane registers…");
+        assert!(
+            *slot.stop.borrow(),
+            "…and its follower sees the Stop and closes it"
+        );
+    }
+
+    /// The reason this module exists: a real run's output reaches the view with its
+    /// escape codes intact, through a real PTY — so it also proves the command sees a
+    /// TTY (`test -t 1`), without which most build tools turn colour off before we
+    /// ever get the chance to keep it. And the exit code is what the wrapper left.
+    #[tokio::test]
+    async fn a_real_run_streams_colour_and_reports_success() {
+        let _serial = pty_guard().await;
+        let dir = std::env::temp_dir().join(format!("santree-stream-real-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("run.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/bash\ntest -t 1 && printf '\\033[32mgreen\\033[0m\\r\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let status = dir.join("status").to_string_lossy().into_owned();
+
+        let runs = Runs::default();
+        let host = crate::terminal::test_run_host();
+        let (text, seen) = collector();
+        let ok = start(
+            &host,
+            runs.reserve("colour").unwrap(),
+            Launch::script("run:colour#1".into(), &dir, &script, &status, Vec::new()),
+            text,
+        )
+        .await;
+
+        assert!(ok, "the command exited successfully");
+        let sent = seen.lock().unwrap().clone();
+        assert!(
+            sent.contains("\x1b[32mgreen"),
+            "colour must survive: {sent:?}"
+        );
+        assert_eq!(read_status(&status).await, Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Following a run ─────────────────────────────────────────────────────
+
+    /// A launch whose status file is `status`.
+    fn launch(status: &str) -> Launch {
+        Launch::script(
+            "run:k#1".into(),
+            Path::new("/"),
+            Path::new("/bin/true"),
+            status,
+            Vec::new(),
+        )
+    }
+
+    /// `start` over the fake, spawned, with the slot of `k` in `runs`.
+    fn started(fake: &Arc<FakeHost>, runs: &Runs, status: &str) -> tokio::task::JoinHandle<bool> {
+        let (host, slot, launch) = (host_of(fake), runs.reserve("k").unwrap(), launch(status));
+        let (text, _) = collector();
+        tokio::spawn(async move { start(&host, slot, launch, text).await })
+    }
+
+    /// A launch is logged by its env's names: the project's environment can
+    /// carry secrets, and a `{:?}` must never put one in the log file.
+    #[test]
+    fn a_launchs_debug_names_its_env_without_values() {
+        let mut launch = launch("/x/status");
+        launch.env = vec![("API_TOKEN".into(), "s3cr3t-value".into())];
+        let shown = format!("{launch:?}");
+        assert!(shown.contains("API_TOKEN"), "{shown}");
+        assert!(!shown.contains("s3cr3t-value"), "{shown}");
+    }
+
+    /// The status path is the launch's own field, not a position in its argv.
+    #[test]
+    fn a_launch_carries_its_status_path() {
+        let launch = launch("/x/status");
+        assert_eq!(launch.status, "/x/status");
+        assert_eq!(launch.args[1], WRAPPER);
+    }
+
+    /// A pane that exits ends the run as its script did.
+    #[tokio::test]
+    async fn a_run_ends_as_its_script_did() {
+        for (left, ok) in [(Some("0"), true), (Some("3"), false), (None, false)] {
+            let fake = FakeHost::new();
+            let runs = Runs::default();
+            let status = status_file("exit", None);
+            let task = started(&fake, &runs, &status);
+            fake.attached().await;
+            assert!(runs.reserve("k").is_none(), "one run per key");
+            if let Some(code) = left {
+                std::fs::write(&status, code).unwrap();
+            }
+            (fake.pane().output)(Vec::new());
+            assert_eq!(task.await.unwrap(), ok, "{left:?}");
+            assert!(runs.reserve("k").is_some(), "and the slot is free");
+            let _ = std::fs::remove_file(&status);
+        }
+    }
+
+    /// A host that no longer has the pane (a server that restarted) ended the
+    /// process; whether it succeeded is whatever it managed to leave.
+    #[tokio::test]
+    async fn a_pane_lost_with_its_host_is_over() {
+        for (left, ok) in [(None, false), (Some("0"), true)] {
+            let fake = FakeHost::new();
+            let runs = Runs::default();
+            let status = status_file("lost", None);
+            let task = started(&fake, &runs, &status);
+            fake.attached().await;
+            if let Some(code) = left {
+                std::fs::write(&status, code).unwrap();
+            }
+            (fake.pane().link)(PaneLink::Lost);
+            assert_eq!(task.await.unwrap(), ok);
+            let _ = std::fs::remove_file(&status);
+        }
+    }
+
+    /// The backstop stops a run that never ends, counted from its start here.
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_stops_a_run_that_never_ends() {
+        let fake = FakeHost::new();
+        let runs = Runs::default();
+        let task = started(&fake, &runs, &status_file("deadline", None));
+        fake.attached().await;
+        tokio::time::sleep(DEADLINE - Duration::from_secs(1)).await;
+        assert!(!task.is_finished() && fake.closed().is_empty());
+        assert!(!task.await.unwrap());
+        assert_eq!(fake.closed(), [fake::PANE], "its pane was stopped");
+    }
+
+    /// The deadline is a message to the host. With the link down it cannot be
+    /// sent, so the run waits for the link instead of calling it over.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_run_waits_for_the_link_before_it_is_stopped() {
+        let fake = FakeHost::new();
+        let runs = Runs::default();
+        let task = started(&fake, &runs, &status_file("deadline-link", None));
+        fake.attached().await;
+        let pane = fake.pane();
+        (pane.link)(PaneLink::Reconnecting);
+        tokio::time::sleep(DEADLINE + Duration::from_secs(1)).await;
+        assert!(fake.closed().is_empty(), "nothing could be sent");
+        assert!(!task.is_finished(), "and nothing was concluded");
+
+        (pane.link)(PaneLink::Live);
+        assert!(!task.await.unwrap());
+        assert_eq!(fake.closed(), [fake::PANE]);
+    }
+
+    /// Stop ends a run: the pane is closed and the run is a failure.
+    #[tokio::test]
+    async fn stopping_a_run_closes_its_pane() {
+        let fake = FakeHost::new();
+        let runs = Runs::default();
+        let task = started(&fake, &runs, &status_file("stop", None));
+        fake.attached().await;
+        // The slot learns of its pane a beat after the sinks.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !runs.cancel("k") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!task.await.unwrap());
+        assert!(fake.closed().contains(&fake::PANE));
+    }
+
+    /// A pane whose sinks were taken from it (closed from Settings → Terminal)
+    /// says nothing more; the run ends as whatever its script left.
+    #[tokio::test]
+    async fn a_pane_that_goes_silent_ends_as_its_status_file_says() {
+        for (left, ok) in [(Some("0"), true), (None, false)] {
+            let fake = FakeHost::new();
+            let runs = Runs::default();
+            let status = status_file("silent", None);
+            let task = started(&fake, &runs, &status);
+            fake.attached().await;
+            if let Some(code) = left {
+                std::fs::write(&status, code).unwrap();
+            }
+            drop(fake.sinks.lock().unwrap().take());
+            assert_eq!(task.await.unwrap(), ok, "{left:?}");
+            let _ = std::fs::remove_file(&status);
+        }
+    }
+
+    #[test]
+    fn a_runs_pane_is_known_as_owned() {
+        let runs = Runs::default();
+        let host = host_of(&FakeHost::new());
+        let slot = runs.reserve("k").unwrap();
+        assert!(!runs.owns(11), "no pane yet");
+        assert!(slot.attach(&host, 11));
+        assert!(runs.owns(11));
+        assert!(!runs.owns(13), "a tab's pane is not a run's");
+        drop(slot);
+        assert!(!runs.owns(11), "and a settled run's no longer is");
+    }
+
+    #[test]
+    fn a_run_label_is_unique_per_run_and_never_a_terminal_tab() {
+        let a = run_label("setup:/r:AK-1", "one");
+        let b = run_label("setup:/r:AK-1", "two");
+        assert_ne!(a, b, "a new run can never claim an older run's process");
+        assert!(is_run_label(&a));
+        for tab in [
+            "tree:AK-1:tab:t1",
+            "triage:AK-9",
+            "ai-review:o/r#4",
+            "login:claude",
+        ] {
+            assert!(!is_run_label(tab), "{tab}");
+        }
     }
 }
