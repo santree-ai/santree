@@ -64,15 +64,7 @@ const QUESTIONS: { q: string; a: ReactNode }[] = [
   },
   {
     q: "Which platforms does it run on?",
-    a: (
-      <>
-        macOS, kept up to date on the stable or beta channel. On Linux it{" "}
-        <a className="faq-link" href={`${REPO}#building-from-source`}>
-          builds from source
-        </a>
-        ; there are no packaged Linux builds yet. Windows isn't supported.
-      </>
-    ),
+    a: "macOS, kept up to date on the stable or beta channel. Linux and Windows aren't supported.",
   },
   {
     q: "Which trackers and agents work with it?",
