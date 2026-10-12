@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.1 — 2026-10-12
+
+- Agents and terminals now outlive the app. santree runs them in a small background server of its own, so quitting, a crash or an update no longer ends a running agent, a shell or a setup script. Reopen santree and every tab picks up where it was, with what it printed meanwhile.
+- The update to this version is the last one that ends running agents: they still live inside the old app. Finish or pause them before restarting.
+- Settings → Terminal shows the server: its version, how long it has been up and what it is running, with Restart and Stop. If it isn't running, a banner says so and offers Start.
+- An agent tab whose process is gone offers Resume, one click, in Trees, Reviews and Triage.
+
 ## 0.1.18 — 2026-10-05
 
 - Split the main area into several tab groups. Drag any tab (an agent, a terminal, a file diff, the pull request or the ticket) onto the edge of a pane to split it left, right, up or down, into the middle of a pane to move it there, or onto another tab strip to place it exactly. A preview shows where it will land before you let go, and Esc cancels.
