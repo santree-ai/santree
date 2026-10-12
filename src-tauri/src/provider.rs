@@ -352,24 +352,40 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Write an executable script from a child process. Written from this
+    /// one, its open fd can be inherited by a thread's concurrent fork in
+    /// another test and held until that child's exec, and running the script
+    /// meanwhile fails with ETXTBSY ("Text file busy", seen on Linux CI).
+    #[cfg(unix)]
+    fn write_script(path: &std::path::Path, body: &str) {
+        let status = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                r#"printf '%s' "$1" > "$2" && chmod 755 "$2""#,
+                "sh",
+                body,
+            ])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn version_probe_accepts_cli_version_and_bounds_stderr() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("santree-cli-probe-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let cli = dir.join("claude");
-        std::fs::write(&cli, "#!/bin/sh\nprintf '2.1.285 (Claude Code)\\n'\n").unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&cli, "#!/bin/sh\nprintf '2.1.285 (Claude Code)\\n'\n");
         assert_eq!(
             probe_cli_version(cli.to_str().unwrap()).await.unwrap(),
             "2.1.285 (Claude Code)"
         );
-        std::fs::write(
+        write_script(
             &cli,
             "#!/bin/sh\nwhile :; do printf 'diagnostic diagnostic diagnostic\\n' >&2; done\n",
-        )
-        .unwrap();
+        );
         let error = probe_cli_version(cli.to_str().unwrap())
             .await
             .unwrap_err()
