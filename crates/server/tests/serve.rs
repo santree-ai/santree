@@ -66,6 +66,25 @@ fn spawn_with(dir: &Path, extra: &[&str], env: &[(&str, &str)]) -> Server {
     spawn_on(dir, extra, env, ready, theirs)
 }
 
+/// Put `fd` at 3 for the child, open across its exec. Between fork and exec:
+/// async-signal-safe calls only. Both ends of a pair (and a `File`) are
+/// close-on-exec; dup2 clears it on the copy, but onto itself it is a no-op
+/// that leaves it set — and which fd a test's file gets is up to the runner.
+fn onto_ready_fd(fd: i32) -> std::io::Result<()> {
+    // SAFETY: fcntl and dup2 on plain fds; both are async-signal-safe.
+    let rc = unsafe {
+        if fd == 3 {
+            libc::fcntl(3, libc::F_SETFD, 0)
+        } else {
+            libc::dup2(fd, 3)
+        }
+    };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// [`spawn_with`] on a ready fd the caller chose: `theirs` is what the server
 /// is handed as `--ready-fd 3`, `ready` what the launcher holds to read from.
 fn spawn_on(
@@ -80,19 +99,7 @@ fn spawn_on(
     cmd.args(["--ready-fd", "3"]);
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
-        cmd.pre_exec(move || {
-            // Both ends are close-on-exec; dup2 clears it on the copy, but
-            // onto itself it would leave it set.
-            let rc = if fd == 3 {
-                libc::fcntl(3, libc::F_SETFD, 0)
-            } else {
-                libc::dup2(fd, 3)
-            };
-            if rc < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        cmd.pre_exec(move || onto_ready_fd(fd));
     }
     let child = cmd.spawn().unwrap();
     drop(theirs);
@@ -675,12 +682,7 @@ fn a_ready_fd_that_is_not_a_socket_is_refused() {
     let mut cmd = command(dir.path(), &["--ready-fd", "3"], &[]);
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
-        cmd.pre_exec(move || {
-            if libc::dup2(fd, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        cmd.pre_exec(move || onto_ready_fd(fd));
     }
     let status = cmd.status().unwrap();
     assert_eq!(status.code(), Some(1));
@@ -716,31 +718,24 @@ async fn an_open_without_a_base_env_is_refused() {
     assert_eq!(info.id, 0);
 }
 
-/// What the server's fds 0–2 point at, by `/dev/null` or not.
+/// What the server's fds 0–2 point at, by `/dev/null` or not. macOS only: a
+/// Linux server is non-dumpable, so its `/proc/<pid>/fd` is not ours to read.
+#[cfg(target_os = "macos")]
 fn standard_fds_of(pid: u32) -> Vec<String> {
-    if cfg!(target_os = "linux") {
-        (0..3)
-            .map(|n| {
-                fs::read_link(format!("/proc/{pid}/fd/{n}"))
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|e| format!("({e})"))
-            })
-            .collect()
-    } else {
-        let out = Command::new("/usr/sbin/lsof")
-            .args(["-a", "-p", &pid.to_string(), "-d", "0,1,2", "-Fn"])
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| l.strip_prefix('n').map(str::to_string))
-            .collect()
-    }
+    let out = Command::new("/usr/sbin/lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "0,1,2", "-Fn"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix('n').map(str::to_string))
+        .collect()
 }
 
 /// Launched with its standard streams closed, the server holds `/dev/null`
 /// there, so nothing it opens — its log, a client's socket, a PTY master —
 /// takes fd 0, 1 or 2, where a panic message or a stray print would land.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_standard_streams_are_held_by_dev_null() {
     let dir = scratch();
@@ -750,9 +745,7 @@ async fn closed_standard_streams_are_held_by_dev_null() {
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
         cmd.pre_exec(move || {
-            if libc::dup2(fd, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
+            onto_ready_fd(fd)?;
             libc::close(0);
             libc::close(1);
             libc::close(2);
