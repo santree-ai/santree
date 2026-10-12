@@ -204,7 +204,10 @@ export function stateAt(b: Bough, u0: number): BoughState {
     back,
     flash: u >= PHASE.back[1] ? crownFlash(u - PHASE.back[1]) : 0,
     settled:
-      u >= PHASE.back[1] ? ease(clamp01((u - PHASE.back[1]) / 4)) * Math.exp(-Math.max(0, u - PHASE.back[1] - 4) / 20) : 0,
+      u >= PHASE.back[1]
+        ? ease(clamp01((u - PHASE.back[1]) / 4)) *
+          Math.exp(-Math.max(0, u - PHASE.back[1] - 4) / 20)
+        : 0,
     dot,
     asking,
   };

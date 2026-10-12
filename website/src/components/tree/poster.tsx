@@ -1,4 +1,15 @@
-import { boughAt, GROUND, grow, LIGHTS_N, LIMBS, lightLevel, ROOT_Y, rand, swayP, trunkAt } from "./grow";
+import {
+  boughAt,
+  GROUND,
+  grow,
+  LIGHTS_N,
+  LIMBS,
+  lightLevel,
+  ROOT_Y,
+  rand,
+  swayP,
+  trunkAt,
+} from "./grow";
 import { ALL, COLOR, CROWN, heroPose, project, stateAt, type V3, viewOf } from "./model";
 
 /**
@@ -172,7 +183,19 @@ function build() {
   const s = (n0.y - n1.y) / (w0.y - w1.y);
   const narrow = { s, tx: n1.x - w1.x * s, ty: n1.y - w1.y * s };
 
-  return { bins, spines, trunk, bark, soil, lights, LIVE, narrow, pool, embers, crown: W.pt(CROWN) };
+  return {
+    bins,
+    spines,
+    trunk,
+    bark,
+    soil,
+    lights,
+    LIVE,
+    narrow,
+    pool,
+    embers,
+    crown: W.pt(CROWN),
+  };
 }
 const T = build();
 const d = (ps: { x: number; y: number }[]) =>
@@ -183,7 +206,13 @@ const VE = "non-scaling-stroke";
 function Light({ l }: { l: (typeof T.lights)[number] }) {
   return (
     <>
-      <circle cx={l.x} cy={l.y} r={13 + 9 * l.size} fill="url(#tp-halo)" fillOpacity={Math.min(1, 0.45 * l.lv)} />
+      <circle
+        cx={l.x}
+        cy={l.y}
+        r={13 + 9 * l.size}
+        fill="url(#tp-halo)"
+        fillOpacity={Math.min(1, 0.45 * l.lv)}
+      />
       <circle cx={l.x} cy={l.y} r={1.8} fill={COLOR.light} fillOpacity={Math.min(1, 0.85 * l.lv)} />
     </>
   );

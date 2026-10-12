@@ -42,25 +42,15 @@ import {
   vec4,
 } from "three/tsl";
 import * as THREE from "three/webgpu";
-import {
-  GROUND,
-  grow,
-  LIGHT_LOOP,
-  ROOT_Y,
-  swayP,
-  TAU,
-  trunkAt,
-} from "./grow";
+import { GROUND, grow, LIGHT_LOOP, ROOT_Y, swayP, TAU, trunkAt } from "./grow";
 import {
   ALL,
   type Bough,
   backPoint,
   boughAt,
   COLOR,
-
   CROWN,
   FEATURED,
-
   MARK,
   type Pose,
   rand,
@@ -250,7 +240,13 @@ export async function createEngine(
 
   /** Defocus: far from the plane the camera rests on, a line spreads thin. */
   const dof: N = float(1).div(
-    float(1).add(depth.sub(camDist).div(camDist).pow(2).mul(opts.lite ? 24 : 40)),
+    float(1).add(
+      depth
+        .sub(camDist)
+        .div(camDist)
+        .pow(2)
+        .mul(opts.lite ? 24 : 40),
+    ),
   );
   const woodC = cnode("#aebdb6");
   const needleC = cnode("#7fb9a2");
@@ -271,7 +267,10 @@ export async function createEngine(
     const a: N = attribute("a", "float");
     const k: N = attribute("k", "float");
     const lt: N = attribute("lt", "vec4");
-    const warm: N = lt.x.mul(lightLevelN(lt.y, lt.z.max(1), lt.w)).mul(0.7).min(1);
+    const warm: N = lt.x
+      .mul(lightLevelN(lt.y, lt.z.max(1), lt.w))
+      .mul(0.7)
+      .min(1);
     leafMat.colorNode = mix(mix(woodC, needleC, k), warmC, warm.mul(0.45));
     leafMat.opacityNode = a
       .mul(opts.lite ? 0.6 : 0.5)
@@ -371,7 +370,14 @@ export async function createEngine(
       for (let i = 0; i < n; i++) {
         const a0 = (i / n) * TAU;
         const a1 = ((i + 1) / n) * TAU;
-        pos.push(r * Math.cos(a0), GROUND, r * Math.sin(a0), r * Math.cos(a1), GROUND, r * Math.sin(a1));
+        pos.push(
+          r * Math.cos(a0),
+          GROUND,
+          r * Math.sin(a0),
+          r * Math.cos(a1),
+          GROUND,
+          r * Math.sin(a1),
+        );
       }
     }
     const g = new THREE.BufferGeometry();
@@ -399,7 +405,10 @@ export async function createEngine(
     const pm = pool.material as THREE.MeshBasicNodeMaterial;
     const pr: N = positionLocal.xz.length().div(3.2);
     pm.colorNode = warmC;
-    pm.opacityNode = exp(pr.mul(pr).mul(-5)).mul(0.022).mul(float(1).sub(markU)).mul(float(1).sub(focusU.mul(0.5)));
+    pm.opacityNode = exp(pr.mul(pr).mul(-5))
+      .mul(0.022)
+      .mul(float(1).sub(markU))
+      .mul(float(1).sub(focusU.mul(0.5)));
     add(pool, 0);
   }
 
@@ -421,9 +430,15 @@ export async function createEngine(
     const px = (n: number): N => {
       const dc: N = viewDepth(base.add(swayN(base)));
       const coc: N = dc.sub(camDist).abs().div(camDist);
-      return dc.mul(pxU).mul(2).mul(n).mul(float(1).add(coc.mul(2.2)));
+      return dc
+        .mul(pxU)
+        .mul(2)
+        .mul(n)
+        .mul(float(1).add(coc.mul(2.2)));
     };
-    const defocus: N = float(1).div(float(1).add(depth.sub(camDist).abs().div(camDist).mul(2.2)).pow(2));
+    const defocus: N = float(1).div(
+      float(1).add(depth.sub(camDist).abs().div(camDist).mul(2.2)).pow(2),
+    );
     const mk = (size: N, alpha: N, order: number, core: boolean) => {
       const m = new THREE.SpriteNodeMaterial({
         transparent: true,
@@ -473,7 +488,11 @@ export async function createEngine(
     m.positionNode = at.add(swayN(at));
     const dc: N = viewDepth(at.add(swayN(at)));
     const coc: N = dc.sub(camDist).abs().div(camDist).mul(2.2).add(1);
-    m.scaleNode = dc.mul(pxU).mul(2).mul(float(2.4).add(ph.mul(1.6))).mul(coc);
+    m.scaleNode = dc
+      .mul(pxU)
+      .mul(2)
+      .mul(float(2.4).add(ph.mul(1.6)))
+      .mul(coc);
     const d: N = uv().sub(0.5).length().mul(2);
     m.colorNode = warmC;
     m.opacityNode = exp(d.mul(d).mul(-4))

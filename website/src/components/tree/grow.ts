@@ -111,7 +111,9 @@ function buildLimbs(): Limb[] {
           phi,
           len,
           // lower boughs sag more; a little each way
-          sag: (0.12 + 0.19 * (1 - k * 0.65) * (c === LOWER ? 1 : 0.95)) * (0.8 + 0.4 * rand(i * 7 + j, 7)),
+          sag:
+            (0.12 + 0.19 * (1 - k * 0.65) * (c === LOWER ? 1 : 0.95)) *
+            (0.8 + 0.4 * rand(i * 7 + j, 7)),
           curl: deg(34) * (rand(i * 7 + j, 9) - 0.5),
         });
       }
@@ -278,9 +280,15 @@ export function grow(o: GrowOpts): Grown {
         const lt = Math.min(0.55, Math.max(0.07, base));
         const ang = deg(50 + 22 * rand(id, 13));
         const dir = norm3([
-          T[0] * Math.cos(ang) + side[0] * sg * Math.sin(ang) - up[0] * (0.14 + 0.12 * rand(id, 14)),
-          T[1] * Math.cos(ang) + side[1] * sg * Math.sin(ang) - up[1] * (0.14 + 0.12 * rand(id, 14)),
-          T[2] * Math.cos(ang) + side[2] * sg * Math.sin(ang) - up[2] * (0.14 + 0.12 * rand(id, 14)),
+          T[0] * Math.cos(ang) +
+            side[0] * sg * Math.sin(ang) -
+            up[0] * (0.14 + 0.12 * rand(id, 14)),
+          T[1] * Math.cos(ang) +
+            side[1] * sg * Math.sin(ang) -
+            up[1] * (0.14 + 0.12 * rand(id, 14)),
+          T[2] * Math.cos(ang) +
+            side[2] * sg * Math.sin(ang) -
+            up[2] * (0.14 + 0.12 * rand(id, 14)),
         ]);
         const pts: V3[] = [p];
         for (let k = 1; k <= 3; k++) {
@@ -297,7 +305,13 @@ export function grow(o: GrowOpts): Grown {
         tips.push(tip);
         const w = 0.2 + 0.14 * rand(id, 15);
         for (let k = 1; k <= 3; k++)
-          seg(pts[k - 1] as V3, pts[k] as V3, w * (1 - (k - 1) / 4), w * (1 - k / 4), 0.35 + 0.1 * k);
+          seg(
+            pts[k - 1] as V3,
+            pts[k] as V3,
+            w * (1 - (k - 1) / 4),
+            w * (1 - k / 4),
+            0.35 + 0.1 * k,
+          );
         if (needles) {
           const inPlane = norm3(cross3(dir, up));
           for (let k = 1; k <= 3; k++) {
@@ -363,16 +377,19 @@ export function grow(o: GrowOpts): Grown {
   const want = o.lite ? LIGHTS_N.lite : LIGHTS_N.full;
   // spread through the height, not through the volume: a band of the tree each
   const BAND = (3.95 - 0.8) / LIGHTS_N.full;
-  const order = cands
-    .map((p, i) => ({ p, i, r: rand(i, 21) }))
-    .sort((x, y) => x.r - y.r);
+  const order = cands.map((p, i) => ({ p, i, r: rand(i, 21) })).sort((x, y) => x.r - y.r);
   for (let n = 0; n < LIGHTS_N.full; n++) {
     const y0 = 0.8 + BAND * ((n * 7) % LIGHTS_N.full);
     const pick = order.find(({ p }) => {
       const rr = Math.hypot(p[0], p[2]);
-      return p[1] >= y0 - BAND && p[1] < y0 + 2 * BAND && rr > 0.45 && rr < 1.7 &&
+      return (
+        p[1] >= y0 - BAND &&
+        p[1] < y0 + 2 * BAND &&
+        rr > 0.45 &&
+        rr < 1.7 &&
         !lights.some((l) => Math.hypot(l.p[0] - p[0], l.p[1] - p[1], l.p[2] - p[2]) < 0.5) &&
-        !(o.avoid ?? []).some((q) => Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 0.45);
+        !(o.avoid ?? []).some((q) => Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 0.45)
+      );
     });
     if (!pick) continue;
     const { p, i } = pick;

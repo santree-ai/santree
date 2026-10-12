@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import { DownloadButton } from "~/components/download-button";
 import { GitHubLogo } from "~/components/icons";
-import type { Engine } from "./engine";
 import { AGENT_LAYER_SHIPPED, LAYER } from "./agent-layer";
+import type { Engine } from "./engine";
 import { swayP } from "./grow";
 import {
   ALL,
@@ -433,7 +433,11 @@ export function TreeSequence() {
                   panes.current[i] = p;
                 }}
                 data-side={
-                  st.id === "run" ? "prompt" : st.id === "steer" && AGENT_LAYER_SHIPPED ? "layer" : undefined
+                  st.id === "run"
+                    ? "prompt"
+                    : st.id === "steer" && AGENT_LAYER_SHIPPED
+                      ? "layer"
+                      : undefined
                 }
                 style={{ visibility: "hidden", ["--ar" as string]: cropAspect(st.crop) }}
               >
@@ -463,7 +467,9 @@ export function TreeSequence() {
                 <h2 className="font-display t-title">{st.title}</h2>
                 <p className="seq-card-body t-body">{st.body}</p>
                 {st.id === "run" && <PromptCard className="seq-prompt-flow" />}
-                {st.id === "steer" && AGENT_LAYER_SHIPPED && <LayerCard className="seq-layer-flow" />}
+                {st.id === "steer" && AGENT_LAYER_SHIPPED && (
+                  <LayerCard className="seq-layer-flow" />
+                )}
                 <Capture screen={st.screen} crop={st.list} alt={st.alt} />
               </li>
             ))}
