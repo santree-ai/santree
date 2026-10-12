@@ -1809,24 +1809,29 @@ mod tests {
         assert_eq!((held.len(), held[0].id), (1, id));
         // Input typed to a detached pane is dropped, never replayed later, so
         // the shell is told in advance to print while nobody is watching, and
-        // to leave a mark once it has.
+        // to leave a mark once it has. It waits for `go`, created only after
+        // the detach: a timer raced a slow runner, and not every `sh` prints
+        // a job number to wait on.
+        let go = fx.dir.path().join("go");
         let printed = fx.dir.path().join("printed");
         type_line(
             &terminals,
             id,
             &format!(
-                "(sleep 1; echo away-$((3+3)); touch '{}') &",
+                "(until [ -e '{}' ]; do sleep 0.1; done; echo away-$((3+3)); touch '{}') &",
+                go.display(),
                 printed.display()
             ),
         );
         screen
-            .until("the job to start", |s| s.text().contains("[1]"))
+            .until("the job's line to echo", |s| s.text().contains("touch '"))
             .await;
         let anchor = TerminalAnchor::At {
             epoch: held[0].epoch.clone(),
             seq: screen.len() as f64,
         };
         terminals.detach(id);
+        std::fs::write(&go, b"").unwrap();
         until("the job to print unwatched", || printed.exists()).await;
         let again = Screen::new();
         let (output, links) = again.channels();

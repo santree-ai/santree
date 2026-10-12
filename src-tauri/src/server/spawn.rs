@@ -1109,10 +1109,13 @@ mod tests {
         assert_eq!(info.pid, spawned.pid);
     }
 
+    // macOS only: a Linux server is non-dumpable, so its environment can't
+    // be read from outside (and Linux ships no server).
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn the_real_server_gets_none_of_the_apps_environment() {
-        // The server's pid environment is readable through `ps eww` on macOS and
-        // /proc on Linux; either way it must hold only the allow-list.
+        // The server's environment, read through `ps eww`, must hold only the
+        // allow-list.
         let fx = Fixture::installed();
         let mut spawned = spawn_server(&fx.layout).unwrap();
         fx.track(spawned.pid);

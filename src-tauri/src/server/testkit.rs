@@ -351,35 +351,25 @@ pub fn process_group_of(pid: u32) -> Option<u32> {
 }
 
 /// The NAMES in a process's environment — never a value, which a failing
-/// assertion would otherwise print.
+/// assertion would otherwise print. macOS only: on Linux the server makes
+/// itself non-dumpable, which is exactly what makes its `/proc/<pid>/environ`
+/// unreadable.
+#[cfg(target_os = "macos")]
 pub fn environment_names_of(pid: u32) -> Vec<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let raw = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
-        raw.split(|b| *b == 0)
-            .filter_map(|kv| {
-                let kv = String::from_utf8_lossy(kv);
-                kv.split_once('=').map(|(k, _)| k.to_string())
-            })
-            .collect()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // `ps eww` prints the environment after the command line, which here
-        // has no `NAME=` tokens of its own (flags are `--x value`).
-        let out = Command::new("ps")
-            .args(["eww", "-o", "command=", "-p", &pid.to_string()])
-            .output()
-            .expect("ps");
-        String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .filter_map(|tok| {
-                let (name, _) = tok.split_once('=')?;
-                (!name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
-                    .then(|| name.to_string())
-            })
-            .collect()
-    }
+    // `ps eww` prints the environment after the command line, which here
+    // has no `NAME=` tokens of its own (flags are `--x value`).
+    let out = Command::new("ps")
+        .args(["eww", "-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|tok| {
+            let (name, _) = tok.split_once('=')?;
+            (!name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+                .then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// A socket file nobody listens on, the way a server that died leaves one: a
