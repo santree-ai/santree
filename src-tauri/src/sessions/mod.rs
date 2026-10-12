@@ -220,35 +220,30 @@ mod tests;
 mod unit {
     use super::*;
 
+    /// A baked build serves `Signed` only when its own signature names the
+    /// baked team, and the env flag never overrides it; one that can't confirm
+    /// its signature fails closed, not even taking the opt-in (that admits any
+    /// process of the same uid). An unbaked build serves only on opt-in.
     #[test]
-    fn a_baked_build_is_signed_only_when_its_own_signature_names_the_baked_team() {
-        assert_eq!(
-            choose_mode(Some("TEAM1"), Some("TEAM1"), false),
-            Mode::Signed { team: "TEAM1" }
-        );
-        // The env flag never overrides a signed build: it is for builds that
-        // have no team to prove.
-        assert_eq!(
-            choose_mode(Some("TEAM1"), Some("TEAM1"), true),
-            Mode::Signed { team: "TEAM1" }
-        );
-    }
-
-    #[test]
-    fn a_baked_build_that_cannot_confirm_its_signature_fails_closed() {
-        assert_eq!(choose_mode(Some("TEAM1"), None, false), Mode::Off);
-        assert_eq!(choose_mode(Some("TEAM1"), Some("OTHER"), false), Mode::Off);
-        // Not even the opt-in: a release that can't say who it is must not
-        // serve a mode that admits any process of the same uid.
-        assert_eq!(choose_mode(Some("TEAM1"), None, true), Mode::Off);
-        assert_eq!(choose_mode(Some("TEAM1"), Some("OTHER"), true), Mode::Off);
-    }
-
-    #[test]
-    fn an_unbaked_build_serves_only_on_opt_in() {
-        assert_eq!(choose_mode(None, None, false), Mode::Off);
-        assert_eq!(choose_mode(None, Some("TEAM1"), false), Mode::Off);
-        assert_eq!(choose_mode(None, None, true), Mode::OptIn);
+    fn a_build_serves_a_mode_only_when_it_can_prove_it() {
+        let signed = Mode::Signed { team: "TEAM1" };
+        for (baked, own, opt_in, mode) in [
+            (Some("TEAM1"), Some("TEAM1"), false, signed),
+            (Some("TEAM1"), Some("TEAM1"), true, signed),
+            (Some("TEAM1"), None, false, Mode::Off),
+            (Some("TEAM1"), Some("OTHER"), false, Mode::Off),
+            (Some("TEAM1"), None, true, Mode::Off),
+            (Some("TEAM1"), Some("OTHER"), true, Mode::Off),
+            (None, None, false, Mode::Off),
+            (None, Some("TEAM1"), false, Mode::Off),
+            (None, None, true, Mode::OptIn),
+        ] {
+            assert_eq!(
+                choose_mode(baked, own, opt_in),
+                mode,
+                "{baked:?} {own:?} {opt_in}"
+            );
+        }
     }
 
     #[test]

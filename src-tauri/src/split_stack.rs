@@ -361,29 +361,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn refuses_child_until_source_has_its_own_commit() {
-        let f = Fixture::new().await;
-        git::git(&git::Checkout::local(&f.path), &["reset", "--soft", "main"]).unwrap();
-        let op = f.preview().await;
-        let error = f.run(&op).await.unwrap_err().to_string();
-        assert!(error.contains("Commit the first part"), "{error}");
-        assert_eq!(git::split::oid(&local(&f.path), "HEAD").unwrap(), op.head);
-        assert_eq!(
-            git::split::index_tree(&local(&f.path)).unwrap(),
-            op.index_tree
-        );
-        assert_eq!(
-            git::split::snapshot(&local(&f.path)).unwrap(),
-            op.snapshot_tree
-        );
-        assert!(git::split::find_backup(&local(&f.path), &op.id)
-            .unwrap()
-            .is_none());
-        assert!(git::split::oid(&local(&f.path), "feature-next").is_err());
-        f.db.close().await;
-    }
-
+    /// A split needs a commit of the source's own beyond its base — whether
+    /// that base is a local branch or only its upstream — and a refusal leaves
+    /// the source exactly as it was: no stash, no child branch.
     #[tokio::test]
     async fn upstream_commits_do_not_count_as_source_commits() {
         let f = Fixture::new().await;
@@ -400,6 +380,11 @@ mod tests {
             let op = f.preview().await;
             let error = f.run(&op).await.unwrap_err().to_string();
             assert!(error.contains("Commit the first part"), "{error}");
+            assert_eq!(git::split::oid(&local(&f.path), "HEAD").unwrap(), op.head);
+            assert_eq!(
+                git::split::index_tree(&local(&f.path)).unwrap(),
+                op.index_tree
+            );
             assert_eq!(
                 git::split::snapshot(&local(&f.path)).unwrap(),
                 op.snapshot_tree

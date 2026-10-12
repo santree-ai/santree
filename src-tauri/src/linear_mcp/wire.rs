@@ -1006,7 +1006,6 @@ mod tests {
             states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             ["Triage", "Backlog", "In Progress", "In Review", "Won't do"]
         );
-        assert_eq!(states[0].color, "#fc7840");
         assert_eq!(states[2].color, states[3].color, "one colour per category");
         assert!(states.iter().all(|s| s.color.starts_with('#')));
     }

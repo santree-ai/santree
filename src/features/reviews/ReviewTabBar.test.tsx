@@ -136,22 +136,14 @@ beforeEach(() => {
 describe("ReviewTabBar", () => {
   /** It is not a `worktree_tabs` row — it is what the view *is*, so there is
    *  nothing for a ✕ to close it to. */
-  it("leads with the pull request, and offers no way to close it", () => {
-    mount(tabsModel());
-
-    expect(tabNames()).toEqual(["Pull Request"]);
-    expect(screen.queryByRole("button", { name: "Close Pull Request" })).not.toBeInTheDocument();
-  });
-
-  it("puts the checkout's own tabs after it, each closable", () => {
+  it("leads with the unclosable pull request, then the checkout's own closable tabs", () => {
     mount(checkedOut({ rows: [row("t1", "agent", "Codex"), row("t2", "terminal", "Terminal 2")] }));
 
     expect(tabNames()).toEqual(["Pull Request", "Codex", "Terminal 2"]);
+    expect(screen.queryByRole("button", { name: "Close Pull Request" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close Codex" })).toBeVisible();
   });
 
-  // The same rule Trees follows: the row goes and the process goes with it, or a
-  // shell keeps running under a name nothing shows any more.
   /** The ticket is view state rather than a row, but on the strip it is a tab
    *  like the rest: named, marked, and closable. */
   it("lists the expanded ticket as a closable Linear tab", () => {
@@ -163,6 +155,8 @@ describe("ReviewTabBar", () => {
     expect(tabs.closeIssueView).toHaveBeenCalledTimes(1);
   });
 
+  // The same rule Trees follows: the row goes and the process goes with it, or a
+  // shell keeps running under a name nothing shows any more.
   it("tears down a checkout tab's PTY session when the tab is closed", () => {
     const tabs = checkedOut({ rows: [row("t1", "terminal", "Terminal 2")] });
     mount(tabs);
@@ -215,42 +209,29 @@ describe("ReviewTabBar", () => {
     /** The review brings its own checkout — which is exactly why it asks first:
      *  a working tree on disk is a consequence, and it used to appear without a
      *  word. The setup script is the dialog's one option, off unless asked for. */
-    it("asks before the AI review cuts the checkout it needs", async () => {
+    it("asks before the AI review cuts the checkout it needs, and starts nothing if declined", async () => {
       const tabs = tabsModel();
       mount(tabs);
       openMenu();
-
-      fireEvent.click(screen.getByRole("button", { name: "Codex review" }));
-      expect(tabs.openReview).not.toHaveBeenCalled();
-      expect(screen.getByRole("dialog")).toHaveTextContent(/Reviewing with Codex needs/);
-
-      fireEvent.click(screen.getByRole("button", { name: "Create worktree" }));
-      await waitFor(() => expect(tabs.openReview).toHaveBeenCalledWith("Codex", false));
-    });
-
-    it("starts nothing when the worktree is declined", async () => {
-      const tabs = tabsModel();
-      mount(tabs);
-      openMenu();
-
       fireEvent.click(screen.getByRole("button", { name: "Codex review" }));
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
       expect(tabs.openReview).not.toHaveBeenCalled();
-    });
 
-    it("offers no terminal, since there would be nowhere to run it", () => {
-      mount(tabsModel());
       openMenu();
-
-      expect(screen.queryByRole("button", { name: /Terminal/ })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Codex review" }));
+      expect(screen.getByRole("dialog")).toHaveTextContent(/Reviewing with Codex needs/);
+      fireEvent.click(screen.getByRole("button", { name: "Create worktree" }));
+      await waitFor(() => expect(tabs.openReview).toHaveBeenCalledWith("Codex", false));
     });
 
-    it("offers to cut the checkout instead — the header's own flow", () => {
+    it("offers to cut the checkout instead of a terminal — the header's own flow", () => {
       const tabs = tabsModel();
       mount(tabs);
       openMenu();
 
+      // There would be nowhere to run a terminal.
+      expect(screen.queryByRole("button", { name: /Terminal/ })).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: /Open as tree/ }));
       expect(tabs.checkout.openAsTree).toHaveBeenCalled();
       expect(tabs.addTab).not.toHaveBeenCalled();
@@ -268,18 +249,13 @@ describe("ReviewTabBar", () => {
   });
 
   describe("the new-tab menu with a checkout", () => {
-    it("opens terminals and agents in it", () => {
+    it("opens terminals and agents in it, apart from the AI review", () => {
       const tabs = checkedOut();
       mount(tabs);
       openMenu();
-
       fireEvent.click(screen.getByRole("button", { name: /Terminal/ }));
       expect(tabs.addTab).toHaveBeenCalledWith("terminal");
-    });
 
-    it("keeps the AI review a separate choice from an agent working in the tree", () => {
-      const tabs = checkedOut();
-      mount(tabs);
       openMenu();
 
       // Two Codex rows: the review, and an agent in the tree. Same provider,

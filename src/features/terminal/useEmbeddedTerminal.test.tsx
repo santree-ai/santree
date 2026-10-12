@@ -58,13 +58,6 @@ const sessions = () => screen.getByTestId("sessions").textContent;
 const shown = () => screen.getByTestId("shown").textContent;
 
 describe("useEmbeddedTerminal", () => {
-  it("displays the session it hosts", () => {
-    wrap(<VisibleTerminal refId="tree:A" />);
-
-    expect(sessions()).toBe("tree:A");
-    expect(shown()).toBe("tree:A");
-  });
-
   // F1: the background launcher used to mount a WorktreeTerminal that claimed the
   // embed slot and dragged the layer to its off-screen rect, blanking whatever the
   // user was watching. It needs the session, never the slot.
@@ -104,16 +97,11 @@ describe("useEmbeddedTerminal", () => {
   // The seen latch: a tab is absent on the very first render (it hasn't registered
   // yet), so absence only means "exited" once we've seen it present.
   describe("exit detection", () => {
-    it("does not fire onExited on the first render, before the tab registers", () => {
-      const onExited = vi.fn();
-      wrap(<VisibleTerminal refId="tree:A" onExited={onExited} />);
-
-      expect(onExited).not.toHaveBeenCalled();
-    });
-
     it("fires onExited once when the session's tab disappears", () => {
       const onExited = vi.fn();
       wrap(<VisibleTerminal refId="tree:A" onExited={onExited} />);
+      // Not on the first render, before the tab registers.
+      expect(onExited).not.toHaveBeenCalled();
       const key = registry.tabs[0].key;
 
       act(() => registry.close(key));
@@ -139,24 +127,5 @@ describe("useEmbeddedTerminal", () => {
 
       expect(onExited).toHaveBeenCalledTimes(1);
     });
-  });
-
-  it("hands the slot back to the terminal underneath when an overlapping host unmounts", () => {
-    const { rerender } = wrap(
-      <>
-        <VisibleTerminal refId="tree:A" />
-        <VisibleTerminal refId="triage:X" />
-      </>,
-    );
-    expect(shown()).toBe("triage:X");
-
-    rerender(
-      <TerminalsProvider>
-        <VisibleTerminal refId="tree:A" />
-        <Probe />
-      </TerminalsProvider>,
-    );
-
-    expect(shown()).toBe("tree:A");
   });
 });

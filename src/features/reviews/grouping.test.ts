@@ -98,17 +98,12 @@ describe("inboxOfProject", () => {
     githubConnected: true,
   };
 
-  it("keeps only one project's PRs, `mine` included", () => {
+  // A team left with nothing is dropped rather than rendered as an empty heading.
+  it("keeps only one project's PRs, `mine` included, dropping emptied teams", () => {
     const scoped = inboxOfProject(inbox, "acme/web");
     expect(scoped.mine.map((p) => p.id)).toEqual(["m1"]);
     expect(scoped.requested.map((p) => p.id)).toEqual(["r1"]);
     expect(scoped.teams.map((t) => t.slug)).toEqual(["eng"]);
-  });
-
-  /** A team left with nothing is dropped rather than rendered as an empty
-   *  heading — the same reason the categories drop their own empty sections. */
-  it("drops a team that has nothing left in this project", () => {
-    expect(inboxOfProject(inbox, "acme/kubernetes").teams.map((t) => t.slug)).toEqual(["ops"]);
   });
 
   /** `null` is a scope of its own, not "no scope": it is how the other-repos band
@@ -125,42 +120,24 @@ describe("inboxOfProject", () => {
  * blank column where a branch has already ended.
  */
 describe("stackGuides", () => {
-  /** `└` all the way down. The bug this replaced drew a rule at column 0 through
-   *  C's row — under a B that nothing else hangs off — and stopped B's own at its
-   *  elbow, so the guide broke and restarted a few pixels lower. */
-  it("draws nothing under a last child, at any depth", () => {
-    expect(stackGuides([{ depth: 0 }, { depth: 1 }, { depth: 2 }] as StackedPr[])).toEqual([
-      [],
-      [false],
-      [false, false],
-    ]);
-  });
-
-  /** A PR with a sibling still to come continues through its own elbow. */
-  it("continues a column while the branch that owns it has more below", () => {
-    expect(stackGuides([{ depth: 0 }, { depth: 1 }, { depth: 1 }] as StackedPr[])).toEqual([
-      [],
-      [true],
-      [false],
-    ]);
-  });
-
-  /** The ancestor's rule runs past its child's descendants — that is the one
-   *  case where a column is drawn on a row it does not belong to. */
-  it("keeps an ancestor's rule alive through its child's own stack", () => {
-    expect(
-      stackGuides([{ depth: 0 }, { depth: 1 }, { depth: 2 }, { depth: 1 }] as StackedPr[]),
-    ).toEqual([[], [true], [true, false], [false]]);
-  });
-
-  /** Back out to a root and the deeper columns are closed, not carried. */
-  it("closes every column deeper than the row it reaches", () => {
-    expect(
-      stackGuides([{ depth: 0 }, { depth: 1 }, { depth: 2 }, { depth: 0 }] as StackedPr[]),
-    ).toEqual([[], [false], [false, false], []]);
-  });
-
-  it("has nothing to draw for a flat list", () => {
-    expect(stackGuides([{ depth: 0 }, { depth: 0 }] as StackedPr[])).toEqual([[], []]);
+  /** Each case is the figure its rows draw: `true` continues a column through the
+   *  row, `false` is an elbow that ends there. The bug this replaced drew a rule
+   *  at column 0 under a last child and stopped its own at the elbow. */
+  it.each<[string, number[], boolean[][]]>([
+    ["draws nothing under a last child, at any depth", [0, 1, 2], [[], [false], [false, false]]],
+    ["continues a column while its branch has more below", [0, 1, 1], [[], [true], [false]]],
+    [
+      "keeps an ancestor's rule alive through its child's own stack",
+      [0, 1, 2, 1],
+      [[], [true], [true, false], [false]],
+    ],
+    [
+      "closes every column deeper than the row it reaches",
+      [0, 1, 2, 0],
+      [[], [false], [false, false], []],
+    ],
+    ["has nothing to draw for a flat list", [0, 0], [[], []]],
+  ])("%s", (_, depths, guides) => {
+    expect(stackGuides(depths.map((depth) => ({ depth })) as StackedPr[])).toEqual(guides);
   });
 });

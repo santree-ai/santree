@@ -63,8 +63,11 @@ describe("ServerSegment", () => {
     expect(screen.getByRole("button", { name: /server failing/ })).toBeInTheDocument();
   });
 
-  it("shows Starting only after it has lasted past the grace period", () => {
-    world.state = { kind: "Starting" };
+  it.each([
+    ["Starting", /server starting/],
+    ["Stopping", /server stopping/],
+  ] as const)("shows %s only after it has lasted past the grace period", (kind, name) => {
+    world.state = { kind };
     const { container } = render(<ServerSegment />);
     expect(container).toBeEmptyDOMElement();
     act(() => {
@@ -74,16 +77,6 @@ describe("ServerSegment", () => {
     act(() => {
       vi.advanceTimersByTime(1);
     });
-    expect(screen.getByRole("button", { name: /server starting/ })).toBeInTheDocument();
-  });
-
-  it("names a stop as stopping once it has lasted the grace period", () => {
-    world.state = { kind: "Stopping" };
-    const { container } = render(<ServerSegment />);
-    expect(container).toBeEmptyDOMElement();
-    act(() => {
-      vi.advanceTimersByTime(TRANSITION_GRACE_MS);
-    });
-    expect(screen.getByRole("button", { name: /server stopping/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name })).toBeInTheDocument();
   });
 });

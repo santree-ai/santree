@@ -55,12 +55,9 @@ function entry(over: Partial<MergeQueueEntry> = {}): MergeQueueEntry {
 }
 
 describe("MergeQueuePane", () => {
-  it("names the repository that has no merge queue", () => {
+  it("names the repository that has no merge queue, or an empty one", () => {
     show({ repo: "acme/web", githubConnected: true, queue: null });
     expect(screen.getByText(/^acme\/web doesn't have a merge queue/)).toBeInTheDocument();
-  });
-
-  it("names the repository whose queue is empty", () => {
     show({ repo: "acme/web", githubConnected: true, queue: queue() });
     expect(screen.getByText(/waiting to merge into acme\/web/)).toBeInTheDocument();
   });

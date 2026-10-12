@@ -103,9 +103,10 @@ describe("the Santree demo", () => {
   const worktreesOf = (repo: string) => unwrap(cmd("worktrees")(repo));
   const sessionStates = () => unwrap(cmd("sessionStates")());
 
-  it("opens on three projects with chained worktrees", async () => {
+  it("opens on three projects, infra first and the Work default, with chained worktrees", async () => {
     const repos = await unwrap(cmd("listRepos")());
     expect(repos.map((r) => r.name)).toEqual([INFRA, PLATFORM, "parcelwise/driver-app"]);
+    expect(await unwrap(cmd("resolveSetting")(INFRA, "work_default_repo"))).toBe(INFRA);
     const byId = new Map((await worktreesOf(PLATFORM)).map((w) => [w.id, w]));
     expect(byId.get("PLAT-402")?.baseBranch).toBe(byId.get("PLAT-401")?.branch);
     expect(byId.get("PLAT-404")?.baseBranch).toBe(byId.get("PLAT-402")?.branch);
@@ -122,12 +123,6 @@ describe("the Santree demo", () => {
       .filter((t) => t.ready && t.actionable && !started.has(t.id))
       .map((t) => t.id);
     expect(ready.sort()).toEqual(["PLAT-418", "PLAT-421", "PLAT-424", "PLAT-427"]);
-  });
-
-  it("launches into infra, listed first", async () => {
-    const repos = await unwrap(cmd("listRepos")());
-    expect(repos[0].name).toBe(INFRA);
-    expect(await unwrap(cmd("resolveSetting")(INFRA, "work_default_repo"))).toBe(INFRA);
   });
 
   const detail = (n: number) => unwrap(cmd("prDetail")("parcelwise", "infra", n));

@@ -195,47 +195,33 @@ mod tests {
         );
     }
 
+    /// An entry that cannot cross unchanged — a name or value that is not
+    /// UTF-8, or a name no environment can hold — is dropped, not mangled.
     #[test]
-    fn a_name_or_value_that_is_not_utf8_is_dropped_not_mangled() {
+    fn an_entry_that_cannot_cross_unchanged_is_dropped() {
         use std::os::unix::ffi::OsStringExt;
         let bad = OsString::from_vec(vec![b'o', b'k', 0xff]);
-        let ambient = vec![
-            (OsString::from("GOOD"), OsString::from("1")),
+        let mut ambient: Vec<_> = os(&[("", "1"), ("A=B", "1"), ("GOOD", "1")]).collect();
+        ambient.extend([
             (OsString::from("BAD_VALUE"), bad.clone()),
             (bad, OsString::from("1")),
-        ];
+        ]);
         let base = forwardable(ambient.into_iter());
         assert_eq!(base, vec![("GOOD".to_string(), "1".to_string())]);
     }
 
+    /// A Daedalus session gets `TERM` and nothing of this Mac's environment;
+    /// an agent also carries the pair its hooks bind back by.
     #[test]
-    fn a_name_that_cannot_be_an_environment_variable_is_dropped() {
-        let base = forwardable(os(&[("", "1"), ("A=B", "1"), ("OK", "1")]));
-        assert_eq!(names(&base), ["OK"]);
-    }
-
-    #[test]
-    fn base_env_is_sorted_so_the_same_process_forwards_the_same_env() {
-        let base = forwardable(os(&[("Z", "1"), ("A", "2"), ("M", "3")]));
-        assert_eq!(names(&base), ["A", "M", "Z"]);
-    }
-
-    #[test]
-    fn a_daedalus_shell_gets_term_and_nothing_of_this_macs_environment() {
-        let env = daedalus_env("acme/web", &opts("tree:AK-1:tab:t1", None)).unwrap();
+    fn a_daedalus_session_gets_term_and_an_agent_its_hook_pair() {
+        let term = ("TERM".to_string(), "xterm-256color".to_string());
+        let shell = daedalus_env("acme/web", &opts("tree:AK-1:tab:t1", None)).unwrap();
+        assert_eq!(shell, vec![term.clone()]);
+        let agent = daedalus_env("acme/web", &opts("tree:AK-1", Some(AgentKind::Claude))).unwrap();
         assert_eq!(
-            env,
-            vec![("TERM".to_string(), "xterm-256color".to_string())]
-        );
-    }
-
-    #[test]
-    fn a_daedalus_agent_carries_the_pair_its_hooks_bind_back_by() {
-        let env = daedalus_env("acme/web", &opts("tree:AK-1", Some(AgentKind::Claude))).unwrap();
-        assert_eq!(
-            env,
+            agent,
             vec![
-                ("TERM".to_string(), "xterm-256color".to_string()),
+                term,
                 ("SANTREE_REPO".to_string(), "acme/web".to_string()),
                 ("SANTREE_TERM_KEY".to_string(), "tree:AK-1".to_string()),
             ]

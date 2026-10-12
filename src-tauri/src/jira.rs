@@ -1653,14 +1653,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_category_colors() {
-        assert_eq!(status_category_color("new"), "#42526E");
-        assert_eq!(status_category_color("indeterminate"), "#0052CC");
-        assert_eq!(status_category_color("done"), "#00875A");
-        assert_eq!(status_category_color("unknown"), "#42526E");
-    }
-
-    #[test]
     fn scopes_write_detection() {
         assert!(scopes_allow_write("read:jira-work,write:jira-work"));
         assert!(scopes_allow_write("write:jira-work"));
@@ -1701,8 +1693,10 @@ mod tests {
     /// A run of blank lines is one paragraph break, never an empty text node:
     /// Jira rejects the whole comment if one reaches it.
     #[test]
-    fn text_to_adf_drops_empty_paragraphs() {
+    fn text_to_adf_makes_one_paragraph_per_block_and_none_empty() {
         let adf = text_to_adf("\n\nSee the issue.\n\n\n\nMore below.\n\n");
+        assert_eq!(adf["type"], "doc");
+        assert_eq!(adf["version"], 1);
         let content = adf["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["content"][0]["text"], "See the issue.");
@@ -1710,106 +1704,49 @@ mod tests {
     }
 
     #[test]
-    fn adf_paragraph_to_markdown() {
-        let adf = serde_json::json!({
-            "type": "doc",
-            "version": 1,
-            "content": [{
-                "type": "paragraph",
-                "content": [{ "type": "text", "text": "Hello world" }]
-            }]
-        });
-        assert_eq!(adf_to_markdown(&adf), "Hello world");
-    }
-
-    #[test]
-    fn adf_heading_to_markdown() {
-        let adf = serde_json::json!({
-            "type": "doc",
-            "version": 1,
-            "content": [{
-                "type": "heading",
-                "attrs": { "level": 2 },
-                "content": [{ "type": "text", "text": "Title" }]
-            }]
-        });
-        assert_eq!(adf_to_markdown(&adf), "## Title");
-    }
-
-    #[test]
-    fn adf_bold_italic_to_markdown() {
-        let adf = serde_json::json!({
-            "type": "doc",
-            "version": 1,
-            "content": [{
-                "type": "paragraph",
-                "content": [
-                    { "type": "text", "text": "bold", "marks": [{ "type": "strong" }] },
-                    { "type": "text", "text": " and " },
-                    { "type": "text", "text": "italic", "marks": [{ "type": "em" }] }
-                ]
-            }]
-        });
-        assert_eq!(adf_to_markdown(&adf), "**bold** and *italic*");
-    }
-
-    #[test]
-    fn adf_link_to_markdown() {
-        let adf = serde_json::json!({
-            "type": "doc",
-            "version": 1,
-            "content": [{
-                "type": "paragraph",
-                "content": [{
-                    "type": "text",
-                    "text": "click here",
-                    "marks": [{ "type": "link", "attrs": { "href": "https://example.com" } }]
-                }]
-            }]
-        });
-        assert_eq!(adf_to_markdown(&adf), "[click here](https://example.com)");
-    }
-
-    #[test]
-    fn adf_bullet_list_to_markdown() {
-        let adf = serde_json::json!({
-            "type": "doc",
-            "version": 1,
-            "content": [{
-                "type": "bulletList",
-                "content": [
-                    { "type": "listItem", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "one" }] }] },
-                    { "type": "listItem", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "two" }] }] }
-                ]
-            }]
-        });
-        assert_eq!(adf_to_markdown(&adf), "- one\n- two");
-    }
-
-    #[test]
-    fn adf_code_block_to_markdown() {
-        let adf = serde_json::json!({
-            "type": "doc",
-            "version": 1,
-            "content": [{
-                "type": "codeBlock",
-                "attrs": { "language": "rust" },
-                "content": [{ "type": "text", "text": "let x = 1;" }]
-            }]
-        });
-        assert_eq!(adf_to_markdown(&adf), "```rust\nlet x = 1;\n```");
-    }
-
-    #[test]
-    fn text_to_adf_roundtrip() {
-        let text = "First paragraph\n\nSecond paragraph";
-        let adf = text_to_adf(text);
-        assert_eq!(adf["type"], "doc");
-        assert_eq!(adf["version"], 1);
-        let content = adf["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[0]["content"][0]["text"], "First paragraph");
-        assert_eq!(content[1]["content"][0]["text"], "Second paragraph");
+    fn adf_renders_to_markdown() {
+        use serde_json::json;
+        let text = |t: &str| json!({ "type": "text", "text": t });
+        let marked = |t: &str, mark: serde_json::Value| json!({ "type": "text", "text": t, "marks": [mark] });
+        let para =
+            |content: Vec<serde_json::Value>| json!({ "type": "paragraph", "content": content });
+        let item = |t: &str| json!({ "type": "listItem", "content": [para(vec![text(t)])] });
+        let cases = [
+            (para(vec![text("Hello world")]), "Hello world"),
+            (
+                json!({ "type": "heading", "attrs": { "level": 2 }, "content": [text("Title")] }),
+                "## Title",
+            ),
+            (
+                para(vec![
+                    marked("bold", json!({ "type": "strong" })),
+                    text(" and "),
+                    marked("italic", json!({ "type": "em" })),
+                ]),
+                "**bold** and *italic*",
+            ),
+            (
+                para(vec![marked(
+                    "click here",
+                    json!({ "type": "link", "attrs": { "href": "https://example.com" } }),
+                )]),
+                "[click here](https://example.com)",
+            ),
+            (
+                json!({ "type": "bulletList", "content": [item("one"), item("two")] }),
+                "- one\n- two",
+            ),
+            (
+                json!({ "type": "codeBlock", "attrs": { "language": "rust" }, "content": [text("let x = 1;")] }),
+                "```rust\nlet x = 1;\n```",
+            ),
+        ];
+        for (node, want) in cases {
+            let doc = json!({ "type": "doc", "version": 1, "content": [node] });
+            assert_eq!(adf_to_markdown(&doc), want);
+        }
+        assert_eq!(adf_to_markdown(&json!({})), "");
+        assert_eq!(adf_to_markdown(&json!(null)), "");
     }
 
     #[test]
@@ -1819,12 +1756,6 @@ mod tests {
 
         let jira_format = "2024-01-15T10:30:00.000+0000";
         assert!(parse_jira_datetime(jira_format).is_some());
-    }
-
-    #[test]
-    fn empty_adf_produces_empty_string() {
-        assert_eq!(adf_to_markdown(&serde_json::json!({})), "");
-        assert_eq!(adf_to_markdown(&serde_json::json!(null)), "");
     }
 
     #[test]

@@ -312,6 +312,15 @@ impl LocalServers {
         Self::build(cfg, layout, REVISION)
     }
 
+    /// [`LocalServers::new`] over a test's own layout. Never the resolved one
+    /// in a test: that scans the real `$TMPDIR` run dir, where the user's own
+    /// opt-in dev server lives, and an older revision there would be adopted
+    /// as a draining server, sessions and all.
+    #[cfg(test)]
+    pub(crate) fn in_layout(cfg: ServerConfig, layout: Layout) -> Arc<Self> {
+        Self::build(cfg, Ok(layout), REVISION)
+    }
+
     /// [`LocalServers::new`] over a layout and revision the caller chose, for
     /// tests: a scratch dir, and a stand-in revision to discover the real
     /// server as an older one.

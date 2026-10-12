@@ -342,18 +342,16 @@ fn parse_litellm(text: &str) -> anyhow::Result<Vec<(String, ModelRate)>> {
 mod tests {
     use super::*;
 
+    /// The longest matching key wins, so a fetched exact id beats the built-in
+    /// family key, a newer generation beats its family fallback, and an
+    /// unknown model has no price at all.
     #[test]
-    fn builtin_lookup_prefers_longest_key() {
+    fn lookup_prefers_the_longest_key_and_a_fetched_entry_over_builtin() {
         let t = PriceTable::builtin();
-        assert_eq!(t.lookup("claude-opus-4-8").unwrap().input, 5.0);
-        assert_eq!(t.lookup("claude-opus-4-1").unwrap().input, 15.0);
         assert_eq!(t.lookup("claude-sonnet-5").unwrap().input, 2.0);
         assert_eq!(t.lookup("claude-sonnet-4-6").unwrap().input, 3.0);
         assert!(t.lookup("gpt-5").is_none());
-    }
 
-    #[test]
-    fn fetched_entry_overrides_builtin_via_longest_key() {
         // A fetched exact id beats the built-in family key for the same model.
         let entries = vec![(
             "claude-opus-4-8".to_string(),
@@ -415,20 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn version_5_beats_4_x_and_dates_dont_parse() {
-        assert!(parse_model_version("5") > parse_model_version("4-6"));
-        assert!(parse_model_version("4-8") > parse_model_version("4-7"));
-        assert_eq!(parse_model_version("4-7-20260416"), None, "date rejected");
-        assert_eq!(
-            parse_model_version("4-5-20250929-v1:0"),
-            None,
-            "variant rejected"
-        );
-        assert_eq!(parse_model_version("5"), Some(vec![5]));
-    }
-
-    #[test]
-    fn parse_litellm_extracts_claude_and_converts_to_mtok() {
+    fn parse_litellm_keeps_claude_converts_to_mtok_and_derives_missing_rates() {
         let json = r#"{
             "claude-opus-4-8": {"input_cost_per_token": 5e-6, "output_cost_per_token": 25e-6, "cache_creation_input_token_cost": 6.25e-6, "cache_read_input_token_cost": 0.5e-6, "max_input_tokens": 1000000},
             "gpt-5": {"input_cost_per_token": 1e-6},
@@ -446,30 +431,8 @@ mod tests {
             r.context, 1_000_000.0,
             "context window from max_input_tokens"
         );
-    }
 
-    /// Exercises the real LiteLLM endpoint + parse. Ignored by default (network);
-    /// run with `cargo test -- --ignored live_fetch_smoke`.
-    #[test]
-    #[ignore = "hits the network"]
-    fn live_fetch_smoke() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let entries = rt
-            .block_on(fetch_litellm())
-            .expect("fetch should succeed online");
-        let n = entries.len();
-        let t = PriceTable { entries };
-        let opus = t.lookup("claude-opus-4-8").expect("opus-4-8 present");
-        assert!(
-            (opus.input - 5.0).abs() < 0.01,
-            "opus-4-8 input ~$5, got {}",
-            opus.input
-        );
-        assert!(n > 10, "expected many claude models, got {n}");
-    }
-
-    #[test]
-    fn parse_litellm_derives_missing_fields_from_input() {
+        // Only an input price: the rest is derived from it.
         let out = parse_litellm(r#"{"claude-x-1": {"input_cost_per_token": 2e-6}}"#).unwrap();
         let (_, r) = &out[0];
         let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;

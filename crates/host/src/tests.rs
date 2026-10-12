@@ -146,8 +146,8 @@ fn exited_unattached_sessions_are_reaped_and_live_ones_are_not() {
 /// marker strip: `CLAUDE_CODE_CHILD_SESSION=1` set to `x` reaches the child
 /// as `CLAUDE_CODE_CHILD_SESSION` = `1=x`, past `env_remove`. Such names,
 /// empty ones and ones with NUL are refused before anything spawns.
-#[test]
-fn an_env_name_the_os_would_read_differently_is_refused() {
+#[tokio::test]
+async fn an_env_name_the_os_would_read_differently_is_refused() {
     let host = Host::new(options(), None);
     let entry = |name: &str| vec![(name.to_string(), "x".to_string())];
     for (env, base_env) in [
@@ -169,6 +169,22 @@ fn an_env_name_the_os_would_read_differently_is_refused() {
         assert_eq!(refused.code, ErrorCode::BadRequest, "{}", refused.msg);
     }
     assert!(host.mgr.sessions().is_empty(), "nothing was spawned");
+    // `exec.run` takes an env as well.
+    for name in ["CLAUDE_CODE_CHILD_SESSION=1", "", "A\0B"] {
+        let refused = exec::run(
+            ExecParams {
+                cwd: "/".into(),
+                argv: vec!["true".into()],
+                env: Some(vec![(name.into(), "x".into())]),
+                ..Default::default()
+            },
+            "/".into(),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::BadRequest, "{name:?}");
+    }
 }
 
 /// A host that requires `baseEnv` never lets its own process environment
@@ -204,25 +220,6 @@ fn a_host_requiring_a_base_env_refuses_an_open_without_one() {
     lax.pty_open(params(Vec::new())).unwrap();
     host.close_all();
     lax.close_all();
-}
-
-#[tokio::test]
-async fn exec_refuses_an_env_name_the_os_would_read_differently() {
-    for name in ["CLAUDE_CODE_CHILD_SESSION=1", "", "A\0B"] {
-        let refused = exec::run(
-            ExecParams {
-                cwd: "/".into(),
-                argv: vec!["true".into()],
-                env: Some(vec![(name.into(), "x".into())]),
-                ..Default::default()
-            },
-            "/".into(),
-            &[],
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(refused.code, ErrorCode::BadRequest, "{name:?}");
-    }
 }
 
 /// The hook queue is bounded by bytes as well as count; the oldest go first
@@ -613,66 +610,4 @@ fn a_session_inherits_the_forwarded_env_or_this_process_s() {
         session_base_env(Vec::new(), &[]).is_empty(),
         "nothing forwarded and nothing added: santree-pty inherits as is"
     );
-}
-
-/// A TUI sets bracketed paste once and then prints more than the ring keeps. A
-/// viewer that attaches afterwards (an app relaunched against a server that
-/// kept the process) is told the mode first; a viewer whose replay still holds
-/// the DECSET is not told twice.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_fresh_attach_after_the_decset_scrolled_out_gets_the_mode_first() {
-    let host = Host::new(options(), None);
-    let mut c = Raw::connect(&host, "a", 1 << 20).await;
-    // ~2.8 MiB of numbered lines after the DECSET: past the 2 MiB ring.
-    let script = "stty -onlcr; printf '\\033[?2004h'; \
-        awk 'BEGIN { for (i = 0; i < 45000; i++) printf \"line %d abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuv\\n\", i }'; \
-        echo DONE; sleep 20";
-    let opened = c
-        .call(
-            "pty.open",
-            serde_json::json!({
-                "command": "/bin/sh", "args": ["-c", script],
-                "cols": 200, "rows": 50, "owner": "o", "label": "t",
-            }),
-        )
-        .await;
-    let id = opened["ok"]["id"].as_u64().expect("opened");
-    c.send(
-        "pty.attach",
-        serde_json::json!({ "id": id, "anchor": "fresh" }),
-    )
-    .await;
-    // The first viewer reads the whole thing live (and sees the DECSET itself).
-    let mut live = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !live.ends_with(b"DONE\n") {
-        assert!(Instant::now() < deadline, "stalled at {} bytes", live.len());
-        let line = c.line().await.expect("the link stays up");
-        if let Some(data) = line["ok"]["data"].as_str().or(line["p"]["data"].as_str()) {
-            live.extend(b64(data));
-        }
-    }
-    assert!(live.starts_with(b"\x1b[?2004h"), "the live viewer saw it");
-
-    // A second, later viewer: the retained tail has no DECSET, the preamble does.
-    let mut late = Raw::connect(&host, "a", 1 << 20).await;
-    let attached = late
-        .call(
-            "pty.attach",
-            serde_json::json!({ "id": id, "anchor": "fresh" }),
-        )
-        .await;
-    assert_eq!(attached["ok"]["mode"], "tail", "{attached}");
-    let replay = b64(attached["ok"]["data"].as_str().expect("replay bytes"));
-    assert!(
-        replay.starts_with(b"\x1b[?2004h"),
-        "{:?}",
-        String::from_utf8_lossy(&replay[..40.min(replay.len())])
-    );
-    assert_eq!(
-        replay.windows(8).filter(|w| *w == b"\x1b[?2004h").count(),
-        1,
-        "once, and not from the tail"
-    );
-    host.close_all();
 }

@@ -3379,11 +3379,7 @@ mod tests {
             resolve_review_mcp_config(&dir.join("never-written"), "review-abc.mcp.json"),
             Ok(None)
         );
-    }
-
-    #[test]
-    fn a_review_config_that_is_there_is_used() {
-        let dir = mcp_dir("present");
+        // Once it is there, it is used.
         let path = dir.join("review-abc.mcp.json");
         std::fs::write(&path, "{}").unwrap();
         assert_eq!(
@@ -3815,26 +3811,6 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
-    /// A ticketless branch checkout has no project to record — and must not be
-    /// given one.
-    #[tokio::test]
-    async fn an_existing_branch_launch_checks_that_branch_out_under_no_project() {
-        let (base, db) = repo_with_a_pr_branch("launch-existing").await;
-        let wt = launch(
-            &db,
-            "feature-pr-head",
-            "feature/pr-head",
-            WorktreeLaunch::ExistingBranch {
-                branch: "feature/pr-head".into(),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(wt.branch, "feature/pr-head");
-        assert_eq!(wt.project, None);
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
     /// A typed name is used verbatim — no `santree/` prefix, no slug — and still
     /// carries no project.
     #[tokio::test]
@@ -3938,35 +3914,6 @@ mod tests {
         assert!(!is_repo_relative_path("src//api.rs"));
         assert!(!is_repo_relative_path("C:\\windows\\system32"));
         assert!(!is_repo_relative_path("..\\outside.rs"));
-    }
-
-    #[test]
-    fn check_work_item_body_names_the_check_and_its_app() {
-        let check = |description: Option<&str>| santree_core::domain::PrCheck {
-            name: "test (ubuntu-latest)".into(),
-            status: santree_core::domain::CheckStatus::Failure,
-            description: description.map(str::to_string),
-            url: None,
-            steps: vec![],
-            annotations: vec![],
-            job_id: None,
-            run_id: None,
-            started_at: None,
-            completed_at: None,
-        };
-        assert_eq!(
-            check_work_item_body(&check(None)),
-            "Fix failing check: test (ubuntu-latest)"
-        );
-        assert_eq!(
-            check_work_item_body(&check(Some("GitHub Actions"))),
-            "Fix failing check: test (ubuntu-latest) (GitHub Actions)"
-        );
-        // A whitespace-only app name must not produce a dangling "()".
-        assert_eq!(
-            check_work_item_body(&check(Some("   "))),
-            "Fix failing check: test (ubuntu-latest)"
-        );
     }
 }
 

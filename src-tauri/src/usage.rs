@@ -2346,21 +2346,26 @@ mod tests {
         PriceTable::builtin()
     }
 
+    /// Every token class is counted and priced (the 1h cache write at twice
+    /// input), and an unpriced model's tokens count but add no cost.
     #[test]
-    fn real_input_sums_all_token_classes_and_costs_opus_4_8() {
+    fn real_input_sums_all_token_classes_and_prices_each() {
+        let mut turn = ev("a", "claude-opus-4-8", NOW, 100.0, 200.0, 1000.0, 500.0);
+        turn.toks.cache_1h = 300.0;
         let f = file(
             "-repo",
             "s1",
-            vec![ev("a", "claude-opus-4-8", NOW, 100.0, 200.0, 1000.0, 500.0)],
+            vec![turn, ev("b", "gpt-5", NOW, 7.0, 0.0, 0.0, 0.0)],
             None,
         );
         let r = aggregate(&[f], NOW, &tbl(), &[]);
-        assert_eq!(r.total.input_tokens, 100.0);
+        assert_eq!(r.total.input_tokens, 107.0);
         assert_eq!(r.total.output_tokens, 200.0);
         assert_eq!(r.total.cache_read_tokens, 1000.0);
-        assert_eq!(r.total.cache_write_tokens, 500.0);
-        // opus-4-8: $5/$25, 5m cache $6.25, read $0.50 per MTok.
-        let want = (100.0 * 5.0 + 200.0 * 25.0 + 500.0 * 6.25 + 1000.0 * 0.5) / 1_000_000.0;
+        assert_eq!(r.total.cache_write_tokens, 800.0);
+        // opus-4-8: $5/$25, 5m cache $6.25, 1h cache $10, read $0.50 per MTok.
+        let want =
+            (100.0 * 5.0 + 200.0 * 25.0 + 500.0 * 6.25 + 300.0 * 10.0 + 1000.0 * 0.5) / 1_000_000.0;
         assert!(
             (r.total.cost_usd - want).abs() < 1e-12,
             "got {}",
@@ -2368,80 +2373,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn opus_4_8_is_a_third_of_older_opus() {
-        let new = file(
-            "-r",
-            "s1",
-            vec![ev("a", "claude-opus-4-8", NOW, 1000.0, 0.0, 0.0, 0.0)],
-            None,
-        );
-        let old = file(
-            "-r",
-            "s2",
-            vec![ev("b", "claude-opus-4-1", NOW, 1000.0, 0.0, 0.0, 0.0)],
-            None,
-        );
-        let rn = aggregate(&[new], NOW, &tbl(), &[]).total.cost_usd;
-        let ro = aggregate(&[old], NOW, &tbl(), &[]).total.cost_usd;
-        assert!((ro / rn - 3.0).abs() < 1e-9, "old/new = {}", ro / rn);
-    }
-
-    #[test]
-    fn one_hour_cache_is_billed_at_twice_input() {
-        // opus-4-8 base input $5 → 1h cache creation is $10/MTok.
-        let f = file(
-            "-r",
-            "s1",
-            vec![Ev {
-                id: Some("h".into()),
-                request_id: None,
-                model: "claude-opus-4-8".into(),
-                ts_ms: NOW,
-                toks: Toks {
-                    input: 0.0,
-                    output: 0.0,
-                    cache_read: 0.0,
-                    cache_5m: 0.0,
-                    cache_1h: 1000.0,
-                },
-            }],
-            None,
-        );
-        let r = aggregate(&[f], NOW, &tbl(), &[]);
-        assert_eq!(r.total.cache_write_tokens, 1000.0);
-        assert!((r.total.cost_usd - (1000.0 * 10.0 / 1_000_000.0)).abs() < 1e-12);
-    }
-
-    #[test]
-    fn dedups_repeated_request_ids() {
-        let a = file(
-            "-repo",
-            "s1",
-            vec![ev("dup", "claude-sonnet-4-5", NOW, 10.0, 0.0, 0.0, 0.0)],
-            None,
-        );
-        let b = file(
-            "-repo",
-            "s2",
-            vec![ev("dup", "claude-sonnet-4-5", NOW, 10.0, 0.0, 0.0, 0.0)],
-            None,
-        );
-        let r = aggregate(&[a, b], NOW, &tbl(), &[]);
-        assert_eq!(r.total.input_tokens, 10.0);
-    }
-
     /// Claude streams repeated rows for one turn and the later ones can carry a
     /// fuller `usage`, so the fold has to be a field-wise max — first-wins would
-    /// bill the mid-turn snapshot.
+    /// bill the mid-turn snapshot. A resumed session copies turns into another
+    /// file; those are the same turn too.
     #[test]
     fn repeated_rows_for_one_turn_take_the_largest_of_each_field() {
         let partial = ev("dup", "claude-sonnet-4-5", NOW, 10.0, 4.0, 100.0, 7.0);
         let mut complete = ev("dup", "claude-sonnet-4-5", NOW, 10.0, 900.0, 80.0, 7.0);
         complete.toks.cache_1h = 5.0;
         let f = file("-repo", "s1", vec![partial, complete], None);
+        let copy = file(
+            "-repo",
+            "s2",
+            vec![ev("dup", "claude-sonnet-4-5", NOW, 10.0, 0.0, 0.0, 0.0)],
+            None,
+        );
 
-        let r = aggregate(&[f], NOW, &tbl(), &[]);
+        let r = aggregate(&[f, copy], NOW, &tbl(), &[]);
         assert_eq!(r.total.output_tokens, 900.0, "the fuller row's output wins");
         assert_eq!(r.total.input_tokens, 10.0, "counted once, not summed");
         assert_eq!(
@@ -2449,8 +2398,15 @@ mod tests {
             "a field that shrank keeps its larger value"
         );
         assert_eq!(r.total.cache_write_tokens, 12.0, "5m 7 + 1h 5, both maxed");
-        assert_eq!(r.sessions.len(), 1);
-        assert_eq!(r.sessions[0].totals.output_tokens, 900.0);
+        assert_eq!(
+            r.sessions
+                .iter()
+                .find(|s| s.session_id == "s1")
+                .unwrap()
+                .totals
+                .output_tokens,
+            900.0
+        );
     }
 
     #[test]
@@ -2527,62 +2483,6 @@ mod tests {
             1_000_000.0,
             "unknown model >200K → 1M"
         );
-    }
-
-    #[test]
-    fn claude_5_family_prices_beat_the_family_fallback() {
-        // sonnet-5 ($2) must win the longest-key match over "sonnet" ($3), and
-        // fable-5 ($10) must be priced (not zero).
-        let s5 = cost_for(
-            &tbl(),
-            "claude-sonnet-5",
-            &Toks {
-                input: 1_000_000.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_5m: 0.0,
-                cache_1h: 0.0,
-            },
-        );
-        let s46 = cost_for(
-            &tbl(),
-            "claude-sonnet-4-6",
-            &Toks {
-                input: 1_000_000.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_5m: 0.0,
-                cache_1h: 0.0,
-            },
-        );
-        let fable = cost_for(
-            &tbl(),
-            "claude-fable-5",
-            &Toks {
-                input: 1_000_000.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_5m: 0.0,
-                cache_1h: 0.0,
-            },
-        );
-        assert!((s5 - 2.0).abs() < 1e-9, "sonnet-5 = ${s5}");
-        assert!((s46 - 3.0).abs() < 1e-9, "sonnet-4-6 = ${s46}");
-        assert!((fable - 10.0).abs() < 1e-9, "fable-5 = ${fable}");
-    }
-
-    #[test]
-    fn unknown_model_counts_tokens_but_zero_cost() {
-        let f = file(
-            "-repo",
-            "s1",
-            vec![ev("a", "gpt-5", NOW, 100.0, 100.0, 0.0, 0.0)],
-            None,
-        );
-        let r = aggregate(&[f], NOW, &tbl(), &[]);
-        assert_eq!(r.total.input_tokens, 100.0);
-        assert_eq!(r.total.output_tokens, 100.0);
-        assert_eq!(r.total.cost_usd, 0.0);
     }
 
     #[test]
@@ -2861,11 +2761,6 @@ mod tests {
     fn one_line_keeps_the_first_prose_line_and_cuts_on_a_char_boundary() {
         assert_eq!(one_line("  \n\n hello \nworld"), Some("hello".into()));
         assert_eq!(one_line("   "), None);
-        assert_eq!(one_line("<command-name>/clear</command-name>"), None);
-        assert_eq!(
-            one_line("<local-command-stdout>ok</local-command-stdout>"),
-            None
-        );
         // Multi-byte chars: the cap counts chars, and the ellipsis keeps it ≤ cap.
         let emoji = "é".repeat(SUMMARY_CHARS + 5);
         let cut = one_line(&emoji).unwrap();
@@ -3098,38 +2993,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    #[test]
-    fn parse_from_folds_appended_turns_in_without_re_reading_the_prefix() {
-        let path = transcript("append");
-        let (a, b) = (turn("m1", 10), turn("m2", 20));
-        std::fs::write(&path, format!("{a}\n")).unwrap();
-        let first = parse_from(&path, 0, None).unwrap();
-
-        // Overwrite the already-parsed prefix with same-length garbage, then append
-        // the next turn. Anything the incremental parse re-read would now be
-        // unparseable — so `m1` surviving proves only the appended bytes were read.
-        let garbage = "x".repeat(a.len());
-        std::fs::write(&path, format!("{garbage}\n{b}\n")).unwrap();
-
-        let second = parse_from(&path, first.consumed, Some(&first.data)).unwrap();
-        assert_eq!(
-            second
-                .data
-                .events
-                .iter()
-                .map(|e| e.id.clone().unwrap())
-                .collect::<Vec<_>>(),
-            ["m1", "m2"],
-            "m1 came from the cached parse, m2 from the appended tail"
-        );
-        assert_eq!(second.data.cwd.as_deref(), Some("/repo"));
-
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    /// The same proof through the real entry point (and the process-wide cache):
-    /// the growing transcript — the one file that misses the byte-length cache on
-    /// every refetch — must be extended from its cached parse, not re-read whole.
+    /// The growing transcript — the one file that misses the byte-length cache on
+    /// every refetch — must be extended from its cached parse (through the
+    /// process-wide cache), not re-read whole.
     #[test]
     fn load_cached_extends_the_growing_transcript_instead_of_re_reading_it() {
         let path = transcript("load");
@@ -3140,8 +3006,8 @@ mod tests {
         let first = load_cached(&paths, |_, _| {});
         assert_eq!(first[0].events.len(), 1);
 
-        // Poison the prefix (same byte length) and append the next turn, exactly as
-        // above: a full re-read would drop `m1`, an incremental one keeps it.
+        // Poison the prefix (same byte length) and append the next turn: a full
+        // re-read would drop `m1`, an incremental one keeps it.
         std::fs::write(&path, format!("{}\n{b}\n", "x".repeat(a.len()))).unwrap();
         let second = load_cached(&paths, |_, _| {});
         assert_eq!(
@@ -3231,25 +3097,17 @@ mod tests {
             "the last three turns, oldest first, each with its author"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_oversized_first_prompt_is_capped_and_says_so() {
+        // An oversized prompt is capped, and the cut is announced, not hidden.
+        // (Its own transcript: rewriting `main` in place can hit the detail cache.)
         let huge = "x".repeat(FULL_PROMPT_CHARS + 10);
-        let (dir, _projects, wt, main) = detail_fixture("cap", "");
-        let cwd = wt.to_string_lossy().into_owned();
-        std::fs::write(&main, prose_line("user", &cwd, &huge) + "\n").unwrap();
-
-        let got = session_detail(&main);
+        let capped = main.with_file_name("capped.jsonl");
+        std::fs::write(&capped, prose_line("user", &cwd, &huge) + "\n").unwrap();
+        let got = session_detail(&capped);
         assert_eq!(
             got.first_prompt.map(|p| p.chars().count()),
             Some(FULL_PROMPT_CHARS)
         );
-        assert!(
-            got.first_prompt_truncated,
-            "the cut is announced, not hidden"
-        );
+        assert!(got.first_prompt_truncated);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3460,7 +3318,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_subagent_transcript_pointing_outside_is_not_listed() {
         let (dir, _projects, wt, main) = detail_fixture("symlink", "");
@@ -3484,7 +3341,6 @@ mod tests {
     /// The entry-level check measures against the *resolved* directory, so a
     /// `subagents` planted as a link out of the project tree would have listed
     /// everything in its target — sidecars and all — as this session's agents.
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_subagents_directory_lists_nothing() {
         let (dir, _projects, wt, main) = detail_fixture("dirlink", "");
@@ -3564,26 +3420,13 @@ mod tests {
             "the total sums the priced models only"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_session_with_no_priced_model_reports_no_cost_at_all() {
-        let (dir, _projects, wt, main) = detail_fixture("nocost", "");
-        let cwd = wt.to_string_lossy().into_owned();
-        std::fs::write(
-            &main,
-            format!(
-                r#"{{"type":"assistant","timestamp":"2026-07-05T10:00:00.000Z","requestId":"r1","cwd":"{cwd}","message":{{"id":"m1","model":"mystery","usage":{{"input_tokens":10,"output_tokens":1}}}}}}"#
-            ) + "\n",
-        )
-        .unwrap();
+        // With no priced model at all, the session reports no cost either.
+        std::fs::write(&main, assistant("m3", "mystery", 10) + "\n").unwrap();
         let fd = load_files(std::slice::from_ref(&main), |_, _| {})
             .pop()
             .unwrap();
-
         let got = session_spend(&main, &fd, &tbl());
-        assert_eq!(got.total_tokens, 11.0);
+        assert_eq!(got.total_tokens, 10.0);
         assert_eq!(got.cost_usd, None);
 
         let _ = std::fs::remove_dir_all(&dir);

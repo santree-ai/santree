@@ -61,16 +61,13 @@ beforeEach(() => {
 });
 
 describe("DaedalusSection visibility", () => {
-  /** A Mac without the agent, and no Daedalus project: nothing to say. */
-  it("draws nothing without a link and without a Daedalus project", () => {
-    state.link = { kind: "AgentMissing" };
-    const { container } = render(<DaedalusSection />);
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  /** Unknown is not "linked": a cold start doesn't flash the section in. */
-  it("draws nothing while the status read is in flight and no project is known", () => {
-    state.link = undefined;
+  /** A Mac without the agent and no Daedalus project has nothing to say; and
+   *  unknown is not "linked", so a cold start doesn't flash the section in. */
+  it.each([
+    { kind: "AgentMissing" } as DaedalusLink,
+    undefined,
+  ])("draws nothing for link %o without a Daedalus project", (link) => {
+    state.link = link;
     const { container } = render(<DaedalusSection />);
     expect(container).toBeEmptyDOMElement();
   });
@@ -142,6 +139,7 @@ describe("DaedalusSection link", () => {
   it.each([
     undefined,
     { kind: "Connecting" } as DaedalusLink,
+    CONNECTED,
   ])("draws at full strength while the link is %o", (link) => {
     state.link = link;
     render(<DaedalusSection />);
@@ -149,28 +147,6 @@ describe("DaedalusSection link", () => {
     // Reachable (or a moment from it), so its worktree actions stay on.
     expect(state.tree?.actionsDisabled).toBeUndefined();
     expect(screen.queryByRole("button", { name: /Settings/ })).toBeNull();
-  });
-
-  it("draws no hint while connected", () => {
-    render(<DaedalusSection />);
-    expect(screen.queryByRole("button", { name: /Settings/ })).toBeNull();
-  });
-});
-
-describe("DaedalusSection add", () => {
-  it("opens the Daedalus projects dialog from the header's +", () => {
-    render(<DaedalusSection />);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Add from Daedalus" }));
-    expect(screen.getByRole("dialog", { name: "Add from Daedalus" })).toBeInTheDocument();
-  });
-
-  /** With the link down, "+" still opens the dialog: it shows the state itself. */
-  it("keeps the + working while the link is down", () => {
-    state.repos = [repo("home/web", "Daedalus")];
-    state.link = { kind: "SantreeOff" };
-    render(<DaedalusSection />);
-    expect(screen.getByRole("button", { name: "Add from Daedalus" })).toBeEnabled();
   });
 });
 

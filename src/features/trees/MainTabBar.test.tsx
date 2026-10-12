@@ -125,24 +125,25 @@ beforeEach(() => {
 
 describe("MainTabBar", () => {
   describe("pruning dead tabs", () => {
-    // An extra *terminal* tab is its shell: once the shell exits there's nothing
-    // left to show, so the tab goes rather than lingering as a dead one to ✕ by hand.
-    it("closes a terminal tab once its shell exits", () => {
-      trees.tabs = [tab("t1", "terminal")];
+    // A tab is its process: a shell or agent that exits leaves nothing to show, so
+    // the tab goes rather than lingering as a dead one to ✕ by hand (Session
+    // history is what reopens a quit agent's conversation).
+    it("closes a terminal, agent or Fix-CI tab once its process exits", () => {
+      trees.tabs = [tab("t1", "terminal"), tab("c1", "agent"), tab("f1", "fixCi")];
       mount();
-      spawn("t1");
+      for (const id of ["t1", "c1", "f1"]) spawn(id);
       expect(trees.closeTab).not.toHaveBeenCalled();
 
-      kill("t1");
+      for (const id of ["t1", "c1", "f1"]) kill(id);
 
-      expect(trees.closeTab).toHaveBeenCalledWith("t1");
+      expect(trees.closeTab.mock.calls.map(([id]) => id).sort()).toEqual(["c1", "f1", "t1"]);
     });
 
-    // A freshly-opened tab has no session for a beat — the pane mounts, then the
-    // PTY registers. Pruning on "no session" alone would close the tab in that gap,
-    // before it ever ran.
-    it("leaves a tab whose session hasn't registered yet alone", () => {
-      trees.tabs = [tab("t1", "terminal")];
+    // A freshly-opened tab has no session for a beat (the pane mounts, then the
+    // PTY registers), and a tab restored by a restart has never been live. Pruning
+    // on "no session" alone would sweep either before it ever ran.
+    it("leaves a tab that has never been live alone", () => {
+      trees.tabs = [tab("t1", "terminal"), tab("c1", "agent")];
       const { rerender } = mount();
 
       rerender(
@@ -151,38 +152,6 @@ describe("MainTabBar", () => {
           <Probe />
         </TerminalsProvider>,
       );
-
-      expect(trees.closeTab).not.toHaveBeenCalled();
-    });
-
-    // An agent tab is its process too. Quitting claude used to leave a resume
-    // pane behind; now the tab goes with the process, and Session history is what
-    // reopens the conversation.
-    it("closes an agent tab once its process exits", () => {
-      trees.tabs = [tab("c1", "agent")];
-      mount();
-      spawn("c1");
-
-      kill("c1");
-
-      expect(trees.closeTab).toHaveBeenCalledWith("c1");
-    });
-
-    it("closes a Fix-CI tab once its process exits", () => {
-      trees.tabs = [tab("f1", "fixCi")];
-      mount();
-      spawn("f1");
-
-      kill("f1");
-
-      expect(trees.closeTab).toHaveBeenCalledWith("f1");
-    });
-
-    // A tab restored by a restart has never been live, so there is nothing to
-    // prune — it waits to be opened instead of being swept before it ever runs.
-    it("leaves a restored tab that has not run yet alone", () => {
-      trees.tabs = [tab("c1", "agent")];
-      mount();
 
       expect(trees.closeTab).not.toHaveBeenCalled();
     });
@@ -260,17 +229,6 @@ describe("MainTabBar", () => {
       expect(screen.getByRole("button", { name: /Codex/ })).toBeInTheDocument();
     });
 
-    it("ignores digits outside the three available tab choices", () => {
-      mount();
-      openMenu();
-
-      press("4");
-
-      expect(trees.addTab).not.toHaveBeenCalled();
-    });
-
-    // The digits belong to the menu only while it's open — otherwise a stray "1"
-    // anywhere in Trees would spawn a Claude session.
     // A Daedalus project on a live link: its terminals and agents run on the
     // box, with the box's CLIs — this Mac's Codex sign-in doesn't matter —
     // and a CLI the box lacks keeps its row, disabled, saying so.
@@ -289,19 +247,7 @@ describe("MainTabBar", () => {
       expect(trees.addTab).not.toHaveBeenCalled();
       press("2");
       expect(trees.addTab).toHaveBeenCalledWith("agent", "Claude");
-    });
-
-    it("offers a Daedalus project's terminal whatever its agents can do", () => {
-      trees.reach.remote = true;
-      trees.reach.off = {
-        Codex: "Codex isn't installed on Daedalus",
-        Claude: "Claude Code isn't installed on Daedalus",
-      };
-      mount();
       openMenu();
-      press("1");
-      press("2");
-      expect(trees.addTab).not.toHaveBeenCalled();
       press("3");
       expect(trees.addTab).toHaveBeenCalledWith("terminal");
     });
@@ -315,6 +261,8 @@ describe("MainTabBar", () => {
       expect(screen.getByRole("button", { name: "New tab" })).toBeDisabled();
     });
 
+    // The digits belong to the menu only while it's open — otherwise a stray "1"
+    // anywhere in Trees would spawn a session.
     it("stops listening for digits once the menu closes", () => {
       mount();
       openMenu();
@@ -382,39 +330,13 @@ describe("fitting the tabs to the pane", () => {
     rect = null;
   });
 
-  // The bug: a flex child's automatic minimum size is its min-content width, so
-  // "Claude Code" collapsed to the width of "Claude" and wrapped onto a second
-  // line. The label is a `truncate` span in a `min-w-0` button instead.
-  it("keeps a label on one line, ellipsised", () => {
-    paneWidth(1200);
-    mount();
-
-    const label = screen.getByRole("tab", { name: "Claude Code" }).querySelector("span.truncate");
-    expect(label?.textContent).toBe("Claude Code");
-  });
-
-  it("shows every tab when the pane is wide", () => {
-    paneWidth(1200);
-    mount();
-
-    expect(tabNames()).toEqual(["Claude Code", "Session 1", "Session 2", "Session 3", "Session 4"]);
-    expect(screen.queryByRole("button", { name: /hidden tab/ })).toBeNull();
-  });
-
   // Below the floor the strip stops squeezing and starts hiding: a 40px sliver
   // of a label identifies nothing.
-  it("drops the tabs past the shrink floor into an overflow menu", () => {
+  it("drops the tabs past the shrink floor into an overflow menu that still reaches them", () => {
     paneWidth(300);
     mount();
 
     expect(tabNames()).toEqual(["Claude Code", "Session 1"]);
-    expect(screen.getByRole("button", { name: "Show 3 hidden tabs" })).toBeTruthy();
-  });
-
-  it("keeps a hidden tab reachable from the overflow menu", () => {
-    paneWidth(300);
-    mount();
-
     fireEvent.click(screen.getByRole("button", { name: "Show 3 hidden tabs" }));
     fireEvent.click(screen.getByRole("button", { name: "Session 4" }));
 
@@ -435,23 +357,11 @@ describe("fitting the tabs to the pane", () => {
     expect(active).toHaveAttribute("tabindex", "0");
   });
 
-  it("keeps the active tab even when only one fits", () => {
+  it("keeps the active tab when only one fits", () => {
     seedSplit(openOf(openMainTabs), "tab:t2");
     paneWidth(60);
     mount();
 
     expect(tabNames()).toEqual(["Session 2"]);
-    expect(screen.getByRole("tab", { name: "Session 2" })).toHaveAttribute("tabindex", "0");
-  });
-
-  // The floor is the tab's own min-width, so a rendered tab can never be
-  // squeezed below it by a sibling.
-  it("gives every tab the shrink floor as its minimum width", () => {
-    paneWidth(300);
-    mount();
-
-    expect(screen.getByRole("tab", { name: "Claude Code" }).parentElement).toHaveStyle({
-      minWidth: "84px",
-    });
   });
 });

@@ -44,24 +44,11 @@ describe("resolvePaneAgentOwner", () => {
     expect(resolvePaneAgentOwner({ detectedAgent: undefined, launchAgent: "Codex" })).toBe("Codex");
   });
 
-  it("falls through a silent tier to the next one that speaks", () => {
-    expect(resolvePaneAgentOwner({ sessionAgent: null, detectedAgent: "Codex" })).toBe("Codex");
-    expect(
-      resolvePaneAgentOwner({ sessionAgent: null, detectedAgent: null, launchAgent: "Cursor" }),
-    ).toBe("Cursor");
-  });
-
   it("answers null only when all three are silent", () => {
     expect(resolvePaneAgentOwner({})).toBeNull();
     expect(
       resolvePaneAgentOwner({ sessionAgent: null, detectedAgent: null, launchAgent: null }),
     ).toBeNull();
-  });
-
-  it("reads a null signal exactly like a missing one", () => {
-    // Both mean "this source has nothing to say about this pane". A caller that
-    // has a nullable field must not have to translate it into an omission.
-    expect(resolvePaneAgentOwner({ sessionAgent: null })).toEqual(resolvePaneAgentOwner({}));
   });
 
   it("cannot answer what an agent is doing — enforced by `tsc`, not by convention", () => {

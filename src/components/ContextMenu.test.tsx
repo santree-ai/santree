@@ -33,23 +33,21 @@ function open(rows = items()) {
 }
 
 describe("ContextMenu", () => {
-  it("stays closed until the region is right-clicked", () => {
+  it("opens on right-click with actions as menu items, and headings and rules as neither", () => {
     open();
     expect(menu()).toBeNull();
     fireEvent.contextMenu(screen.getByText("A worktree"), { clientX: 40, clientY: 60 });
-    expect(menu()).not.toBeNull();
-  });
-
-  it("renders actions as menu items, and headings and rules as neither", () => {
-    open();
-    fireEvent.contextMenu(screen.getByText("A worktree"));
     expect(screen.getAllByRole("menuitem").map((el) => el.textContent)).toEqual(["Zed", "Delete"]);
     // The heading is present as text but is not something you can land on.
     expect(screen.getByText("Open in").getAttribute("role")).toBeNull();
   });
 
-  it("opens from the keyboard too — Shift-F10 and the ContextMenu key", () => {
+  it("opens from the keyboard too — Shift-F10 and the ContextMenu key, nothing else", () => {
     const target = open();
+    fireEvent.keyDown(target, { key: "F10" });
+    fireEvent.keyDown(target, { key: "a" });
+    expect(menu()).toBeNull();
+
     fireEvent.keyDown(target, { key: "F10", shiftKey: true });
     expect(menu()).not.toBeNull();
     fireEvent.keyDown(document, { key: "Escape" });
@@ -57,13 +55,6 @@ describe("ContextMenu", () => {
 
     fireEvent.keyDown(target, { key: "ContextMenu" });
     expect(menu()).not.toBeNull();
-  });
-
-  it("ignores keys that aren't the menu key", () => {
-    const target = open();
-    fireEvent.keyDown(target, { key: "F10" });
-    fireEvent.keyDown(target, { key: "a" });
-    expect(menu()).toBeNull();
   });
 
   /** A host whose rows hang on a read it doesn't want to make per row (the

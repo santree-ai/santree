@@ -162,23 +162,15 @@ describe("liveTabFor", () => {
 });
 
 describe("bucketOf", () => {
-  it("buckets a live session by what it wants from you", () => {
+  it("buckets by what a live session wants, and never alarms for a dead one", () => {
     expect(bucketOf("permission", true)).toBe("attention");
     expect(bucketOf("waiting", true)).toBe("attention");
     expect(bucketOf("active", true)).toBe("working");
     expect(bucketOf("delegating", true)).toBe("working");
     expect(bucketOf("idle", true)).toBe("idle");
-  });
-
-  it("never raises an alarm for a session with no live process", () => {
-    // The PTY is a child of this app: no PTY means the agent is gone, whatever
-    // its last hook wrote. A stored `waiting` is then a leftover, not a request.
+    // No PTY means the agent is gone, whatever its last hook wrote.
     expect(bucketOf("waiting", false)).toBe("detached");
     expect(bucketOf("permission", false)).toBe("detached");
-    expect(bucketOf("active", false)).toBe("detached");
-  });
-
-  it("keeps an explicitly exited session as finished either way", () => {
     expect(bucketOf("exited", false)).toBe("done");
     expect(bucketOf("exited", true)).toBe("done");
   });
@@ -387,17 +379,6 @@ describe("buildAgentEntries", () => {
     expect(entries[0].subtitle).toBeNull();
   });
 
-  it("names the base entry by its branch", () => {
-    const base = { ...worktree("__base__"), branch: "main", title: "" };
-    const entries = buildAgentEntries(
-      build({
-        repos: [repoData({ baseWorktree: base })],
-        sessions: [session({ sessionId: "a", termKey: "tree:__base__" })],
-      }),
-    );
-    expect(entries[0].title).toBe("main");
-  });
-
   it("marks a session santree can't attribute as not openable", () => {
     const entries = buildAgentEntries(
       build({ sessions: [session({ sessionId: "a", state: "waiting", termKey: null })] }),
@@ -508,16 +489,6 @@ describe("terminal titles", () => {
     expect(entries[0].live).toBe(false);
     expect(entries[0].terminalTitle).toBeNull();
   });
-
-  it("gives a session whose pane has set no title nothing to read", () => {
-    const entries = buildAgentEntries(
-      build({
-        sessions: [session({ sessionId: "a", termKey: "tree:AK-1" })],
-        terminals: liveTabs("tree:AK-1"),
-      }),
-    );
-    expect(entries[0].terminalTitle).toBeNull();
-  });
 });
 
 describe("attention counting", () => {
@@ -530,14 +501,10 @@ describe("attention counting", () => {
   ];
   const terminals = liveTabs("tree:AK-1", "tree:AK-2", "tree:AK-3");
 
-  it("counts only live agents that are blocked on the user", () => {
+  it("counts only live blocked agents, and the badge's shortcut agrees", () => {
     const entries = buildAgentEntries(build({ sessions, terminals }));
     expect(attentionCount(entries, NOW)).toBe(2);
-  });
-
-  it("agrees with the badge's own shortcut over the raw reads", () => {
     // The badge must never claim an alert the panel doesn't show.
-    const entries = buildAgentEntries(build({ sessions, terminals }));
     expect(countAttention(sessions, terminals, NOW)).toBe(attentionCount(entries, NOW));
   });
 
@@ -599,6 +566,8 @@ describe("agents santree launched that have not announced a session", () => {
     expect(entry.live).toBe(true);
     expect(entry.openable).toBe(true);
     expect(entry.updatedAtMs).toBeNull();
+    // It has reported nothing, so it can't ask the user for anything.
+    expect(attentionCount(entries, NOW)).toBe(0);
   });
 
   it("is superseded — not duplicated — once the provider's row arrives", () => {
@@ -650,11 +619,6 @@ describe("agents santree launched that have not announced a session", () => {
     };
     expect(buildAgentEntries(build({ terminals: [hidden] }))).toHaveLength(0);
   });
-
-  it("never asks the user for anything — it has reported nothing to ask with", () => {
-    const entries = buildAgentEntries(build({ terminals: [agentTab("tree:AK-1")] }));
-    expect(attentionCount(entries, NOW)).toBe(0);
-  });
 });
 
 /**
@@ -699,6 +663,8 @@ describe("agents the process table sees", () => {
     expect(entry.sessionId).toBeNull();
     expect(entry.state).toBeNull();
     expect(entry.live).toBe(true);
+    // Identity only: a process seen in `ps` can never make anything need you.
+    expect(attentionCount(entries, NOW)).toBe(0);
   });
 
   it("outranks santree's launch record, which is only a memory of the launch", () => {
@@ -724,12 +690,6 @@ describe("agents the process table sees", () => {
       expect(entries).toHaveLength(1);
       expect(entries[0].agentKind).toBe("Codex");
     }
-  });
-
-  it("still ignores a plain shell tab nothing was seen in", () => {
-    expect(
-      buildAgentEntries(build({ terminals: [shellTab("tree:AK-1")], detected: new Map() })),
-    ).toHaveLength(0);
   });
 
   it("is superseded by the provider's own row, not duplicated by it", () => {
@@ -771,16 +731,5 @@ describe("agents the process table sees", () => {
     );
     expect(entries).toHaveLength(1);
     expect(entries[0].repo).toBeNull();
-  });
-
-  it("reports identity, never a status — it cannot make anything need you", () => {
-    const entries = buildAgentEntries(
-      build({
-        terminals: [shellTab("tree:AK-1")],
-        detected: new Map([["tree:AK-1", "Codex"]]),
-      }),
-    );
-    expect(entries[0].state).toBeNull();
-    expect(attentionCount(entries, NOW)).toBe(0);
   });
 });

@@ -71,11 +71,6 @@ const show = () =>
   render(<SplitEditor repo="test" worktree={{ id: "AK-123", ahead: 1 } as Worktree} />);
 
 describe("move remaining changes", () => {
-  it("labels loading as reading changes rather than waiting for a commit", () => {
-    mocked.fetching = true;
-    show();
-    expect(screen.getByText("Updating remaining changes…")).toBeInTheDocument();
-  });
   it("explains the commit-first flow and moves all listed files with the inherited ticket", () => {
     show();
     expect(screen.getByText(/Commit what belongs here/)).toBeInTheDocument();

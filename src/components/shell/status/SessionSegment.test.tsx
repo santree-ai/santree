@@ -86,19 +86,18 @@ describe("SessionSegment", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("renders nothing when no agent tab is focused", () => {
+  /** No agent tab focused has nothing to meter; nor does a session that has
+   *  never rendered a status line (or a provider santree captures no usage for). */
+  it("renders nothing with no focused tab, or a focused session with no usage captured", () => {
     focusedAgent = null;
-    const { container } = render(<SessionSegment />);
+    const { container, unmount } = render(<SessionSegment />);
     expect(container).toBeEmptyDOMElement();
-  });
+    unmount();
 
-  /** A session that has never rendered a status line — and any provider santree
-   *  captures no usage for — has no number, and no number is the honest answer. */
-  it("renders nothing for a focused session with no usage captured", () => {
     focusedAgent = { repo: "acme/app", termKey: "tree:AK-1", agentKind: "Claude" };
     live = [];
-    const { container } = render(<SessionSegment />);
-    expect(container).toBeEmptyDOMElement();
+    const again = render(<SessionSegment />);
+    expect(again.container).toBeEmptyDOMElement();
   });
 
   /** `termKey` is unique per repo only *within* a repo — `tree:AK-1` can exist

@@ -26,51 +26,7 @@ React view → query hook (src/lib/queries.ts) → bindings.ts (generated)
 
 - **Rust** — install via [rustup](https://rustup.rs). The exact toolchain version is pinned in [`rust-toolchain.toml`](./rust-toolchain.toml) (with `rustfmt` + `clippy`), so rustup will fetch and use the right one automatically, both locally and in CI.
 - **Node 22+** and **pnpm** (`npm i -g pnpm`).
-
-### Linux system dependencies
-
-Tauri renders through the OS webview — **WebKitGTK** on Linux — so you need its dev libraries before the Rust side will build.
-
-**Debian / Ubuntu:**
-
-```sh
-sudo apt update
-sudo apt install -y \
-  libwebkit2gtk-4.1-dev \
-  build-essential \
-  curl wget file \
-  libssl-dev \
-  libgtk-3-dev \
-  libayatana-appindicator3-dev \
-  librsvg2-dev
-```
-
-**Fedora:**
-
-```sh
-sudo dnf install -y \
-  webkit2gtk4.1-devel \
-  openssl-devel \
-  curl wget file \
-  libappindicator-gtk3-devel \
-  librsvg2-devel
-sudo dnf group install -y "c-development"
-```
-
-**Arch:**
-
-```sh
-sudo pacman -S --needed \
-  webkit2gtk-4.1 \
-  base-devel \
-  curl wget file \
-  openssl \
-  gtk3 \
-  libayatana-appindicator \
-  librsvg
-```
-
-macOS needs only the Xcode Command Line Tools (`xcode-select --install`); no extra webview packages.
+- **Xcode Command Line Tools** (`xcode-select --install`). santree is macOS-only; the webview is the system WebKit, so there is nothing else to install.
 
 ---
 
@@ -139,8 +95,6 @@ pnpm test         # Frontend: Vitest
 
 Releases are cut by pushing a tag; `.github/workflows/release.yml` does the rest
 (universal macOS build → codesign → notarize → staple → smoke-launch → publish).
-macOS only: the Linux jobs in CI exist to keep the code portable, not to produce
-downloads.
 
 ```sh
 # bump the version in all three places CI checks: package.json,
@@ -315,4 +269,3 @@ from. See `src/dev/fixtures/README.md` for what is fake and what is real.
 ## Known caveats
 
 - **`tauri-specta` is on a release-candidate tag.** It's pinned to `=2.0.0-rc.25` (with `specta =2.0.0-rc.25` and `specta-typescript 0.0.12`) — these are the Tauri 2-compatible line and must move together. Exact-version pins (`=`) are intentional: RC releases can break across patch bumps. If you bump one, bump all three and run `pnpm gen:bindings` + `cargo test` to confirm the bridge still compiles. This is the current state of the art for typed Tauri bindings; we are **not** falling back to untyped `invoke`.
-- **The Linux webview is WebKitGTK**, not Chromium. It's generally fine, but it lags Chromium on bleeding-edge CSS/Canvas/WebGL — worth remembering once we add heavy graphics (node graphs, terminals) later.

@@ -94,15 +94,9 @@ describe("RepoAvatar on a Daedalus project", () => {
     );
   });
 
-  it("keeps the GitHub mark when the box has no icon", async () => {
-    const { container } = await draw("acme/iris");
-    await waitFor(() =>
-      expect(img(container)?.getAttribute("src")).toBe("https://github.com/acme.png?size=64"),
-    );
-  });
-
-  it("keeps the GitHub mark for bytes that aren't an image santree draws", async () => {
+  it("keeps the GitHub mark for no icon, or bytes that aren't an image santree draws", async () => {
     for (const icon of [
+      null,
       { contentType: "text/html", data: btoa("<html></html>") },
       { contentType: "image/svg+xml", data: "not base64!" },
       { contentType: "image/png", data: "A".repeat(4 * Math.ceil((64 * 1024 + 1) / 3)) },

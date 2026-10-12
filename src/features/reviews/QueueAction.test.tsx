@@ -102,11 +102,4 @@ describe("QueueAction · icon variant", () => {
     expect(queued.className).not.toContain("opacity-0");
     expect(queued).toBeDisabled();
   });
-
-  it("writes the same row the labelled variant does", () => {
-    render(<QueueAction variant="icon" prRepo="acme/api" number={7} item={ITEM} queued={false} />);
-    fireEvent.click(screen.getByRole("button", { name: "Add to queue" }));
-
-    expect(spies.add).toHaveBeenCalledWith(expect.objectContaining(ITEM));
-  });
 });

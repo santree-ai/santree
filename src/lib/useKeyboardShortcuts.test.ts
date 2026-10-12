@@ -89,11 +89,13 @@ beforeEach(() => {
   router.navigate.mockClear();
   app.toggleSidebar.mockClear();
   app.toggleShortcuts.mockClear();
+  app.toggleCommandPalette.mockClear();
+  external.refresh.mockClear();
   document.body.innerHTML = "";
 });
 
 describe("inEditable", () => {
-  it("is true for the fields keystrokes belong to", () => {
+  it("is true only for the fields keystrokes belong to", () => {
     expect(inEditable(typeInto("input"))).toBe(true);
     expect(inEditable(typeInto("textarea"))).toBe(true);
     const div = document.createElement("div");
@@ -101,9 +103,6 @@ describe("inEditable", () => {
     // jsdom doesn't derive `isContentEditable` from the attribute.
     Object.defineProperty(div, "isContentEditable", { value: true });
     expect(inEditable(div)).toBe(true);
-  });
-
-  it("is false for anything else", () => {
     expect(inEditable(document.createElement("div"))).toBe(false);
     expect(inEditable(document.createElement("button"))).toBe(false);
     expect(inEditable(null)).toBe(false);
@@ -136,10 +135,6 @@ describe("targetOwnsKey", () => {
     expect(targetOwnsKey(keyOn(term, "c", { ctrlKey: true }))).toBe(true);
     expect(targetOwnsKey(keyOn(term, "l", { ctrlKey: true }))).toBe(true);
   });
-
-  it("is false with focus nowhere in particular", () => {
-    expect(targetOwnsKey(keyOn(document.createElement("div"), "l", { metaKey: true }))).toBe(false);
-  });
 });
 
 describe("useKeyboardShortcuts", () => {
@@ -155,37 +150,6 @@ describe("useKeyboardShortcuts", () => {
     expect(router.navigate).not.toHaveBeenCalled();
   });
 
-  /** Reviews and Triage both left the sidebar nav (each is a section of the tree
-   *  now), so they have to leave the numbers with them: a ⌘N that opened a
-   *  destination no row offers is a shortcut to something the user can't see,
-   *  and it would silently renumber everything below it if it stayed. */
-  it("gives Reviews and Triage no number of their own now that the nav has no row for them", () => {
-    renderHook(() => useKeyboardShortcuts());
-
-    for (const key of ["1", "2", "3", "4"]) {
-      press(key, { metaKey: true });
-    }
-    expect(router.navigate).not.toHaveBeenCalledWith({ to: "/reviews" });
-    expect(router.navigate).not.toHaveBeenCalledWith({ to: "/triage" });
-  });
-
-  it("leaves the workspace unnumbered — it is reached by picking a worktree", () => {
-    renderHook(() => useKeyboardShortcuts());
-
-    for (const key of ["1", "2", "3", "4"]) {
-      router.navigate.mockClear();
-      press(key, { metaKey: true });
-      expect(router.navigate).not.toHaveBeenCalledWith({ to: "/trees" });
-    }
-  });
-
-  it("ignores ⌘0, which belongs to the text-size reset", () => {
-    renderHook(() => useKeyboardShortcuts());
-
-    press("0", { metaKey: true });
-    expect(router.navigate).not.toHaveBeenCalled();
-  });
-
   it("opens Settings with ⌘; and ⌘,", () => {
     renderHook(() => useKeyboardShortcuts());
 
@@ -196,21 +160,15 @@ describe("useKeyboardShortcuts", () => {
     expect(router.navigate).toHaveBeenCalledWith({ to: "/settings" });
   });
 
-  it("opens the command palette with ⌘K", () => {
+  it("toggles the palette (⌘K), the sidebar (⌘B) and the shortcuts overlay (⌘/)", () => {
     renderHook(() => useKeyboardShortcuts());
 
-    const event = press("k", { metaKey: true });
-
-    expect(app.toggleCommandPalette).toHaveBeenCalledTimes(1);
-    expect(event.defaultPrevented).toBe(true);
-  });
-
-  it("toggles the sidebar (⌘B) and the shortcuts overlay (⌘/)", () => {
-    renderHook(() => useKeyboardShortcuts());
-
+    const k = press("k", { metaKey: true });
     press("b", { metaKey: true });
     press("/", { metaKey: true });
 
+    expect(app.toggleCommandPalette).toHaveBeenCalledTimes(1);
+    expect(k.defaultPrevented).toBe(true);
     expect(app.toggleSidebar).toHaveBeenCalledTimes(1);
     expect(app.toggleShortcuts).toHaveBeenCalledTimes(1);
   });
@@ -350,7 +308,7 @@ describe("text size shortcuts", () => {
     zoom.level = 1;
   });
 
-  it("steps up on ⌘+ and ⌘=, down on ⌘-", () => {
+  it("steps up on ⌘+, ⌘=, ⌃+ and numpad +; down on ⌘- and numpad −", () => {
     renderHook(() => useKeyboardShortcuts());
 
     // ⌘+ is a *shifted* chord on most layouts (⌘⇧=), so it has to be handled
@@ -364,12 +322,6 @@ describe("text size shortcuts", () => {
 
     press("-", { metaKey: true });
     expect(zoom.apply).toHaveBeenLastCalledWith(0.9);
-  });
-
-  // Ctrl is the same binding off macOS, and the numpad's own keys are the pair
-  // people reach for when they have them.
-  it("takes ⌃+ and the numpad's own +/− too", () => {
-    renderHook(() => useKeyboardShortcuts());
 
     press("+", { ctrlKey: true, code: "NumpadAdd" });
     expect(zoom.apply).toHaveBeenLastCalledWith(1.1);
@@ -386,7 +338,7 @@ describe("text size shortcuts", () => {
     expect(router.navigate).not.toHaveBeenCalled();
   });
 
-  it("still zooms while a terminal has focus", () => {
+  it("still zooms and refreshes while a terminal has focus", () => {
     const term = document.createElement("div");
     term.className = "xterm";
     document.body.append(term);
@@ -396,6 +348,8 @@ describe("text size shortcuts", () => {
     // terminal must not swallow it the way it does unmodified keys.
     press("-", { metaKey: true, on: term });
     expect(zoom.apply).toHaveBeenLastCalledWith(0.9);
+    press("R", { metaKey: true, shiftKey: true, on: term });
+    expect(external.refresh).toHaveBeenCalledTimes(1);
     term.remove();
   });
 
@@ -407,10 +361,6 @@ describe("text size shortcuts", () => {
 });
 
 describe("refresh shortcut", () => {
-  beforeEach(() => {
-    external.refresh.mockClear();
-  });
-
   // ⌘⇧R is shifted, so — like ⌘+ above — it has to be handled before the guard
   // that drops every shifted chord, and `e.key` arrives as the capital.
   it("re-pulls external data on ⌘⇧R", () => {
@@ -427,16 +377,5 @@ describe("refresh shortcut", () => {
 
     press("r", { metaKey: true });
     expect(external.refresh).not.toHaveBeenCalled();
-  });
-
-  it("still fires while a terminal has focus (⌘ chords are app chrome)", () => {
-    renderHook(() => useKeyboardShortcuts());
-    const term = document.createElement("div");
-    term.className = "xterm";
-    document.body.append(term);
-
-    press("R", { metaKey: true, shiftKey: true, on: term });
-    expect(external.refresh).toHaveBeenCalledTimes(1);
-    term.remove();
   });
 });

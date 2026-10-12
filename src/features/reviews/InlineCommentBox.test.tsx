@@ -48,17 +48,12 @@ const box = (line: number, startLine: number, target: CommentTarget = TARGET) =>
 describe("anchorLabel", () => {
   /** The side is a diff coordinate, not something a reader has been taught: the
    *  new side is just "the line", and the old one earns a word, never a letter. */
-  it("names a single line without leaking the diff side", () => {
+  it("names a line or range in words, never leaking the diff side", () => {
     expect(anchorLabel(null, 4, true)).toBe("line 4");
     expect(anchorLabel(null, 4, false)).toBe("old line 4");
-  });
-
-  it("names a range by both ends", () => {
     expect(anchorLabel(10, 14, true)).toBe("lines 10–14");
     expect(anchorLabel(10, 14, false)).toBe("old lines 10–14");
-  });
-
-  it("treats a range that doesn't span as a single line", () => {
+    // A range that doesn't span is a single line.
     expect(anchorLabel(4, 4, true)).toBe("line 4");
   });
 });

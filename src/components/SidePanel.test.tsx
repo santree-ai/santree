@@ -5,7 +5,7 @@
  * says which pane is showing in a way a screen reader and a keyboard can both
  * follow.
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { SidePanel } from "./SidePanel";
@@ -46,27 +46,16 @@ describe("SidePanel", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("marks the showing pane as the selected tab, and only that one", () => {
+  // A roving tabindex: the strip is one Tab stop, entered at the selected pane.
+  it("marks only the showing pane selected, and makes the strip one tab stop entered there", () => {
     mount({ active: "aiWork" });
     expect(screen.getByRole("tab", { name: "AI work queue" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
     expect(screen.getByRole("tab", { name: "Issue" })).toHaveAttribute("aria-selected", "false");
-  });
-
-  // A roving tabindex: the strip is one Tab stop, and the arrows move within it.
-  it("makes the strip a single tab stop, entered at the selected pane", () => {
-    mount({ active: "aiWork" });
     expect(screen.getByRole("tab", { name: "AI work queue" })).toHaveAttribute("tabindex", "0");
     expect(screen.getByRole("tab", { name: "Issue" })).toHaveAttribute("tabindex", "-1");
-  });
-
-  it("asks its host to switch panes rather than switching one itself", () => {
-    const onSelect = vi.fn();
-    mount({ onSelect });
-    fireEvent.click(screen.getByRole("tab", { name: "AI work queue" }));
-    expect(onSelect).toHaveBeenCalledWith("aiWork");
   });
 
   // A stored width predates the strip it is stored for: a panel that grew a pane

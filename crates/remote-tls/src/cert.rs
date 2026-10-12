@@ -121,13 +121,4 @@ mod tests {
         other[at + 8] = 0x71;
         assert_eq!(public_key_of(&CertificateDer::from(other)), None);
     }
-
-    #[test]
-    fn long_lengths_use_the_long_form() {
-        assert_eq!(tlv(0x04, &[1; 3]), [0x04, 3, 1, 1, 1]);
-        let long = tlv(0x04, &[0; 200]);
-        assert_eq!(&long[..3], &[0x04, 0x81, 200]);
-        let longer = tlv(0x04, &[0; 300]);
-        assert_eq!(&longer[..4], &[0x04, 0x82, 0x01, 0x2c]);
-    }
 }

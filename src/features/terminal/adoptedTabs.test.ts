@@ -20,35 +20,26 @@ const session = (over: Partial<AdoptedSession>): AdoptedSession => ({
   ...over,
 });
 
-describe("sourceOfTermKey", () => {
-  test("matches the source each launch site opens its pane under", () => {
-    expect(sourceOfTermKey("tree:AK-1")).toBe("issue");
-    expect(sourceOfTermKey("tree:AK-1:tab:t1")).toBe("issue");
-    expect(sourceOfTermKey("triage:AK-1")).toBe("triage");
-    expect(sourceOfTermKey("triage:AK-1:tab:t1")).toBe("triage");
-    expect(sourceOfTermKey("ai-review:acme/web#7")).toBe("review");
-    expect(sourceOfTermKey("review:acme/web#7")).toBe("review");
-  });
-
-  test("names no surface for anything else", () => {
-    expect(sourceOfTermKey("settings:login")).toBeNull();
-    expect(sourceOfTermKey("")).toBeNull();
-  });
+test("sourceOfTermKey matches the source each launch site opens its pane under", () => {
+  expect(sourceOfTermKey("tree:AK-1")).toBe("issue");
+  expect(sourceOfTermKey("tree:AK-1:tab:t1")).toBe("issue");
+  expect(sourceOfTermKey("triage:AK-1")).toBe("triage");
+  expect(sourceOfTermKey("triage:AK-1:tab:t1")).toBe("triage");
+  expect(sourceOfTermKey("ai-review:acme/web#7")).toBe("review");
+  expect(sourceOfTermKey("review:acme/web#7")).toBe("review");
+  // Anything else names no surface, so it gets no tab.
+  expect(sourceOfTermKey("settings:login")).toBeNull();
+  expect(sourceOfTermKey("")).toBeNull();
 });
 
-describe("repoOfCwd", () => {
-  test("finds the project a directory sits in, component-wise", () => {
-    expect(repoOfCwd(repos, "/Users/me/web")).toBe("acme/web");
-    expect(repoOfCwd(repos, "/Users/me/web/.santree/worktrees/AK-1")).toBe("acme/web");
-    // A sibling that merely shares a prefix is not it.
-    expect(repoOfCwd(repos, "/Users/me/web-extras/x")).toBe("acme/web-extras");
-    expect(repoOfCwd(repos, "/srv/projects/api/.santree/worktrees/B-2")).toBe("box/api");
-  });
-
-  test("answers null when nothing contains it", () => {
-    expect(repoOfCwd(repos, "/elsewhere")).toBeNull();
-    expect(repoOfCwd(repos, null)).toBeNull();
-  });
+test("repoOfCwd finds the deepest project a directory sits in, component-wise", () => {
+  expect(repoOfCwd(repos, "/Users/me/web")).toBe("acme/web");
+  expect(repoOfCwd(repos, "/Users/me/web/.santree/worktrees/AK-1")).toBe("acme/web");
+  // A sibling that merely shares a prefix is not it.
+  expect(repoOfCwd(repos, "/Users/me/web-extras/x")).toBe("acme/web-extras");
+  expect(repoOfCwd(repos, "/srv/projects/api/.santree/worktrees/B-2")).toBe("box/api");
+  expect(repoOfCwd(repos, "/elsewhere")).toBeNull();
+  expect(repoOfCwd(repos, null)).toBeNull();
 });
 
 describe("adoptedTabSpec", () => {
@@ -78,10 +69,6 @@ describe("adoptedTabSpec", () => {
     // `ensure` will find it by address when opened.
     expect(adoptedTabSpec(session({ agentKind: "Claude", cwd: "/elsewhere" }), repos)).toBeNull();
     expect(adoptedTabSpec(session({ agentKind: "Claude", cwd: null }), repos)).toBeNull();
-  });
-
-  test("a session on no known surface gets no tab", () => {
-    expect(adoptedTabSpec(session({ label: "settings:login" }), repos)).toBeNull();
   });
 });
 

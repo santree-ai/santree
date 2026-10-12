@@ -895,20 +895,27 @@ mod tests {
     /// H2: the launch paths lived only in the frontend's in-memory hand-off, so a
     /// tab resumed after a restart fell back to the no-git settings — losing the
     /// `gh` deny list *and* the review tools, with no error. Both review kinds must
-    /// re-derive the review profile from their own row.
+    /// re-derive the review profile from their own row — the MCP config from
+    /// the row's PR identity, not a stored path.
     #[test]
     fn a_persisted_review_tab_resumes_with_the_review_settings_not_the_no_git_ones() {
         for kind in [TabKind::AiReview, TabKind::FixCi] {
             let dir = mcp_dir("settings");
             let config = dir.join("review-abc.mcp.json");
             std::fs::write(&config, "{}").unwrap();
+            let mut seen = None;
 
-            let launch =
-                resolve_tab_launch(&tab(kind, Some(acme())), review_settings, |_, _, _| {
+            let launch = resolve_tab_launch(
+                &tab(kind, Some(acme())),
+                review_settings,
+                |owner, name, number| {
+                    seen = Some((owner.to_string(), name.to_string(), number));
                     Ok(config.clone())
-                })
-                .unwrap()
-                .expect("a review tab always resolves a launch");
+                },
+            )
+            .unwrap()
+            .expect("a review tab always resolves a launch");
+            assert_eq!(seen, Some(("acme".into(), "app".into(), 7)));
 
             assert!(
                 launch
@@ -927,28 +934,6 @@ mod tests {
                 "{kind:?} resumed without santree's review tools"
             );
         }
-    }
-
-    /// The MCP config is named by the PR, so the identity — not the path — is what
-    /// the row stores and this is what proves it's the input.
-    #[test]
-    fn the_mcp_config_is_derived_from_the_rows_own_pull_request() {
-        let dir = mcp_dir("identity");
-        let config = dir.join("review-derived.mcp.json");
-        std::fs::write(&config, "{}").unwrap();
-        let mut seen = None;
-
-        resolve_tab_launch(
-            &tab(TabKind::AiReview, Some(acme())),
-            review_settings,
-            |owner, name, number| {
-                seen = Some((owner.to_string(), name.to_string(), number));
-                Ok(config.clone())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(seen, Some(("acme".into(), "app".into(), 7)));
     }
 
     /// An ordinary agent or terminal tab derives nothing: it keeps the standard
@@ -998,33 +983,24 @@ mod tests {
     }
 
     #[test]
-    fn truncate_at_line_never_splits_a_utf8_character() {
-        // A byte budget landing mid-codepoint used to panic outright, taking the
-        // whole brief down on any PR with non-ASCII near the cut — a `→` in a
-        // comment, an identifier in another script, an emoji in a fixture.
-        let s = "ünïcödé line one\nünïcödé line two\n";
-        for budget in 0..=s.len() + 4 {
-            let out = truncate_at_line(s, budget);
-            assert!(s.starts_with(out), "budget {budget} produced a non-prefix");
-        }
-    }
-
-    #[test]
-    fn truncate_at_line_cuts_on_a_line_break() {
+    fn truncate_at_line_cuts_on_a_line_break_and_never_mid_character() {
         let s = "line one\nline two\nline three\n";
-        // Mid-way through "line two" → keeps only the first complete line.
         assert_eq!(truncate_at_line(s, 14), "line one");
-        // A budget past the end keeps everything up to the final break.
         assert_eq!(
             truncate_at_line(s, s.len()),
             "line one\nline two\nline three"
         );
-    }
-
-    #[test]
-    fn truncate_at_line_handles_one_giant_unbroken_line() {
         // No newline to cut at — a hard cut beats returning nothing.
         assert_eq!(truncate_at_line("aaaaaaaa", 3), "aaa");
+        // A byte budget landing mid-codepoint used to panic, taking the whole
+        // brief down on any PR with non-ASCII near the cut.
+        let s = "ünïcödé line one\nünïcödé line two\n";
+        for budget in 0..=s.len() + 4 {
+            assert!(
+                s.starts_with(truncate_at_line(s, budget)),
+                "budget {budget}"
+            );
+        }
     }
 
     fn step(number: u32, name: &str, status: CheckStatus) -> santree_core::domain::CheckStep {
@@ -1054,19 +1030,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn check_source_renders_only_the_failing_steps() {
-        let value = render_check(&check(CheckStatus::Failure));
-        let steps = value["failingSteps"].as_array().unwrap();
-        assert_eq!(steps.len(), 1, "a green step is not why the job is red");
-        assert_eq!(steps[0]["name"], "Run make test");
-    }
-
     /// "Green again" and "gone entirely" are different answers and the agent has
     /// to be able to tell them apart: this one resolves *with* its status, where a
-    /// check that no longer runs resolves to `null` at the call site.
+    /// check that no longer runs resolves to `null` at the call site. A red one
+    /// carries only its failing steps: a green step is not why the job is red.
     #[test]
-    fn a_green_check_resolves_with_its_status_not_as_missing() {
+    fn a_check_renders_its_status_and_only_its_failing_steps() {
+        let value = render_check(&check(CheckStatus::Failure));
+        let steps = value["failingSteps"].as_array().unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["name"], "Run make test");
+
         let mut green = check(CheckStatus::Success);
         green.steps = vec![step(1, "Run make test", CheckStatus::Success)];
         let value = render_check(&green);

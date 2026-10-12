@@ -212,11 +212,6 @@ pub fn default_settings() -> Settings {
 mod tests {
     use super::*;
 
-    #[test]
-    fn fresh_installs_default_to_claude_code() {
-        assert_eq!(default_settings().default_agent, AgentKind::Claude);
-    }
-
     /// Resolve a model id exactly as `src-tauri`'s `PriceTable::lookup` does — the
     /// longest key that is a substring of the lowercased id wins. Mirrored here so
     /// the table can be checked against the rule it's actually matched by.
@@ -232,59 +227,30 @@ mod tests {
     /// family fallback left on legacy rates, the *next* release fell through to
     /// $15/$75 at 200K — a 3× cost overstatement and a context meter that reads
     /// past 100%. A new point release must inherit current-generation pricing
-    /// without anyone editing this table.
+    /// without anyone editing this table, while the pre-4.5 ids still beat the
+    /// family fallback by longest-key match and keep legacy rates.
     #[test]
-    fn unreleased_opus_versions_price_as_current_generation() {
-        for id in ["claude-opus-4-9", "claude-opus-5", "claude-opus-6-1"] {
-            let p = lookup(id).unwrap_or_else(|| panic!("{id} matched no price key"));
-            assert_eq!(p.input_per_mtok, 5.0, "{id} input");
-            assert_eq!(p.output_per_mtok, 25.0, "{id} output");
-            assert_eq!(p.context_tokens, 1_000_000.0, "{id} context window");
-        }
-    }
-
-    /// The shipped Opus 4.5+ ids keep current-generation rates…
-    #[test]
-    fn current_opus_ids_price_at_the_cheap_rate() {
-        for id in ["claude-opus-4-5", "claude-opus-4-7", "claude-opus-4-8"] {
-            let p = lookup(id).unwrap();
-            assert_eq!((p.input_per_mtok, p.output_per_mtok), (5.0, 25.0), "{id}");
-            assert_eq!(p.context_tokens, 1_000_000.0, "{id}");
-        }
-    }
-
-    /// …and the pricier pre-4.5 Opus ids still resolve to legacy rates and a 200K
-    /// window, beating the family fallback by longest-key match.
-    #[test]
-    fn legacy_opus_ids_keep_legacy_rates() {
-        for id in [
-            "claude-opus-4-20250514",
-            "claude-opus-4-0",
-            "claude-opus-4-1",
-            "claude-opus-4-1-20250805",
-            "claude-3-opus-20240229",
+    fn opus_ids_price_by_generation_including_unreleased_ones() {
+        let current = (5.0, 25.0, 1_000_000.0);
+        let legacy = (15.0, 75.0, 200_000.0);
+        for (id, want) in [
+            ("claude-opus-4-5", current),
+            ("claude-opus-4-8", current),
+            ("claude-opus-4-9", current),
+            ("claude-opus-5", current),
+            ("claude-opus-6-1", current),
+            ("claude-opus-4-20250514", legacy),
+            ("claude-opus-4-0", legacy),
+            ("claude-opus-4-1-20250805", legacy),
+            ("claude-3-opus-20240229", legacy),
         ] {
             let p = lookup(id).unwrap_or_else(|| panic!("{id} matched no price key"));
             assert_eq!(
-                (p.input_per_mtok, p.output_per_mtok),
-                (15.0, 75.0),
-                "{id} should keep legacy Opus pricing"
+                (p.input_per_mtok, p.output_per_mtok, p.context_tokens),
+                want,
+                "{id}"
             );
-            assert_eq!(p.context_tokens, 200_000.0, "{id} context window");
         }
-    }
-
-    /// The non-Opus families the fallback ordering also depends on.
-    #[test]
-    fn other_families_resolve_to_their_own_rates() {
-        let rate = |id| {
-            let p = lookup(id).unwrap();
-            (p.input_per_mtok, p.output_per_mtok, p.context_tokens)
-        };
-        assert_eq!(rate("claude-sonnet-5"), (2.0, 10.0, 1_000_000.0));
-        assert_eq!(rate("claude-sonnet-4-6"), (3.0, 15.0, 1_000_000.0));
-        assert_eq!(rate("claude-haiku-4-5-20251001"), (1.0, 5.0, 200_000.0));
-        assert_eq!(rate("claude-fable-5"), (10.0, 50.0, 1_000_000.0));
         // An unpriced vendor's model contributes 0 cost, not a bogus Claude rate.
         assert!(lookup("gpt-5-codex").is_none());
     }

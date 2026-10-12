@@ -34,41 +34,36 @@ const CODEX = {
 };
 
 describe("classifyAgentTitle", () => {
-  it("reads every captured Claude Code spinner frame as working", () => {
-    for (const title of CLAUDE.working) expect(classifyAgentTitle(title)).toBe("working");
-  });
-
-  it("reads Claude Code's ✳ as at rest, before and after a turn", () => {
-    for (const title of CLAUDE.idle) expect(classifyAgentTitle(title)).toBe("idle");
-  });
-
-  it("reads every captured Codex spinner frame as working", () => {
-    for (const title of CODEX.working) expect(classifyAgentTitle(title)).toBe("working");
-  });
-
-  it("says nothing about a Codex title at rest, because the title says nothing", () => {
-    // Codex's idle title is just the cwd basename — no glyph, no agent name. The
-    // honest answer is "no evidence", which lets the caller's own default stand
-    // instead of dressing a guess up as a reading.
-    for (const title of CODEX.idle) expect(classifyAgentTitle(title)).toBeNull();
-  });
-
-  it("holds a spinner over a task label that contains the idle glyph", () => {
+  it("reads every captured Claude Code and Codex spinner frame as working", () => {
+    for (const title of [...CLAUDE.working, ...CODEX.working]) {
+      expect(classifyAgentTitle(title), title).toBe("working");
+    }
     // Claude's working title is `<spinner> <task summary>`, and the summary is
     // arbitrary text — including text the idle check would otherwise match.
     expect(classifyAgentTitle("◐ rename ✳ in the header")).toBe("working");
   });
 
-  it("takes no title, an empty one, or blank space as no evidence", () => {
-    // Claude clears the title (`ESC ] 0 ; BEL`) as it exits.
-    for (const title of [null, undefined, "", "   "]) {
-      expect(classifyAgentTitle(title)).toBeNull();
-    }
+  it("reads Claude Code's ✳ as at rest, before and after a turn", () => {
+    for (const title of CLAUDE.idle) expect(classifyAgentTitle(title), title).toBe("idle");
   });
 
-  it("does not read an ordinary shell title as an agent", () => {
-    for (const title of ["~/dev/santree-app", "zsh", "npm run dev"]) {
-      expect(classifyAgentTitle(title)).toBeNull();
+  /** "No evidence" lets the caller's own default stand instead of dressing a
+   *  guess up as a reading. */
+  it("takes a title that says nothing as no evidence", () => {
+    for (const title of [
+      // Codex at rest: just the cwd basename — no glyph, no agent name.
+      ...CODEX.idle,
+      // Claude clears the title (`ESC ] 0 ; BEL`) as it exits.
+      null,
+      undefined,
+      "",
+      "   ",
+      // An ordinary shell.
+      "~/dev/santree-app",
+      "zsh",
+      "npm run dev",
+    ]) {
+      expect(classifyAgentTitle(title), String(title)).toBeNull();
     }
   });
 });

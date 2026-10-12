@@ -33,20 +33,20 @@ const shape = (list: Worktree[]) =>
   stackWorktrees(list).map(({ worktree: w, depth }) => [w.id, depth]);
 
 describe("stackWorktrees", () => {
-  it("leaves worktrees cut from the default branch flat, in their original order", () => {
-    expect(shape([worktree("AK-1"), worktree("AK-2")])).toEqual([
+  // The AK-274 → AK-275 case: a worktree branched off a sibling nests under it,
+  // siblings stay adjacent in their original order, and every level of a chain
+  // keeps its own indentation. Worktrees cut from the default branch stay flat.
+  it("nests stacked worktrees under the one they branched off, at every depth", () => {
+    const a = worktree("AK-1");
+    const b = worktree("AK-2", a.branch);
+    const b2 = worktree("AK-3", a.branch);
+    const c = worktree("AK-4", b.branch);
+    expect(shape([a, b, b2, c, worktree("AK-9")])).toEqual([
       ["AK-1", 0],
-      ["AK-2", 0],
-    ]);
-  });
-
-  // The AK-274 → AK-275 case: a worktree branched off a sibling nests under it.
-  it("nests a stacked worktree under the one it branched off", () => {
-    const parent = worktree("AK-274");
-    const child = worktree("AK-275", parent.branch);
-    expect(shape([parent, child])).toEqual([
-      ["AK-274", 0],
-      ["AK-275", 1],
+      ["AK-2", 1],
+      ["AK-4", 2],
+      ["AK-3", 1],
+      ["AK-9", 0],
     ]);
   });
 
@@ -59,32 +59,6 @@ describe("stackWorktrees", () => {
       ["AK-9", 0],
       ["AK-274", 0],
       ["AK-275", 1],
-    ]);
-  });
-
-  it("keeps siblings of one parent adjacent, in their original order", () => {
-    const parent = worktree("AK-274");
-    expect(
-      shape([parent, worktree("AK-275", parent.branch), worktree("AK-276", parent.branch)]),
-    ).toEqual([
-      ["AK-274", 0],
-      ["AK-275", 1],
-      ["AK-276", 1],
-    ]);
-  });
-
-  it("preserves every level of indentation in a long chain", () => {
-    const a = worktree("AK-1");
-    const b = worktree("AK-2", a.branch);
-    const c = worktree("AK-3", b.branch);
-    const d = worktree("AK-4", c.branch);
-    const e = worktree("AK-5", d.branch);
-    expect(shape([a, b, c, d, e])).toEqual([
-      ["AK-1", 0],
-      ["AK-2", 1],
-      ["AK-3", 2],
-      ["AK-4", 3],
-      ["AK-5", 4],
     ]);
   });
 

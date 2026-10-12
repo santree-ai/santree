@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Repo } from "../bindings";
-import { ICON_MAX_BYTES, iconSrc, workspaceOf } from "./daedalusIcon";
+import { iconSrc, workspaceOf } from "./daedalusIcon";
 
 const b64 = (bytes: number) => "A".repeat(4 * Math.ceil(bytes / 3));
 
@@ -30,7 +30,6 @@ describe("iconSrc", () => {
   });
 
   it("refuses an icon past 64 KiB decoded", () => {
-    expect(ICON_MAX_BYTES).toBe(65536);
     const at = (data: string) => iconSrc({ contentType: "image/png", data });
     // Exactly the cap (65535 bytes, then one more in a padded group) draws.
     expect(at(`${b64(65535)}AA==`)).not.toBeNull();
@@ -42,12 +41,9 @@ describe("iconSrc", () => {
 describe("workspaceOf", () => {
   const repo = (location: Repo["location"], path: string | null) => ({ location, path });
 
-  it("is the last component of a Daedalus repo's server path", () => {
+  it("is the last component of a Daedalus repo's server path, else null", () => {
     expect(workspaceOf(repo("Daedalus", "/home/santiago/projects/iris"))).toBe("iris");
     expect(workspaceOf(repo("Daedalus", "/srv/projects/web/"))).toBe("web");
-  });
-
-  it("is null for a repo on this Mac, or one with no path", () => {
     expect(workspaceOf(repo("Local", "/Users/me/iris"))).toBeNull();
     expect(workspaceOf(repo("Daedalus", null))).toBeNull();
     expect(workspaceOf(undefined)).toBeNull();

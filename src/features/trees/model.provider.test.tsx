@@ -234,14 +234,9 @@ describe("TreesProvider · tabs", () => {
 
   // No tab is privileged, so a worktree nobody has opened a tab on is showing
   // nothing — which is what puts the welcome surface on screen.
-  it("starts a worktree with nothing open", () => {
+  it("starts with nothing open, opens a tab, and falls back to nothing when it closes", () => {
     open();
-
     expect(screen.getByTestId("main")).toHaveTextContent("none");
-  });
-
-  it("opens a tab and falls back to nothing when it closes", () => {
-    open();
 
     fireEvent.click(screen.getByText("open terminal"));
     expect(screen.getByTestId("main")).not.toHaveTextContent("none");

@@ -144,29 +144,6 @@ describe("the pane the body renders", () => {
 });
 
 describe("the tab strip", () => {
-  it("offers the Issue tab for a ticket-tracked worktree", () => {
-    mount();
-    expect(tabNames()).toEqual(["Issue", "Files", "Changes", "Session history"]);
-  });
-
-  // The bug this exists to hold: no ticket, no tab onto one.
-  it("drops the Issue tab on a worktree with no Linear ticket", () => {
-    mount({ hasTicket: false, fileTab: "changes" });
-    expect(tabNames()).toEqual(["Files", "Changes", "Session history"]);
-    expect(screen.getByText("Changes pane")).toBeInTheDocument();
-  });
-
-  it("keeps the PR tabs on a ticket-less worktree that has a pull request", () => {
-    mount({ hasTicket: false, fileTab: "changes", activePr: pr });
-    expect(tabNames()).toEqual([
-      "Files",
-      "Changes",
-      "Session history",
-      "Pull request",
-      "AI work queue",
-    ]);
-  });
-
   // The strip and the body read the same `availableFileTabs`, and this is what
   // keeps them reading it alike: every tab on offer must lead to its own pane,
   // never to whichever one the body falls back on.

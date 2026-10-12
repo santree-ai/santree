@@ -599,8 +599,14 @@ mod tests {
 
     /// The network half of `workspace-write` is a user decision, not a
     /// consequence of needing git: absent the setting there is no flag at all.
+    ///
+    /// The setting is global, so turning it on for your own work must not also
+    /// hand it to the sessions santree points at a pull request. Address-review
+    /// *does* write the checkout, so it takes the git-metadata root, but an agent
+    /// that can reach api.github.com posts without the click `review_drafts::
+    /// publish` exists to require, so the network half stops at `Work`.
     #[test]
-    fn network_access_is_opt_in_and_never_reaches_a_read_only_surface() {
+    fn network_access_is_opt_in_and_only_reaches_the_work_surface() {
         let mut cfg = config(SessionSurface::Work);
         assert!(!launch_flags(&cfg).unwrap().contains("network_access"));
 
@@ -615,25 +621,14 @@ mod tests {
             let flags = launch_flags(&cfg).unwrap();
             assert!(!flags.contains("network_access"), "{surface:?}: {flags}");
         }
-    }
 
-    /// The setting is global, so turning it on for your own work must not also
-    /// hand it to the sessions santree points at a pull request. Address-review is
-    /// the case that needs saying: it *does* write the checkout, so it takes the
-    /// git-metadata root and would take this too by that test alone. But an agent
-    /// that can reach api.github.com posts without the click `review_drafts::
-    /// publish` exists to require, so the network half stops at `Work`. (The AI
-    /// review itself needs no test here — it is pinned `--sandbox read-only`, where
-    /// `writes_the_checkout` is already false and both wideners are inert.)
-    #[test]
-    fn address_review_never_gets_the_network_even_when_the_user_opted_in() {
         let mut cfg = config(SessionSurface::FixCi);
         let path = write_review_config("fixci-network");
         cfg.review_mcp_config = Some(&path);
         cfg.network_access = true;
         let flags = launch_flags(&cfg).unwrap();
-        assert!(!flags.contains("network_access"), "{flags}");
         std::fs::remove_file(path).unwrap();
+        assert!(!flags.contains("network_access"), "{flags}");
     }
 
     /// A linked worktree's on-disk shape, written directly rather than via `git`

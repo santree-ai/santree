@@ -184,20 +184,16 @@ describe("ReviewSidePanel", () => {
   // The rail carries the PR in Trees because the main area is the worktree. Here
   // the main area *is* the PR, so a tab onto it would be the same content in a
   // narrower column. Everything else is a fact about the branch or the ticket.
-  it("offers what you consult beside a PR, and nothing that is the PR", () => {
-    mount("issue");
-    expect(tabNames()).toEqual(["Issue", "Files", "Changes", "Session history", "AI work queue"]);
-  });
-
   // The three branch panes need a checkout, which most PRs don't have — and that
   // must not change which tabs exist.
-  it("offers the same five tabs with and without a local checkout", () => {
+  it("offers what you consult beside a PR, and nothing that is the PR, checked out or not", () => {
+    const tabs = ["Issue", "Files", "Changes", "Session history", "AI work queue"];
     const { unmount } = mount("issue");
-    const without = tabNames();
+    expect(tabNames()).toEqual(tabs);
     unmount();
 
     mount("issue", { worktrees: [checkout] });
-    expect(tabNames()).toEqual(without);
+    expect(tabNames()).toEqual(tabs);
   });
 
   it("renders the pane its selected tab names", () => {
@@ -252,12 +248,6 @@ describe("ReviewSidePanel", () => {
     expect(screen.getByRole("button", { name: /Open as tree/ })).toBeDisabled();
   });
 
-  it("reads the branch panes off the PR's own worktree once it exists", () => {
-    mount("files", { worktrees: [checkout] });
-    expect(screen.getByTestId("files-pane")).toBeTruthy();
-    expect(screen.queryByText("No local checkout")).toBeNull();
-  });
-
   // The bug this closes: an AI review put a real checkout on disk and the three
   // panes beside it still said there was none.
   it("falls back to the AI review's checkout, and says which one it is showing", () => {
@@ -272,16 +262,16 @@ describe("ReviewSidePanel", () => {
 
   // The PR's own worktree wins: it is where work is kept, and the review
   // checkout is deleted on a schedule.
-  it("prefers the PR's worktree over the review checkout, and drops the notice", () => {
+  // Keep/Remove don't belong on a tree you already keep either: it is in Trees,
+  // where removing a worktree is what that view is for.
+  it("prefers the PR's worktree over the review checkout, dropping the notice and its lifecycle", () => {
     mount("changes", { worktrees: [checkout], reviewCheckout: reviewed("older") });
     expect(world.statusCalls.at(-1)).toEqual(["acme/app", checkout.id]);
     expect(screen.queryByText(REVIEW_CHECKOUT_NOTE)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Keep as a worktree/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Remove checkout/ })).toBeNull();
   });
 
-  /** The PR's checkout is a branch checkout like any other now, so it catches up
-   *  the way any other does — an ordinary pull, offered only while origin is
-   *  actually ahead. The wholesale "move it to the PR's head" it used to need
-   *  went with the detached tree it was for. */
   /** A review checkout is a worktree Trees does not list, so this bar is the only
    *  surface that names it — and therefore the only one that can offer to keep or
    *  delete it. The delete used to live in the AI review session's footer alone,
@@ -292,14 +282,6 @@ describe("ReviewSidePanel", () => {
 
     screen.getByRole("button", { name: /Remove checkout/ }).click();
     expect(world.removed).toEqual([{ prRepo: pr.repo, number: pr.number, headSha: pr.headSha }]);
-  });
-
-  /** Neither belongs on a tree you already keep: it is in Trees, where removing
-   *  a worktree is what that view is for. */
-  it("offers neither on the PR's own worktree", () => {
-    mount("files", { worktrees: [checkout] });
-    expect(screen.queryByRole("button", { name: /Keep as a worktree/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Remove checkout/ })).toBeNull();
   });
 
   it("offers the review checkout a pull, on the same rule as any worktree", () => {
@@ -353,26 +335,12 @@ describe("ReviewSidePanel", () => {
     mount("issue", { worktrees: [checkout] });
     expect(world.statusCalls.at(-1)).toEqual(["acme/app", "review-acme/app-7"]);
   });
-
-  it("stays in flex flow so resizing it also resizes the main pane", () => {
-    const { container } = mount("issue");
-    const panel = container.firstElementChild;
-
-    expect(panel).toHaveClass("relative", "flex-none");
-    expect(panel?.className).not.toContain("absolute");
-  });
 });
 
-describe("defaultRailTab", () => {
-  // A review is the code read against what it was asked to do, so the ticket
-  // leads whenever there is one.
-  it("lands on the ticket when the PR names one", () => {
-    expect(defaultRailTab(true)).toBe("issue");
-  });
-
-  // Same rule `resolveFileTab` holds in Trees: never open on a pane that isn't
-  // there. Landing a ticket-less PR on "No linked ticket" teaches nothing.
-  it("falls back to the work queue when it doesn't", () => {
-    expect(defaultRailTab(false)).toBe("aiWork");
-  });
+// A review is the code read against what it was asked to do, so the ticket leads
+// whenever there is one; otherwise never open on a pane that isn't there (the
+// rule `resolveFileTab` holds in Trees).
+it("defaultRailTab lands on the ticket when the PR names one, else the work queue", () => {
+  expect(defaultRailTab(true)).toBe("issue");
+  expect(defaultRailTab(false)).toBe("aiWork");
 });

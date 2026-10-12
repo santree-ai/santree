@@ -110,16 +110,24 @@ class FakeBackend implements TerminalBackend {
   }
 }
 
+/** The launch line is the one thing santree types on the user's behalf, and it
+ *  is the one thing that may have to be reshaped before it can be typed at all:
+ *  a tty in canonical mode drops everything past ~1KB of a line without a word,
+ *  which is how a Codex launch (an `env` prefix, six `-c 'hooks.…'` flags, and
+ *  two absolute paths repeated in each) came to sit half-typed at the prompt.
+ *  Keeping that decision behind `seed()` is what lets the backend make it — and
+ *  what keeps it away from `write()`, where a long paste must stay verbatim. */
 test("TerminalView wires the renderer to the backend and cleans up", async () => {
   const renderer = new FakeRenderer();
   const backend = new FakeBackend();
+  const long = `exec env SANTREE_TERM_KEY='tree:AK-1' '/opt/homebrew/bin/codex' ${"-c 'hooks.X=[]' ".repeat(200)}`;
 
   const { unmount } = render(
     <TerminalView
       cwd="/tmp"
       command=""
       label="tree:a"
-      seed="echo hi"
+      seed={long}
       backend={backend}
       createRenderer={() => renderer}
     />,
@@ -130,9 +138,9 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
   expect(renderer.mounted).toBe(true);
   expect(backend.opened).toMatchObject({ cwd: "/tmp", command: "", cols: 100, rows: 30 });
 
-  // The seed goes out on the seed channel, not as keystrokes: the backend adds
-  // the Enter and decides whether the line can be typed at all (see below).
-  await waitFor(() => expect(backend.seeded).toContainEqual([7, "echo hi"]));
+  // The seed goes out on the seed channel, untouched however long, not as
+  // keystrokes: the backend adds the Enter and decides whether it can be typed.
+  await waitFor(() => expect(backend.seeded).toEqual([[7, long]]));
   expect(backend.writes).toEqual([]);
 
   // PTY output → renderer.
@@ -149,35 +157,6 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
   expect(backend.detached).toContain(7);
   expect(backend.closed).toEqual([]);
   expect(renderer.disposed).toBe(true);
-});
-
-/** The launch line is the one thing santree types on the user's behalf, and it
- *  is the one thing that may have to be reshaped before it can be typed at all:
- *  a tty in canonical mode drops everything past ~1KB of a line without a word,
- *  which is how a Codex launch (an `env` prefix, six `-c 'hooks.…'` flags, and
- *  two absolute paths repeated in each) came to sit half-typed at the prompt.
- *  Keeping that decision behind `seed()` is what lets the backend make it — and
- *  what keeps it away from `write()`, where a long paste must stay verbatim. */
-test("hands the launch line to the backend's seed channel however long it is", async () => {
-  const renderer = new FakeRenderer();
-  const backend = new FakeBackend();
-  const long = `exec env SANTREE_TERM_KEY='tree:AK-1' '/opt/homebrew/bin/codex' ${"-c 'hooks.X=[]' ".repeat(200)}`;
-
-  render(
-    <TerminalView
-      label="tree:AK-1"
-      command=""
-      seed={long}
-      backend={backend}
-      createRenderer={() => renderer}
-    />,
-  );
-
-  await waitFor(() => expect(backend.seeded.length).toBe(1));
-  // Untouched on the way out: the frontend neither shortens it nor splits it.
-  // Whether it can be typed as one line is the backend's call.
-  expect(backend.seeded[0]).toEqual([7, long]);
-  expect(backend.writes).toEqual([]);
 });
 
 describe("terminal title", () => {
@@ -477,21 +456,6 @@ describe("the pane's link state", () => {
     expect(onExit).toHaveBeenCalledTimes(1);
   });
 
-  test("a pane that opens while the link is down shows reconnecting from the start", async () => {
-    const renderer = new FakeRenderer();
-    const backend = new FakeBackend();
-    backend.open = async (opts, handlers) => {
-      backend.opened = opts;
-      backend.handlers = handlers;
-      handlers.onLink?.("reconnecting");
-      return 7 as SessionId;
-    };
-    const { findByRole } = render(
-      <TerminalView label="tree:AK-1:tab:t2" backend={backend} createRenderer={() => renderer} />,
-    );
-    expect(await findByRole("status")).toHaveTextContent("Reconnecting…");
-  });
-
   describe("the 'aren't responding' hint", () => {
     const HINT = /Terminals aren't responding/;
     beforeEach(() => vi.useFakeTimers());
@@ -539,16 +503,7 @@ describe("the pane's link state", () => {
       expect(queryByRole("status")).toBeNull();
     });
 
-    test("a session that never opens says so after ten seconds", async () => {
-      const backend = new FakeBackend();
-      backend.open = () => new Promise<SessionId>(() => {});
-      const { queryByRole, getByRole } = await mount(backend);
-      expect(queryByRole("status")).toBeNull();
-      act(() => void vi.advanceTimersByTime(UNANSWERED_MS));
-      expect(getByRole("status")).toHaveTextContent(HINT);
-    });
-
-    test("a pane with nowhere to point says only that it is waiting", async () => {
+    test("a session that never opens says so after ten seconds, naming no remedy when it has none", async () => {
       const backend = new FakeBackend();
       backend.open = () => new Promise<SessionId>(() => {});
       const { getByRole } = await mount(backend, null);

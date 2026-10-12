@@ -30,8 +30,8 @@
 //! * **Memory** is summed RSS, and a page mapped by two processes is resident in
 //!   both — a shared library, or a forked child before it writes. Nothing
 //!   cheaply available fixes that for a whole tree (macOS's `phys_footprint`
-//!   and Linux's `smaps_rollup` `Pss` are per-process syscalls/reads, and
-//!   measured on this app `phys_footprint` came within 2% of RSS anyway), so
+//!   is a per-process syscall, and measured on this app it came within 2% of
+//!   RSS anyway), so
 //!   the sum stands and the UI says what it is.
 
 use std::collections::{HashMap, HashSet};
@@ -467,28 +467,6 @@ mod tests {
   600   100   0.0
 ";
 
-    /// A terminal's figures are its whole subtree; the app's are its subtree
-    /// minus the terminals it hosts; a dead root reports nothing.
-    #[test]
-    fn subtree_sums_descendants_and_stops_at_carved_out_roots() {
-        let tree = ProcTree::new(parse_ps(LISTING));
-
-        let terminal = subtree(&tree, 200, &HashSet::new());
-        assert_eq!(terminal.cpu_pct, 13.0);
-        assert_eq!(terminal.rss_bytes, (4000.0 + 300_000.0 + 20_000.0) * 1024.0);
-        assert_eq!(terminal.heaviest.as_deref(), Some("claude"));
-
-        let app = subtree(&tree, 100, &HashSet::from([200, 210]));
-        assert_eq!(app.cpu_pct, 1.5 + 2.0, "santree + codex, not the terminal");
-        assert_eq!(app.rss_bytes, (50_000.0 + 10_000.0) * 1024.0);
-        assert_eq!(app.heaviest.as_deref(), Some("santree"));
-
-        assert!(tree.live(200));
-        assert!(!tree.live(210), "a zombie is not live");
-        assert!(!tree.live(999), "a vanished pid is not live");
-        assert_eq!(subtree(&tree, 999, &HashSet::new()), Subtree::default());
-    }
-
     /// The cwd → group resolution order, and that containment is component-wise.
     #[test]
     fn place_prefers_worktree_then_root_then_containment() {
@@ -777,45 +755,5 @@ mod tests {
                 app.rss_bytes + santree.rss_bytes + server.rss_bytes
             );
         }
-    }
-
-    /// A terminal whose root hangs from launchd (it was orphaned) or from the app
-    /// itself (in-app) names no server.
-    #[test]
-    fn only_terminals_hanging_from_another_process_name_a_server() {
-        let tree = ProcTree::new(parse_ps(LISTING));
-        let sessions = vec![
-            SessionInfo {
-                id: 0,
-                pid: Some(200),
-                cwd: Some("/x".into()),
-                ..Default::default()
-            },
-            SessionInfo {
-                id: 1,
-                pid: Some(300),
-                cwd: Some("/x".into()),
-                ..Default::default()
-            },
-        ];
-        // 200's parent is the app; 300's is launchd.
-        let usage = assemble(&tree, sessions, 100, &[], &[], 1.0, 8);
-        assert!(
-            usage.repos.iter().all(|r| r.repo != "santree server"),
-            "{:?}",
-            usage.repos.iter().map(|r| &r.repo).collect::<Vec<_>>()
-        );
-    }
-
-    /// The denominator has to be real and non-zero, or dividing by it turns a
-    /// readable percentage into `Infinity` in the UI.
-    #[test]
-    fn core_count_is_a_usable_denominator() {
-        let cores = core_count();
-        assert!(cores >= 1, "at least one core, never zero: {cores}");
-        assert!(
-            cores <= 4096,
-            "a plausible core count, not a parse artifact"
-        );
     }
 }

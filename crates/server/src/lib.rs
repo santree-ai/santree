@@ -38,7 +38,7 @@ use peer::{Identity, Verdict};
 /// (`tests/revision.rs`) hold that rule. An app runs the server revision it
 /// bundles: one already running at that revision is the same server and is
 /// adopted as is, sessions and all; one at another revision is left to drain.
-pub const REVISION: u32 = 1;
+pub const REVISION: u32 = 2;
 
 /// The app's code-signing identifier: who the server admits.
 pub const APP_IDENTIFIER: &str = "com.santree.desktop";
@@ -313,7 +313,6 @@ pub fn serve(opts: ServeOptions) -> anyhow::Result<Served> {
         .ready_fd
         .map(endpoint::ReadySocket::adopt)
         .transpose()?;
-    sys::not_dumpable();
     sys::detach();
     sys::raise_fd_limit();
     logging::init(opts.log_file.as_deref())?;
@@ -773,7 +772,7 @@ mod tests {
             let (host, admissions) = (host.clone(), admissions.clone());
             async move { run(&host, &ext, &admissions, Signals::new().unwrap(), idle).await }
         });
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
         assert!(
             !running.is_finished(),
             "retired under a connection being verified"
@@ -859,19 +858,6 @@ mod tests {
         for team in [None, Some("T")] {
             let why = check_launcher(Some(3), team, named, must_not_ask).unwrap_err();
             assert!(why.contains("not a socketpair end"), "{why}");
-        }
-    }
-
-    #[test]
-    fn the_hello_names_the_server_methods_and_base_env() {
-        let features = features();
-        for name in [
-            "pty.baseEnv",
-            "server.info",
-            "server.keepAwake",
-            "server.stop",
-        ] {
-            assert!(features.iter().any(|f| f == name), "{name} missing");
         }
     }
 }

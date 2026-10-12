@@ -292,12 +292,11 @@ mod tests {
 
     /// The exact strings `codex` 0.150.1 prints — read out of the shipped
     /// binary rather than guessed, because this parser *is* the contract with a
-    /// human-readable command.
-    /// The regression this parser shipped with: `codex login status` answers on
-    /// **stderr**, exit 0, stdout empty — so a stdout-only read called every
-    /// signed-in user "Not signed in", with no error anywhere to say why.
+    /// human-readable command. The regression this parser shipped with: `codex
+    /// login status` answers on **stderr**, exit 0, stdout empty — so a
+    /// stdout-only read called every signed-in user "Not signed in".
     #[test]
-    fn login_status_is_read_when_the_cli_answers_on_stderr() {
+    fn login_status_is_read_from_either_stream_in_the_clis_own_wording() {
         assert_eq!(
             parse_login_status("", "Logged in using ChatGPT\n"),
             parse_login_status("Logged in using ChatGPT\n", ""),
@@ -311,41 +310,28 @@ mod tests {
         );
         // Still nothing to report when neither stream says anything.
         assert_eq!(parse_login_status("", ""), CodexAccount::default());
-    }
-
-    #[test]
-    fn login_status_is_read_from_the_clis_own_wording() {
         assert_eq!(
             parse_login_status("Not logged in", ""),
             CodexAccount::default()
         );
-        assert_eq!(parse_login_status("", ""), CodexAccount::default());
         for (line, method) in [
-            ("Logged in using ChatGPT", "ChatGPT"),
             ("Logged in using access token", "access token"),
-            (
-                "Logged in using personal access token",
-                "personal access token",
-            ),
             ("Logged in using workload identity", "workload identity"),
             (
                 "Logged in using Amazon Bedrock API key",
                 "Amazon Bedrock API key",
+            ),
+            // The one variant that prints something *after* the method: a
+            // redacted key hint, which must not become part of the method shown.
+            (
+                "Logged in using an API key - sk-proj-abc…xyz\n",
+                "an API key",
             ),
         ] {
             let account = parse_login_status(line, "");
             assert!(account.connected, "{line}");
             assert_eq!(account.auth_type, method);
         }
-    }
-
-    /// The one variant that prints something *after* the method: a redacted key
-    /// hint. It must not become part of the method the UI shows.
-    #[test]
-    fn an_api_key_hint_never_reaches_the_account_field() {
-        let account = parse_login_status("Logged in using an API key - sk-proj-abc…xyz\n", "");
-        assert!(account.connected);
-        assert_eq!(account.auth_type, "an API key");
     }
 
     /// `codex debug models` names its fields differently from the App Server's

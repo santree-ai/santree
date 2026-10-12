@@ -1025,9 +1025,13 @@ mod tests {
             .await
             .unwrap();
         }
-        mark_review(&db, root_str, "review-4-acme-3-web-7", "acme/web", 7)
-            .await
-            .unwrap();
+        // Marked twice — two reviews of one PR adopt one checkout, never race a
+        // second row in.
+        for _ in 0..2 {
+            mark_review(&db, root_str, "review-4-acme-3-web-7", "acme/web", 7)
+                .await
+                .unwrap();
+        }
 
         assert_eq!(
             review_ids(&db, root_str).await.unwrap(),
@@ -1088,33 +1092,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The whole decision, without a network: only a PR GitHub says is still
-    /// open keeps its checkout hidden. A PR GitHub has no record of releases it
-    /// too — a checkout Reviews can never resolve is the case this exists for.
-    #[test]
-    fn only_an_open_pull_request_keeps_its_checkout_hidden() {
-        assert!(!releases_checkout(Some(PrState::Open)));
-        assert!(releases_checkout(Some(PrState::Merged)));
-        assert!(releases_checkout(Some(PrState::Closed)));
-        assert!(releases_checkout(None));
-    }
-
-    /// One checkout per pull request per clone. Two reviews of one PR must adopt
-    /// the same worktree rather than racing a second row into the table.
-    #[tokio::test]
-    async fn marking_the_same_pull_request_twice_is_one_row() {
-        let (base, db) = registry("review-marked-twice").await;
-        let root = register(&db, &base, "web", "https://github.com/acme/web.git").await;
-        let root_str = root.to_str().unwrap();
-        for _ in 0..2 {
-            mark_review(&db, root_str, "review-4-acme-3-web-7", "acme/web", 7)
-                .await
-                .unwrap();
-        }
-        assert_eq!(review_ids(&db, root_str).await.unwrap().len(), 1);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
     fn project(repo: &str, slug: Option<&str>) -> ReviewProject {
         ReviewProject {
             repo: repo.into(),
@@ -1144,12 +1121,14 @@ mod tests {
     /// Attribution is what puts a PR on a project's row, so it is compared one
     /// whole component at a time: `acme/web-evil` starting with `acme/web` must not
     /// spend its count. Case is ignored, since a remote's spelling need not match
-    /// GitHub's.
+    /// GitHub's. Two checkouts of one repo are two rows; the PR counts once, on
+    /// the one registered first.
     #[test]
     fn a_pr_is_attributed_to_its_project_and_no_near_miss() {
         let projects = [
             project("acme/web", Some("acme/web")),
             project("acme/kubernetes", Some("acme/kubernetes")),
+            project("acme/web (web-fork)", Some("acme/web")),
             project("scratch", None),
         ];
         let index = project_index(&projects);
@@ -1175,20 +1154,6 @@ mod tests {
                 "{near_miss} must not be attributed to acme/web"
             );
         }
-    }
-
-    /// Two checkouts of one GitHub repo are two registry rows (see `repo::add`);
-    /// the PR belongs on one of them, and it's the one registered first.
-    #[test]
-    fn a_second_checkout_does_not_double_count_a_pr() {
-        let projects = [
-            project("acme/web", Some("acme/web")),
-            project("acme/web (web-fork)", Some("acme/web")),
-        ];
-        assert_eq!(
-            project_of(&project_index(&projects), "acme/web").as_deref(),
-            Some("acme/web")
-        );
     }
 
     /// A registered git repo at `<base>/<name>` whose `origin` is `remote`,
@@ -1228,7 +1193,7 @@ mod tests {
     /// registered: the active repo is one candidate among all of them, not the
     /// only one. The owner/name come back from the matched repo's own `origin`.
     #[tokio::test]
-    async fn a_pull_request_resolves_to_any_registered_clone() {
+    async fn a_pull_request_resolves_to_a_registered_clone_and_nothing_near_it() {
         let (base, db) = registry("review-repo-for-pr").await;
         register(&db, &base, "web", "https://github.com/acme/web.git").await;
         let other = register(&db, &base, "k8s", "git@github.com:acme/kubernetes.git").await;
@@ -1247,46 +1212,25 @@ mod tests {
             .await
             .unwrap()
             .is_some());
-        let _ = std::fs::remove_dir_all(&base);
-    }
 
-    /// The org-scoped inbox is full of repos the user never cloned. That has to
-    /// stay `Ok(None)` — the caller degrades to a diff-only review rather than
-    /// refusing to open the PR at all.
-    #[tokio::test]
-    async fn an_unregistered_repo_still_degrades_to_diff_only() {
-        let (base, db) = registry("review-unregistered").await;
-        register(&db, &base, "web", "https://github.com/acme/web.git").await;
-
-        assert_eq!(repo_for_pr(&db, "web", "acme/nowhere").await.unwrap(), None);
-        assert_eq!(
-            repo_for_pr(&db, "web", "someone-else/web").await.unwrap(),
-            None
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// The slug crosses IPC and the answer becomes a filesystem root plus a `git`
-    /// argv. Both components are compared whole: a name that merely *starts with*
-    /// a registered one must not borrow its checkout.
-    #[tokio::test]
-    async fn a_near_miss_repo_name_never_borrows_a_checkout() {
-        let (base, db) = registry("review-near-miss").await;
-        register(&db, &base, "web", "https://github.com/acme/web.git").await;
-
-        for slug in ["acme/web-evil", "acme/we", "acme-evil/web", "acme/webb"] {
-            assert_eq!(
-                repo_for_pr(&db, "web", slug).await.unwrap(),
-                None,
-                "{slug} must not resolve to acme/web's checkout"
-            );
+        // The org-scoped inbox is full of repos the user never cloned: that stays
+        // `Ok(None)`, so the caller degrades to a diff-only review. The slug
+        // crosses IPC and becomes a filesystem root plus a `git` argv, so both
+        // components compare whole — a near-miss name never borrows a checkout.
+        for slug in [
+            "acme/nowhere",
+            "someone-else/web",
+            "acme/web-evil",
+            "acme/we",
+            "acme-evil/web",
+            "acme/webb",
+        ] {
+            assert_eq!(repo_for_pr(&db, "web", slug).await.unwrap(), None, "{slug}");
         }
         // Not two components at all — rejected before anything is scanned.
-        assert!(repo_for_pr(&db, "web", "acme/web/../../victim")
-            .await
-            .is_err());
-        assert!(repo_for_pr(&db, "web", "acme").await.is_err());
-        assert!(repo_for_pr(&db, "web", "acme/..").await.is_err());
+        for slug in ["acme/web/../../victim", "acme", "acme/.."] {
+            assert!(repo_for_pr(&db, "web", slug).await.is_err(), "{slug}");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 

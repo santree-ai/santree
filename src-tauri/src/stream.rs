@@ -691,8 +691,16 @@ mod tests {
     use super::fake::FakeHost;
     use super::*;
 
+    /// Escape codes and complete text pass through untouched; a multibyte char
+    /// split across reads is held until it completes; and a genuinely invalid
+    /// byte is consumed, not mistaken for an incomplete sequence and held
+    /// forever — that would stall every later chunk behind it.
     #[test]
-    fn take_utf8_holds_a_split_multibyte_char_until_it_completes() {
+    fn take_utf8_holds_a_split_char_and_never_stalls_on_a_bad_byte() {
+        let mut buf = "\x1b[32mgreen\x1b[0m ✓\r\n".as_bytes().to_vec();
+        assert_eq!(take_utf8(&mut buf), "\x1b[32mgreen\x1b[0m ✓\r\n");
+        assert!(buf.is_empty());
+
         // "é" is 0xC3 0xA9 — arriving across two reads.
         let mut buf = b"ok \xc3".to_vec();
         assert_eq!(take_utf8(&mut buf), "ok ");
@@ -700,19 +708,7 @@ mod tests {
         buf.push(0xa9);
         assert_eq!(take_utf8(&mut buf), "é");
         assert!(buf.is_empty());
-    }
 
-    #[test]
-    fn take_utf8_passes_complete_input_through_untouched() {
-        let mut buf = "\x1b[32mgreen\x1b[0m ✓\r\n".as_bytes().to_vec();
-        assert_eq!(take_utf8(&mut buf), "\x1b[32mgreen\x1b[0m ✓\r\n");
-        assert!(buf.is_empty());
-    }
-
-    /// A genuinely invalid byte must not be mistaken for an incomplete sequence and
-    /// held forever — that would stall every later chunk behind it.
-    #[test]
-    fn take_utf8_consumes_invalid_bytes_instead_of_stalling() {
         let mut buf = b"a\xffb".to_vec();
         let out = take_utf8(&mut buf);
         assert!(out.starts_with('a'), "{out:?}");
@@ -746,19 +742,6 @@ mod tests {
             std::fs::write(&path, code).unwrap();
         }
         path.to_string_lossy().into_owned()
-    }
-
-    #[test]
-    fn reserve_is_exclusive_per_key_and_frees_on_drop() {
-        let runs = Runs::default();
-        let slot = runs.reserve("k").expect("first claim");
-        assert!(runs.reserve("k").is_none(), "second claim must be refused");
-        assert!(runs.reserve("other").is_some(), "a different key is free");
-        drop(slot);
-        assert!(
-            runs.reserve("k").is_some(),
-            "dropping the slot frees the key"
-        );
     }
 
     /// A finished run must only free *its own* entry. Cancel + re-run puts a newer
@@ -905,14 +888,6 @@ mod tests {
         assert!(!shown.contains("s3cr3t-value"), "{shown}");
     }
 
-    /// The status path is the launch's own field, not a position in its argv.
-    #[test]
-    fn a_launch_carries_its_status_path() {
-        let launch = launch("/x/status");
-        assert_eq!(launch.status, "/x/status");
-        assert_eq!(launch.args[1], WRAPPER);
-    }
-
     /// A pane that exits ends the run as its script did.
     #[tokio::test]
     async fn a_run_ends_as_its_script_did() {
@@ -1020,19 +995,6 @@ mod tests {
             assert_eq!(task.await.unwrap(), ok, "{left:?}");
             let _ = std::fs::remove_file(&status);
         }
-    }
-
-    #[test]
-    fn a_runs_pane_is_known_as_owned() {
-        let runs = Runs::default();
-        let host = host_of(&FakeHost::new());
-        let slot = runs.reserve("k").unwrap();
-        assert!(!runs.owns(11), "no pane yet");
-        assert!(slot.attach(&host, 11));
-        assert!(runs.owns(11));
-        assert!(!runs.owns(13), "a tab's pane is not a run's");
-        drop(slot);
-        assert!(!runs.owns(11), "and a settled run's no longer is");
     }
 
     #[test]

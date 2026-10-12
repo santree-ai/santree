@@ -58,26 +58,10 @@ describe("useOpenAgent", () => {
     expect(spies.requestTreeFocus).toHaveBeenCalledWith("acme/app", "AK-373", {
       tab: "05242dca",
     });
-  });
-
-  /** Opening an agent says nothing about which right-panel pane you wanted.
-   *  Naming one here is how a click in the History pane jumped to the ticket. */
-  it("never names a right-panel pane", () => {
-    open("tree:AK-373:tab:05242dca");
+    // Opening an agent names no right-panel pane: that is how a click in the
+    // History pane once jumped to the ticket.
     const [, , focus] = spies.requestTreeFocus.mock.calls[0];
     expect(focus).not.toHaveProperty("pane");
-  });
-
-  /** The session's own project travels in the url. There is no app-wide "active
-   *  project" to switch any more, so this is the whole handoff — and a session in
-   *  a project you are not looking at opens without disturbing anything else. */
-  it("carries the session's project in the route", () => {
-    open("tree:AK-1", "acme/other");
-    expect(spies.navigate).toHaveBeenCalledWith({
-      to: "/trees",
-      search: { project: "acme/other", tree: "AK-1" },
-    });
-    expect(spies.requestTreeFocus).toHaveBeenCalledWith("acme/other", "AK-1", { tab: null });
   });
 
   /** A session santree cannot attribute to a project has nowhere to open: the

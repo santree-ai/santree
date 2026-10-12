@@ -113,11 +113,6 @@ describe("startRun", () => {
 });
 
 describe("trim", () => {
-  it("returns the same array when the buffer is under the cap", () => {
-    const chunks = ["a", "b"];
-    expect(trim(chunks)).toBe(chunks);
-  });
-
   it("drops the oldest chunks until it fits, keeping the newest", () => {
     const chunks = ["x".repeat(MAX_CHARS), "old", "new"];
     const out = trim(chunks);

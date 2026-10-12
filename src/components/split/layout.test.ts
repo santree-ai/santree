@@ -79,21 +79,18 @@ describe("normalize", () => {
 });
 
 describe("moving and splitting", () => {
-  it("splits a group with the tab on the named side", () => {
-    let l = open("a", "b");
-    const g = groupOf(l, "a") as string;
-    l = splitTab(l, "b", g, "left");
+  it("splits a group with the tab on the named side: a row for left/right, a column for top/bottom", () => {
+    const start = open("a", "b");
+    const g = groupOf(start, "a") as string;
+    const l = splitTab(start, "b", g, "left");
     expect(tabsOf(l)).toEqual([["b"], ["a"]]);
     expect(l.root.kind === "split" && l.root.dir).toBe("row");
     expect(focusedTab(l)).toBe("b");
     expect(visibleTabs(l)).toEqual(["b", "a"]);
-  });
 
-  it("stacks for top and bottom", () => {
-    let l = open("a", "b");
-    l = splitTab(l, "b", groupOf(l, "a") as string, "bottom");
-    expect(l.root.kind === "split" && l.root.dir).toBe("column");
-    expect(tabsOf(l)).toEqual([["a"], ["b"]]);
+    const stacked = splitTab(start, "b", g, "bottom");
+    expect(stacked.root.kind === "split" && stacked.root.dir).toBe("column");
+    expect(tabsOf(stacked)).toEqual([["a"], ["b"]]);
   });
 
   it("refuses to split a group's only tab beside itself", () => {

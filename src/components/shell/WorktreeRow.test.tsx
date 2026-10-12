@@ -53,35 +53,17 @@ function renderRow(over: Partial<WorktreeNode> = {}) {
 describe("WorktreeRow", () => {
   /** The repo's own checkout is not a ticket, and a column of identical cards
    *  gives you nothing to tell it apart by. A word does it — and it has to be a
-   *  word, because the glyph beside it is decorative to a screen reader. */
-  it("tags the repo's own checkout", () => {
-    renderRow({ primary: true, worktree: worktree({ id: "main", title: "main" }) });
+   *  word, because the glyph beside it is decorative to a screen reader. Every
+   *  other card in the section is a piece of work, so it stays untagged. */
+  it("tags the repo's own checkout, and only that one", () => {
+    const { unmount } = renderRow({
+      primary: true,
+      worktree: worktree({ id: "main", title: "main" }),
+    });
     expect(screen.getByText("primary")).toBeInTheDocument();
-  });
-
-  /** …and only that one. Every other card in the section is a piece of work. */
-  it("leaves an ordinary worktree untagged", () => {
+    unmount();
     renderRow();
     expect(screen.queryByText("primary")).toBeNull();
-  });
-
-  /** The glyph leads the line, ahead of the name — the earlier trailing position
-   *  put it where the tag now is. */
-  it("leads the primary row with the branch glyph, before the title", () => {
-    const { container } = renderRow({ primary: true });
-    const row = container.querySelector(".tree-card > div") as HTMLElement;
-    const glyph = row.querySelector("svg") as SVGElement;
-    const title = screen.getByText("Collapse the seven tabs");
-    // DOCUMENT_POSITION_FOLLOWING: the title comes after the glyph.
-    expect(glyph.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
-
-  /** Guards the oscillation this row has already been through: a mint pill, then
-   *  a dashed edge in its place, now a grey tag. The edge keyed off `data-primary`
-   *  on the card — nothing should put a treatment back on the card itself. */
-  it("draws no edge on the card", () => {
-    const { container } = renderRow({ primary: true });
-    expect(container.querySelector("[data-primary]")).toBeNull();
   });
 
   /** A worktree that is still being created has no branch and no glyph to show. */

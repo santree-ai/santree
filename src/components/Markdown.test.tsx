@@ -34,12 +34,6 @@ describe("Markdown raw-HTML handling", () => {
     expect(container.textContent).toContain("Hello");
   });
 
-  it("keeps inline data: image sources (Linear inlines images)", () => {
-    const src = "data:image/png;base64,iVBORw0KGgo=";
-    const { container } = render(<Markdown>{`![alt](${src})`}</Markdown>);
-    expect(container.querySelector("img")?.getAttribute("src")).toBe(src);
-  });
-
   it("sanitizes dangerous HTML", () => {
     const { container } = render(
       <Markdown>{`<img src=x onerror="alert(1)"><script>alert(1)</script>ok`}</Markdown>,
@@ -50,20 +44,17 @@ describe("Markdown raw-HTML handling", () => {
 });
 
 describe("MarkdownTitle", () => {
-  it("renders ticket-name emphasis and inline code", () => {
+  it("renders inline emphasis but no block or interactive elements inside clickable cards", () => {
     const { container } = render(
-      <MarkdownTitle>{"Drop `web_chat_button_title` from **Chat.Configuration**"}</MarkdownTitle>,
+      <MarkdownTitle>
+        {
+          "Drop `web_chat_button_title` from **Chat.Configuration** [link](https://example.com)\n- first\n- second"
+        }
+      </MarkdownTitle>,
     );
 
     expect(container.querySelector("code")?.textContent).toBe("web_chat_button_title");
     expect(container.querySelector("strong")?.textContent).toBe("Chat.Configuration");
-  });
-
-  it("cannot introduce block or interactive elements inside clickable cards", () => {
-    const { container } = render(
-      <MarkdownTitle>{"[link](https://example.com)\n- first\n- second"}</MarkdownTitle>,
-    );
-
     expect(container.querySelector("a, ul, li")).toBeNull();
     expect(container.textContent).toContain("link");
     expect(container.textContent).toContain("first");

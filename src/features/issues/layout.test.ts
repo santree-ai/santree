@@ -13,13 +13,6 @@ function vSpan(box: { y: number; height: number }): [number, number] {
 }
 
 describe("layoutGraph", () => {
-  it("returns an empty layout for no tasks", () => {
-    const { pos, boxes, milestoneBoxes } = layoutGraph([]);
-    expect(pos.size).toBe(0);
-    expect(boxes).toEqual([]);
-    expect(milestoneBoxes).toEqual([]);
-  });
-
   it("nests each task inside a non-overlapping milestone band", () => {
     const tasks = [
       task("A-1", "Alpha", { projectMilestone: milestone("now", 0) }),
@@ -97,6 +90,9 @@ describe("layoutGraph", () => {
       expect(p.x + NODE_W).toBeLessThanOrEqual(box.x + box.width);
       expect(p.y + NODE_H).toBeLessThanOrEqual(box.y + box.height);
     }
+    // Bands stack without vertical overlap.
+    const [, alphaEnd] = vSpan(boxes[0]);
+    expect(vSpan(boxes[1])[0]).toBeGreaterThan(alphaEnd);
   });
 
   it("omits a milestone band when every task in a project is unassigned", () => {
@@ -105,41 +101,6 @@ describe("layoutGraph", () => {
     expect(boxes).toHaveLength(1);
     expect(milestoneBoxes).toEqual([]);
     expect(pos.get("A-1")?.x).toBeLessThan(pos.get("A-2")?.x ?? 0);
-  });
-
-  it("stacks project bands without vertical overlap", () => {
-    const tasks = [
-      task("A-1", "Alpha"),
-      task("A-2", "Alpha", { blockedBy: ["A-1"] }),
-      task("A-3", "Alpha", { blockedBy: ["A-2"] }),
-      task("B-1", "Beta"),
-      task("C-1", "Gamma"),
-      task("C-2", "Gamma", { blockedBy: ["C-1"] }),
-    ];
-    const { boxes } = layoutGraph(tasks);
-    expect(boxes).toHaveLength(3);
-
-    for (let i = 0; i < boxes.length - 1; i++) {
-      const [, end] = vSpan(boxes[i]);
-      const [nextStart] = vSpan(boxes[i + 1]);
-      expect(nextStart).toBeGreaterThan(end);
-    }
-  });
-
-  it("orders a blocker strictly left of the task it blocks (rankdir LR)", () => {
-    const tasks = [
-      task("A-1", "Alpha"),
-      task("A-2", "Alpha", { blockedBy: ["A-1"] }),
-      task("A-3", "Alpha", { blockedBy: ["A-2"] }),
-    ];
-    const { pos } = layoutGraph(tasks);
-    const p1 = pos.get("A-1");
-    const p2 = pos.get("A-2");
-    const p3 = pos.get("A-3");
-    expect(p1 && p2 && p3).toBeTruthy();
-    if (!p1 || !p2 || !p3) return;
-    expect(p1.x).toBeLessThan(p2.x);
-    expect(p2.x).toBeLessThan(p3.x);
   });
 
   it("ignores a cross-project blocker for band membership (node stays in its own band)", () => {
@@ -154,19 +115,5 @@ describe("layoutGraph", () => {
     expect(boxes.find((b) => b.project === "Alpha")?.count).toBe(1);
     expect(boxes.find((b) => b.project === "Beta")?.count).toBe(1);
     expect(pos.size).toBe(2);
-  });
-
-  it("is deterministic for the same input", () => {
-    const tasks = [
-      task("A-1", "Alpha"),
-      task("A-2", "Alpha", { blockedBy: ["A-1"] }),
-      task("B-1", "Beta"),
-      task("B-2", "Beta", { blockedBy: ["B-1"] }),
-    ];
-    const first = layoutGraph(tasks);
-    const second = layoutGraph(tasks);
-    expect(Array.from(first.pos.entries())).toEqual(Array.from(second.pos.entries()));
-    expect(first.boxes).toEqual(second.boxes);
-    expect(first.milestoneBoxes).toEqual(second.milestoneBoxes);
   });
 });

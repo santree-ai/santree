@@ -13,8 +13,8 @@ the real app and *observe* the change. A change is verified only when both pass.
 Run in this order (cheapest first). All must be green:
 
 0. `cargo fmt --all --check` — first, and never skipped. Clippy and the tests
-   pass on unformatted code, so nothing else catches this; CI's backend job runs
-   it *before* them, so drift fails the build and hides every later gate. If it
+   pass on unformatted code, so nothing else catches this; CI's `backend-lint`
+   job runs it *before* clippy, so drift fails the build and hides clippy's verdict. If it
    reports a diff, `cargo fmt --all` and re-check.
 1. `cargo check --workspace`
 2. If anything touched `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs`, or a
@@ -30,7 +30,11 @@ Run in this order (cheapest first). All must be green:
    `pnpm format` and re-check rather than reading past it.
 5. `cargo clippy --workspace --all-targets -- -D warnings`
 6. `pnpm test` (vitest) and `cargo test --workspace`
-7. For any new/changed command taking a path, id, or branch: confirm it's
+7. If an engine crate changed (`santree-pty`, `-host`, `-remote-proto`,
+   `-remote-tls`, `-agent-kind`): `cargo +1.95 check -p <crate> --all-targets`.
+   CI's `engine-linux` job also clippies and tests them on Linux, the only
+   platform besides macOS they must build on.
+8. For any new/changed command taking a path, id, or branch: confirm it's
    validated (`safe_path`/`safe_real_path`, no leading `-`) before it reaches
    fs or git — see AGENTS.md "Security & validation invariants".
 

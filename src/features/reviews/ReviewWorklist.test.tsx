@@ -222,7 +222,7 @@ describe("ReviewWorklist launch state", () => {
 });
 
 describe("ReviewWorklist rows", () => {
-  it("offers the pencil on your own note and on nothing else", () => {
+  it("names each row's source, and offers the pencil on your own note alone", () => {
     // A reference's body is authored by the backend from its source and resolved
     // again when the agent starts — an edit here would be overwritten, unseen.
     list(
@@ -233,26 +233,6 @@ describe("ReviewWorklist rows", () => {
         workItem({ id: "4", source: "check", sourceId: "build", body: "build is red" }),
       ],
       { checks: [check({ name: "build" })] },
-    );
-
-    expect(screen.getAllByLabelText("Edit improvement")).toHaveLength(1);
-    // Deleting stays available on every row: a reference you don't want to fix
-    // still comes off the queue.
-    expect(screen.getAllByLabelText("Delete improvement")).toHaveLength(4);
-
-    fireEvent.click(screen.getByLabelText("Edit improvement"));
-    expect(screen.getByLabelText("Edit review improvement")).toHaveValue("tidy the retry loop");
-  });
-
-  it("names each row's source in its glyph slot", () => {
-    list(
-      [
-        workItem({ id: "1", source: "manual", body: "note" }),
-        workItem({ id: "2", source: "githubThread", sourceId: "9001", body: "nit" }),
-        workItem({ id: "3", source: "aiDraft", sourceId: "d1", body: "leak" }),
-        workItem({ id: "4", source: "check", sourceId: "build", body: "red" }),
-      ],
-      { checks: [check({ name: "build" })] },
       [draft({ id: "d1" })],
     );
 
@@ -260,6 +240,13 @@ describe("ReviewWorklist rows", () => {
     expect(screen.getByLabelText("Review comment")).toBeInTheDocument();
     expect(screen.getByLabelText("AI draft")).toBeInTheDocument();
     expect(screen.getByLabelText("Check, failed")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Edit improvement")).toHaveLength(1);
+    // Deleting stays available on every row: a reference you don't want to fix
+    // still comes off the queue.
+    expect(screen.getAllByLabelText("Delete improvement")).toHaveLength(4);
+
+    fireEvent.click(screen.getByLabelText("Edit improvement"));
+    expect(screen.getByLabelText("Edit review improvement")).toHaveValue("tidy the retry loop");
   });
 
   it("reads a check's status live, not off the sentence it was queued with", () => {

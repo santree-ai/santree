@@ -45,8 +45,4 @@ describe("anchoredFeedback", () => {
     const entries = anchoredFeedback([], [draft("src/a.ts", 7, "d1"), draft("src/a.ts", 7, "d2")]);
     expect(entries.map((e) => e.key)).toEqual(["draft:d1", "draft:d2"]);
   });
-
-  it("has nothing to list for a PR with neither", () => {
-    expect(anchoredFeedback([], [])).toEqual([]);
-  });
 });

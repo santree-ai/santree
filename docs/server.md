@@ -60,9 +60,7 @@ startup, because a pane's route depends on the answer staying put:
 
 `choose_mode` is pure and tested: a baked build that cannot confirm its own
 signature is `Off`, never `OptIn`, and the env flag never overrides a signed
-build. There is no Settings switch. Linux has no signature check, so it is `Off`
-(or `OptIn`, launched by a plain detached spawn), and its packages do not carry
-the server.
+build. There is no Settings switch.
 
 **Why only signed builds.** Every agent in a santree PTY runs as the user's uid. A
 socket that admitted by uid would let one agent attach to another's pane, type
@@ -147,8 +145,8 @@ endpoint is touched, so a server an agent launched never holds the lock.
 
 ### Serving, flood, retirement, quit
 
-`serve` raises `RLIMIT_NOFILE` to `min(hard, 10240)`, is non-dumpable on Linux
-(the hardened runtime covers macOS) and logs panics. It catches signals rather
+`serve` raises `RLIMIT_NOFILE` to `min(hard, 10240)` and logs panics (the
+hardened runtime keeps a same-user process out of its memory). It catches signals rather
 than ignoring them, since an ignored disposition passes to every PTY child:
 SIGTERM and SIGINT close every session and exit 0; SIGHUP is logged and ignored.
 
@@ -246,7 +244,7 @@ goes by whatever signature it has, or by uid alone.
 ## Versions and draining
 
 - **`REVISION`** (`crates/server/src/lib.rs`) is the server's compatibility
-  revision; the first release carries revision 1. An app runs the revision it
+  revision; revision 1 shipped in 0.1.19-beta.1, and 2 in 0.1.19-beta.2. An app runs the revision it
   bundles: a running server of that revision is adopted as is, one of another is
   left to drain. A release that does not touch the server keeps both.
 - **The drift test** (`crates/server/tests/revision.rs`, run by ci.yml) hashes,
@@ -520,10 +518,9 @@ subscriber, the newest.
 - **Stage**: `pnpm bundle:binaries` (run by `beforeDevCommand` and
   `beforeBuildCommand`) builds `santree-hook` and `santree-server` into
   `target/bundle-resources/`, lipo'd for `universal-apple-darwin`.
-- **Declare**: the server is a macOS-only resource in
-  `src-tauri/tauri.macos.conf.json`. tauri-build fails on a declared resource that
-  is missing, so stage it before any macOS cargo build of `src-tauri` (ci.yml's
-  cargo-only job stages both by hand).
+- **Declare**: the server is a resource in `src-tauri/tauri.macos.conf.json`.
+  tauri-build fails on a declared resource that is missing, so stage it before
+  any cargo build of `src-tauri` (ci.yml's cargo-only jobs stage both by hand).
 - **Sign**: `scripts/sign-resources.mjs` (`beforeBundleCommand`) signs both
   hardened with a timestamp, the server as `com.santree.server` with no
   entitlements; a no-op without `APPLE_SIGNING_IDENTITY`. A new resource binary
@@ -538,7 +535,9 @@ subscriber, the newest.
   `SANTREE_SMOKE` (which starts no server, `server::smoke_enabled`, and checks the
   bundled binary, `server::smoke_assert`), then requires `pgrep -x santree-server`
   to find nothing.
-- **Linux**: ci.yml asserts the deb carries `santree-hook` and not the server.
+- **CI**: ci.yml's bundle smoke (pushes to main) builds the unsigned `.app` with
+  the optimizer off, asserts both resources are in it, smoke-launches it and
+  requires no server to outlive it. Only release.yml builds what users install.
 
 **The database is a compatibility surface.** sqlx refuses a database that recorded
 a migration the binary lacks, so a beta that applies a migration cannot be rolled
@@ -596,7 +595,7 @@ real binary on a real socket, launched as the app does), and
 |---|---|---|
 | Protocol-v1 host: pacing, caps, `Extension`, `baseEnv`, `pty.modes` | `crates/host`, `crates/pty` | built |
 | Server: lock, endpoint repair, ready socketpair, exit codes, flood limit, retirement, signals, logs, `server.*` | `crates/server` | built |
-| `REVISION`, `revision.lock`, drift test | `crates/server` | built; revision 1 |
+| `REVISION`, `revision.lock`, drift test | `crates/server` | built; revision 2 (1 shipped) |
 | Trust: `PeerTrust`/`Required`, peer signature both ways, launch and self checks | `crates/remote`, `crates/server/src/peer.rs`, `server/connector.rs` | built |
 | `LocalServers`: layout, install, spawn, supervisor, discovery, draining, crash budget, pruning, keep-awake, diagnostics | `src-tauri/src/server/` | built |
 | Facade, id counter, `RemoteTerminals` + `Profile`, adopt-all, `Liveness`, `PaneLink::Lost`, `session_env` | `src-tauri/src/sessions/` | built |
@@ -606,7 +605,7 @@ real binary on a real socket, launched as the app does), and
 | Frontend: lost pane and Resume, re-adoption, banner, dot, Settings card, not-responding hint, QuitGuard | `src/features/terminal/`, `src/components/shell/`, `src/features/settings/`, `src/lib/serverStatus.ts` | built |
 | Bundling, signing, team bake, signature verification, smoke | `scripts/`, `.github/workflows/`, `tauri.macos.conf.json` | built; never run by a release |
 | Daedalus session host on `santree-host` | daedalus engine | not built |
-| `pty.exitStatus`, fd handoff, Mach probe, server on Linux | | not built |
+| `pty.exitStatus`, fd handoff, Mach probe | | not built |
 
 ## Known limits
 
@@ -631,7 +630,7 @@ real binary on a real socket, launched as the app does), and
 - Hook wrappers written before the stable path (an older global status-line
   capture, existing AI-review MCP configs) keep the bundle path until rewritten.
 - Not built: `pty.exitStatus`, fd-handoff upgrades, a Mach-bootstrap health probe,
-  a hardened-runtime flag check in `peer.rs`, the server on Linux.
+  a hardened-runtime flag check in `peer.rs`.
 
 ## Unverified
 
@@ -660,7 +659,6 @@ walked on it, installed over an older build:
 10. **Setup runs**: a script survives a quit, is listed in Settings → Terminal,
     can be stopped there, and blocks a second run of its key until it ends.
 11. **The `pty.modes` preamble** on a signed build.
-12. **Linux**: an opted-in server has never run on a Linux host.
 
 ---
 

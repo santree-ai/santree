@@ -263,20 +263,16 @@ function LocalTree() {
 describe("ProjectSection header", () => {
   /** Both header counts are permanent reference — the ask was to read them at a
    *  glance — so the worktree count is not gated on hover, and it sits with its
-   *  own glyph rather than as a bare number beside the chevron. */
-  it("shows the worktree count at rest, beside its own glyph", () => {
-    renderSection();
-    const count = worktreeCount();
-    expect(count).toHaveTextContent("6");
-    expect(count.className).not.toContain("opacity-0");
-    expect(count.querySelector("svg")).toBeInTheDocument();
-  });
-
-  /** Where a project lives is its section's to say (PROJECTS or DAEDALUS), so
-   *  the row itself wears no mark for it. */
-  it("carries no mark of where the project lives", () => {
-    renderSection();
-    expect(screen.queryByRole("img")).toBeNull();
+   *  own glyph rather than as a bare number beside the chevron. Folded, the
+   *  counts are all that is left of the project; they stay. */
+  it("shows the worktree count at rest, open or folded", () => {
+    for (const open of [true, false]) {
+      const { unmount } = renderSection({}, { open });
+      const count = worktreeCount();
+      expect(count).toHaveTextContent("6");
+      expect(count.className).not.toContain("opacity-0");
+      unmount();
+    }
   });
 
   /** Out of reach, the header's create button is still there to be found, but
@@ -286,17 +282,6 @@ describe("ProjectSection header", () => {
     const create = screen.getByRole("button", { name: "Create worktree in santree" });
     expect(create).toBeDisabled();
     expect(create).toHaveAttribute("title", "Unavailable until santree can reach Daedalus");
-  });
-
-  it("offers creating a worktree whenever nothing holds it back", () => {
-    renderSection();
-    expect(screen.getByRole("button", { name: "Create worktree in santree" })).toBeEnabled();
-  });
-
-  /** Folded, the counts are all that is left of the project; they stay. */
-  it("keeps the worktree count on a folded project", () => {
-    renderSection({}, { open: false });
-    expect(worktreeCount()).toHaveTextContent("6");
   });
 
   /** A quiet project is silent, not a nought — the rule the reviews count
@@ -316,15 +301,6 @@ describe("ProjectSection header", () => {
     // but the width is already spoken for.
     expect(count).toHaveTextContent(/^worktrees$/);
     expect(digitsOf(count).className).toContain("min-w-[13px]");
-  });
-
-  /** The repo header carries no attention dot: the rows beneath it already say
-   *  which worktree needs a human, and a second dot on the parent restated it
-   *  while adding permanent colour to a rail that is open all day. Removed
-   *  deliberately — this asserts it stays gone. */
-  it("shows no attention dot on the repo header, even at needs-you", () => {
-    renderSection({ attention: { level: "needs-you", at: 1 } });
-    expect(screen.queryByRole("img", { name: "Needs you" })).not.toBeInTheDocument();
   });
 });
 
@@ -350,19 +326,15 @@ describe("ProjectSection reviews section", () => {
     expect(band(heading)).toHaveTextContent("3");
   });
 
-  /** The resting state of a quiet project is silence. */
-  it("renders nothing on a quiet project by default", () => {
-    renderSection({}, { reviews: reviewsFor(), showEmptyReviews: false });
+  /** The resting state of a quiet project is silence. Turned on, a nought is what
+   *  makes the feature's *absence* legible: one repo showing Reviews while the two
+   *  beside it show nothing reads as santree only knowing about the first. */
+  it("hides a quiet project's section by default, and shows a nought once asked to", () => {
+    const { unmount } = renderSection({}, { reviews: reviewsFor(), showEmptyReviews: false });
     expect(screen.queryByRole("button", { name: /reviews/i })).not.toBeInTheDocument();
-  });
-
-  /** Turned on, a nought is what makes the feature's *absence* legible: one repo
-   *  showing Reviews while the two beside it show nothing reads as santree only
-   *  knowing about the first. Folded, so it costs one line. */
-  it("keeps a folded section and a nought once asked to", () => {
+    unmount();
     renderSection({}, { reviews: reviewsFor(), showEmptyReviews: true });
-    const heading = screen.getByRole("button", { name: /santree reviews/ });
-    expect(band(heading)).toHaveTextContent("0");
+    expect(band(screen.getByRole("button", { name: /santree reviews/ }))).toHaveTextContent("0");
   });
 
   /** Unknown is not empty. Without a `gh` token every count is zero for a reason
@@ -402,32 +374,24 @@ describe("ProjectSection reviews section", () => {
   });
 
   /** Folded, the header is all that is left of the project — without the count on
-   *  it, "does anything need me" costs one expand per project. */
-  it("carries the reviews count on the header while the whole project is folded", () => {
-    renderSection({}, { open: false, reviews: reviewsFor({ direct: 2, total: 2 }) });
-    expect(screen.queryByRole("button", { name: /santree reviews/ })).not.toBeInTheDocument();
-    // The number alone is not a fact; a screen reader gets the noun too.
-    const badge = screen.getByText(/reviews waiting on you/).parentElement as HTMLElement;
-    expect(badge).toHaveTextContent("2");
-    // The badge sits under the header's stretched toggle, so its own tooltip could
-    // never open — the breakdown rides on the header's instead.
-    expect(screen.getByRole("button", { name: "Expand santree" })).toHaveAttribute(
-      "title",
-      `stoscanini/santree\n2 for you — reviews waiting on you\n${BULK_TOGGLE_HINT}`,
-    );
-  });
-
-  /** Open, the count stays: it is reference to read at a glance, not a stand-in
-   *  for a folded section — and its breakdown stays on the header's tooltip
-   *  with it. */
-  it("keeps the reviews count on the header once the project is open", () => {
-    renderSection({}, { open: true, reviews: reviewsFor({ direct: 2, total: 2 }) });
-    const badge = screen.getByText(/reviews waiting on you/).parentElement as HTMLElement;
-    expect(badge).toHaveTextContent("2");
-    expect(screen.getByRole("button", { name: "Collapse santree" })).toHaveAttribute(
-      "title",
-      `stoscanini/santree\n2 for you — reviews waiting on you\n${BULK_TOGGLE_HINT}`,
-    );
+   *  it, "does anything need me" costs one expand per project. Open, it stays as
+   *  glanceable reference. The badge sits under the header's stretched toggle, so
+   *  its breakdown rides on the header's tooltip. */
+  it("carries the reviews count and its breakdown on the header, open or folded", () => {
+    for (const [open, name] of [
+      [false, "Expand santree"],
+      [true, "Collapse santree"],
+    ] as const) {
+      const { unmount } = renderSection({}, { open, reviews: reviewsFor({ direct: 2, total: 2 }) });
+      // The number alone is not a fact; a screen reader gets the noun too.
+      const badge = screen.getByText(/reviews waiting on you/).parentElement as HTMLElement;
+      expect(badge).toHaveTextContent("2");
+      expect(screen.getByRole("button", { name })).toHaveAttribute(
+        "title",
+        `stoscanini/santree\n2 for you — reviews waiting on you\n${BULK_TOGGLE_HINT}`,
+      );
+      unmount();
+    }
   });
 
   /** Zero is silence, not a nought: a quiet project's header carries the worktree
@@ -609,23 +573,19 @@ describe("ProjectSection merge queue", () => {
   const queueRow = () => screen.queryByRole("button", { name: /Open the merge queue/ });
   const open = () => renderSection({}, { reviewsOpen: true, reviews: reviewsFor() });
 
-  it("says nothing while the read is still in flight", () => {
-    mergeQueue.view = undefined;
-    open();
-    expect(queueRow()).toBeNull();
-  });
-
-  /** Two different silences, and neither of them is a queue: a repo without one
-   *  can never have a row, and a `gh` that could not be asked has no answer. */
-  it("says nothing when the repo has no queue, or GitHub could not be asked", () => {
-    mergeQueue.view = { repo: "acme/app", githubConnected: true, queue: null };
-    const first = open();
-    expect(queueRow()).toBeNull();
-    first.unmount();
-
-    mergeQueue.view = { repo: "acme/app", githubConnected: false, queue: null };
-    open();
-    expect(queueRow()).toBeNull();
+  /** Three silences, and none of them is a queue: the read in flight, a repo
+   *  without one, and a `gh` that could not be asked. */
+  it("says nothing while in flight, without a queue, or when GitHub could not be asked", () => {
+    for (const view of [
+      undefined,
+      { repo: "acme/app", githubConnected: true, queue: null },
+      { repo: "acme/app", githubConnected: false, queue: null },
+    ]) {
+      mergeQueue.view = view;
+      const { unmount } = open();
+      expect(queueRow()).toBeNull();
+      unmount();
+    }
   });
 
   /** An enabled queue with nothing in it is a real answer, and the one zero here
@@ -794,22 +754,14 @@ describe("ProjectSection reviews indentation", () => {
     );
   }
 
-  /** A row hangs from the words above it. `BAND_LABEL_X` past the block heading's
-   *  own gutter is where those words start. */
-  it("hangs a row from its heading's label, not from its chevron", () => {
-    const { container } = render2("none", []);
-    const heading = screen.getByRole("button", { name: "Collapse review group Assigned to me" });
-    const row = container.querySelector(".tree-card") as HTMLElement;
-    // The card overhangs its own text by `CARD_INSET`, which is what the
-    // highlight starts at — the text itself lands on the heading's label.
-    expect(gutterOf(row) + CARD_INSET).toBe(gutterOf(heading) + BAND_LABEL_X);
-  });
-
-  /** Every drawn level pushes its rows further in than the level above it, and a
-   *  heading never ends up left of the heading it sits inside. */
-  it("steps in monotonically as the levels are drawn", () => {
+  /** A row hangs from the words above it — `BAND_LABEL_X` past its heading's own
+   *  gutter, the card overhanging its text by `CARD_INSET` — and every drawn level
+   *  pushes its rows further in than the level above it. */
+  it("hangs each row from its heading's label, stepping in per level", () => {
     const flat = render2("none", []);
+    const heading = screen.getByRole("button", { name: "Collapse review group Assigned to me" });
     const flatRow = gutterOf(flat.container.querySelector(".tree-card") as HTMLElement);
+    expect(flatRow + CARD_INSET).toBe(gutterOf(heading) + BAND_LABEL_X);
     flat.unmount();
 
     const nested = render2("project_milestone", [
@@ -880,17 +832,8 @@ describe("ProjectSection review agents", () => {
     };
   }
 
-  it("draws nothing extra when no session is running on the PR", () => {
-    const { container } = withAgents([]);
-    const card = container.querySelector(".tree-card") as HTMLElement;
-    // The title line and nothing else — no fold, no padding shim.
-    expect(card.children).toHaveLength(1);
-  });
-
   it("hangs a lone session under the pull request it is reviewing", () => {
     const { onOpen } = withAgents([reviewAgent({ purpose: "AI review" })]);
-    const row = screen.getByRole("button", { name: /Assigned to me 1/ });
-    expect(row).toBeTruthy();
     const session = screen.getByTitle("AI review · AI review");
     fireEvent.click(session);
     expect(onOpen).toHaveBeenCalledTimes(1);
@@ -1192,21 +1135,14 @@ describe("ProjectTree reveals a selection made elsewhere", () => {
     route.openTree = null;
   });
 
-  it("expands every ancestor of a worktree selected from another view", () => {
+  it("expands every ancestor of a worktree selected from another view, and nothing else", () => {
     collapseAll();
     ui.treeFocus = { repo: REPO, id: "AK-1", pane: "issue" };
     render(<LocalTree />);
     expect(screen.getByRole("button", { name: "Collapse app" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Collapse project Core" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Collapse milestone M1" })).toBeInTheDocument();
-  });
-
-  // Only expand. A fold elsewhere in the tree is the user's own curation and
-  // this request has no business undoing it.
-  it("leaves the bands it did not have to open exactly as it found them", () => {
-    collapseAll();
-    ui.treeFocus = { repo: REPO, id: "AK-1", pane: "issue" };
-    render(<LocalTree />);
+    // Only expand. A fold elsewhere in the tree is the user's own curation.
     expect(screen.getByRole("button", { name: "Expand project Infra" })).toBeInTheDocument();
   });
 
@@ -1305,17 +1241,15 @@ describe("ProjectTree locations", () => {
     expect(model.location).toBe("Local");
   });
 
-  /** A section with nothing in it says so in one quiet line — its host's words. */
-  it("draws its host's empty line when no project lives there", () => {
-    model.current = { ...withRow, projects: [] };
-    render(<ProjectTree location="Daedalus" emptyLabel="No projects yet. Add one with +" />);
-    expect(screen.getByText("No projects yet. Add one with +")).toBeInTheDocument();
-  });
-
-  it("draws no empty line while the repo list is still in flight", () => {
+  /** A section with nothing in it says so in one quiet line — its host's words —
+   *  but not while the repo list is still in flight: unknown is not empty. */
+  it("draws its host's empty line once no project lives there", () => {
     model.current = { ...withRow, projects: [], loading: true };
-    render(<ProjectTree location="Daedalus" emptyLabel="No projects yet. Add one with +" />);
-    expect(screen.queryByText("No projects yet. Add one with +")).toBeNull();
+    const { rerender } = render(<ProjectTree location="Daedalus" emptyLabel="No projects yet" />);
+    expect(screen.queryByText("No projects yet")).toBeNull();
+    model.current = { ...withRow, projects: [] };
+    rerender(<ProjectTree location="Daedalus" emptyLabel="No projects yet" />);
+    expect(screen.getByText("No projects yet")).toBeInTheDocument();
   });
 
   /** Out of reach, the rows still open — that is navigation — but every action

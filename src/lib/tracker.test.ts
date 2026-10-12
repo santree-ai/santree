@@ -3,12 +3,9 @@ import { describe, expect, it } from "vitest";
 import { trackerFeatures, trackerOf } from "./tracker";
 
 describe("trackerOf", () => {
-  it("names Jira only when the detail says so", () => {
+  it("names Jira only when the detail says so, and reads no name as Linear's", () => {
     expect(trackerOf("Jira")).toBe("Jira");
     expect(trackerOf("Linear")).toBe("Linear");
-  });
-
-  it("reads a detail with no tracker name as Linear's", () => {
     expect(trackerOf(undefined)).toBe("Linear");
     expect(trackerOf(null)).toBe("Linear");
   });

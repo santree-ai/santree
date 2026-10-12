@@ -178,60 +178,36 @@ mod tests {
         foreground_agent(&tree(), root, &catalog())
     }
 
-    /// The catalog is the list. A provider added there is recognised here with
-    /// no second list to update.
+    /// Each pane is named by the agent in its foreground, or by nothing:
+    ///
+    /// * a Codex sitting unprompted at the pane root — the case the whole
+    ///   feature exists for, having said nothing to any hook — is recognised,
+    ///   and its own `claude -p` helper at depth 1 can't take the pane from it;
+    /// * an agent the user typed into a shell is found as a descendant;
+    /// * foreground is decisive: a suspended `codex` is not claimed, and nor is
+    ///   a `vim` whose *argument* is called `codex` — only `argv[0]` names one;
+    /// * unattributable is `None`, never a default provider: a build, a
+    ///   vanished pane root and a zombie all mean "we don't know".
     #[test]
-    fn every_catalogued_provider_is_recognisable_by_its_own_binary_name() {
-        let catalog = catalog();
-        assert_eq!(catalog.len(), config::agents().len());
-        for (binary, kind) in &catalog {
-            assert_eq!(*binary, agent_binary(*kind));
-            assert!(!binary.is_empty());
+    fn a_pane_is_its_foreground_agent_or_unknown() {
+        for (root, want, why) in [
+            (
+                500,
+                Some(AgentKind::Codex),
+                "an unprompted codex at the root",
+            ),
+            (
+                200,
+                Some(AgentKind::Claude),
+                "an agent started inside a shell",
+            ),
+            (300, None, "a backgrounded agent"),
+            (400, None, "a build is not an agent"),
+            (999, None, "a vanished pane root"),
+            (600, None, "a zombie is nobody's foreground"),
+        ] {
+            assert_eq!(agent(root), want, "{why}");
         }
-        assert!(catalog.contains(&("claude", AgentKind::Claude)));
-        assert!(catalog.contains(&("codex", AgentKind::Codex)));
-    }
-
-    /// The case the whole feature exists for: a Codex sitting at its prompt,
-    /// having said nothing to any hook, is still recognised.
-    #[test]
-    fn an_unprompted_codex_pane_is_recognised() {
-        assert_eq!(agent(500), Some(AgentKind::Codex));
-    }
-
-    /// A descendant, not just the root: the agent the user typed into a shell.
-    #[test]
-    fn an_agent_started_by_hand_inside_a_shell_is_found() {
-        assert_eq!(agent(200), Some(AgentKind::Claude));
-    }
-
-    /// Foreground is decisive both ways. A suspended `codex` is not claimed, and
-    /// neither is a `vim` whose *argument* happens to be called `codex` — only
-    /// `argv[0]` names a process.
-    #[test]
-    fn a_backgrounded_agent_does_not_claim_its_pane() {
-        assert_eq!(agent(300), None);
-    }
-
-    /// A shallower foreground match wins, so an agent's own helper can't take
-    /// the pane's identity from it.
-    #[test]
-    fn the_agent_nearest_the_pane_root_wins_over_one_it_shelled_out_to() {
-        assert_eq!(
-            agent(500),
-            Some(AgentKind::Codex),
-            "the Claude helper at depth 1 must not outrank the Codex at depth 0"
-        );
-    }
-
-    /// Unattributable is `None`, never a default provider: a plain shell, a pane
-    /// whose root has been reaped, and a zombie all mean "we don't know", and
-    /// nothing may render a guess as live data.
-    #[test]
-    fn a_pane_with_no_agent_is_unknown_rather_than_defaulted() {
-        assert_eq!(agent(400), None, "a build is not an agent");
-        assert_eq!(agent(999), None, "a vanished pane root");
-        assert_eq!(agent(600), None, "a zombie is nobody's foreground");
     }
 
     /// With a local santree server the panes' roots are the server's children,

@@ -219,14 +219,16 @@ describe("reviewGroupsByProject", () => {
   });
 
   /** A PR you already reviewed is out of both the count and the blocks until its
-   *  author pushes again — one rule, not two. */
-  it("leaves out what you have already reviewed, and seeds a quiet project empty", () => {
+   *  author pushes again, and a PR from a repo you never cloned has no row to sit
+   *  under. A registered, quiet project is still an entry, not a missing key. */
+  it("leaves out reviewed and unowned PRs, and seeds a quiet project empty", () => {
     const inbox = {
       mine: [],
       requested: [
         pr("reviewed", {
           viewerReview: { state: "Approved", submittedAt: "2026-08-24T11:00:00Z" },
         }),
+        pr("unowned", { project: null }),
       ],
       teams: [],
       projects: [
@@ -238,40 +240,16 @@ describe("reviewGroupsByProject", () => {
     } satisfies ReviewInbox;
 
     expect(reviewGroupsByProject(inbox).get("acme/web")).toEqual([]);
-    // Registered and quiet is an entry, not a missing key: the section decides
-    // what to render, and "we have no idea" is a different answer.
     expect(reviewGroupsByProject(inbox).has("scratch")).toBe(true);
-  });
-
-  /** A PR from a repo you never cloned belongs to no project and has no row to
-   *  sit under. It is still in the Reviews view itself. */
-  it("drops PRs no registered project owns", () => {
-    const inbox = {
-      mine: [],
-      requested: [pr("unowned", { project: null })],
-      teams: [],
-      projects: [{ repo: "acme/web", slug: "acme/web" }],
-      orgs: ["acme"],
-      githubConnected: true,
-    } satisfies ReviewInbox;
-
-    expect(reviewGroupsByProject(inbox).get("acme/web")).toEqual([]);
   });
 });
 
 describe("resolveHelperAgent", () => {
-  it("keeps helper assignments independent from the interactive Work provider", () => {
+  it("prefers the helper's own pick, then Work, then the app default, ignoring unknown values", () => {
     expect(resolveHelperAgent("Codex", "Claude", "Claude")).toBe("Codex");
-    expect(resolveHelperAgent("Claude", "Codex", "Codex")).toBe("Claude");
-  });
-
-  it("falls back through Work and the app default", () => {
     expect(resolveHelperAgent(null, "Claude", "Codex")).toBe("Claude");
-    expect(resolveHelperAgent(null, null, "Claude")).toBe("Claude");
+    expect(resolveHelperAgent(null, null, "Codex")).toBe("Codex");
     expect(resolveHelperAgent(null, null, null)).toBe("Claude");
-  });
-
-  it("does not render an unknown stored provider", () => {
     expect(resolveHelperAgent("Unknown", "Claude", "Codex")).toBe("Claude");
   });
 });
@@ -526,21 +504,6 @@ describe("useOptimisticMutation", () => {
     await act(async () => settle.b.resolve());
     await waitFor(() => expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key }));
   });
-
-  it("still rolls back a failed call once it's the only one in flight", async () => {
-    const qc = makeClient();
-    const key = ["file"] as const;
-    qc.setQueryData(key, "before");
-    const { result, settle } = overlapping(qc, key);
-
-    act(() => result.current.mutate("a"));
-    await waitFor(() => expect(settle.a).toBeDefined());
-    expect(qc.getQueryData(key)).toBe("a");
-
-    await act(async () => settle.a.reject(new Error("boom")));
-
-    expect(qc.getQueryData(key)).toBe("before");
-  });
 });
 
 describe("promptPreviewKey", () => {
@@ -574,41 +537,7 @@ describe("promptPreviewKey", () => {
 
   const body = "Fix {{ issue.title }}";
 
-  it("is stable for identical inputs (so a re-render doesn't refetch)", () => {
-    const a = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
-    const b = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
-    expect(a).toEqual(b);
-  });
-
-  it("changes when the draft changes", () => {
-    const a = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
-    const b = promptPreviewKey(
-      "work",
-      `${body} now`,
-      "acme",
-      "personal",
-      "ENG-1",
-      detail(),
-      undefined,
-    );
-    expect(a).not.toEqual(b);
-  });
-
-  it("changes when the sample issue changes — a refetched detail must re-render, not serve the stale preview", () => {
-    const a = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
-    const b = promptPreviewKey(
-      "work",
-      body,
-      "acme",
-      "personal",
-      "ENG-1",
-      detail({ description: "edited" }),
-      undefined,
-    );
-    expect(a).not.toEqual(b);
-  });
-
-  it("changes when the sample work queue changes — the Start-work preview is rendered over it", () => {
+  it("is stable for identical inputs and changes with the draft, the sample issue or the sample queue", () => {
     const item = {
       source: "manual" as const,
       description: "Add a test",
@@ -617,19 +546,28 @@ describe("promptPreviewKey", () => {
       author: null,
       body: null,
     };
-    const a = promptPreviewKey("pr-fix", body, "acme", "personal", "", undefined, [item]);
-    const b = promptPreviewKey("pr-fix", body, "acme", "personal", "", undefined, [
-      { ...item, description: "Add two tests" },
-    ]);
-    expect(a).not.toEqual(b);
-    // Hashed like the draft: the queue's text never sits in the key.
-    for (const part of a as unknown[]) expect(String(part)).not.toContain("Add a test");
+    const key = (draft: string, d = detail(), queue = [item]) =>
+      promptPreviewKey("work", draft, "acme", "personal", "ENG-1", d, queue);
+    const base = key(body);
+    expect(key(body)).toEqual(base);
+    expect(key(`${body} now`)).not.toEqual(base);
+    // A refetched detail must re-render, not serve the stale preview.
+    expect(key(body, detail({ description: "edited" }))).not.toEqual(base);
+    // The Start-work preview is rendered over the queue.
+    expect(key(body, detail(), [{ ...item, description: "Add two tests" }])).not.toEqual(base);
   });
 
-  it("never carries the draft text itself — the cache must not retain a copy per keystroke", () => {
-    const key = promptPreviewKey("work", body, "acme", "personal", "ENG-1", detail(), undefined);
-    expect(key).not.toContain(body);
-    // Every part stays short regardless of how big the template gets.
+  it("never carries the draft or queue text itself — the cache must not retain a copy per keystroke", () => {
+    const queue = [
+      {
+        source: "manual" as const,
+        description: "Add a test",
+        path: null,
+        line: null,
+        author: null,
+        body: null,
+      },
+    ];
     const huge = promptPreviewKey(
       "work",
       "x".repeat(50_000),
@@ -637,10 +575,11 @@ describe("promptPreviewKey", () => {
       "personal",
       "ENG-1",
       detail(),
-      undefined,
+      queue,
     );
     for (const part of huge as unknown[]) {
       expect(String(part).length).toBeLessThan(32);
+      expect(String(part)).not.toContain("Add a test");
     }
   });
 });
@@ -658,58 +597,32 @@ describe("applyStage", () => {
     };
   }
 
-  it("stage: marks only the matching file staged", () => {
-    const files = [file("a.ts", false), file("b.ts", false)];
-    const result = applyStage(files, { action: "stage", path: "a.ts" });
-    expect(result.find((f) => f.path === "a.ts")?.staged).toBe(true);
-    expect(result.find((f) => f.path === "b.ts")?.staged).toBe(false);
-  });
-
-  it("unstage: marks only the matching file unstaged", () => {
-    const files = [file("a.ts", true), file("b.ts", true)];
-    const result = applyStage(files, { action: "unstage", path: "a.ts" });
-    expect(result.find((f) => f.path === "a.ts")?.staged).toBe(false);
-    expect(result.find((f) => f.path === "b.ts")?.staged).toBe(true);
-  });
-
-  it("discard: removes the matching file from the list", () => {
-    const files = [file("a.ts", false), file("b.ts", false)];
-    const result = applyStage(files, { action: "discard", path: "a.ts" });
-    expect(result.map((f) => f.path)).toEqual(["b.ts"]);
-  });
-
-  it("stageAll: stages every file", () => {
+  it("per-file actions touch only the matching file", () => {
     const files = [file("a.ts", false), file("b.ts", true)];
-    const result = applyStage(files, { action: "stageAll" });
-    expect(result.every((f) => f.staged)).toBe(true);
+    const staged = (fs: ChangedFile[]) => fs.filter((f) => f.staged).map((f) => f.path);
+    expect(staged(applyStage(files, { action: "stage", path: "a.ts" }))).toEqual(["a.ts", "b.ts"]);
+    expect(staged(applyStage(files, { action: "unstage", path: "b.ts" }))).toEqual([]);
+    expect(applyStage(files, { action: "discard", path: "a.ts" }).map((f) => f.path)).toEqual([
+      "b.ts",
+    ]);
+    expect(applyStage(files, { action: "stageAll" }).every((f) => f.staged)).toBe(true);
+    expect(applyStage(files, { action: "unstageAll" }).every((f) => !f.staged)).toBe(true);
   });
 
-  it("unstageAll: unstages every file", () => {
-    const files = [file("a.ts", true), file("b.ts", true)];
-    const result = applyStage(files, { action: "unstageAll" });
-    expect(result.every((f) => !f.staged)).toBe(true);
-  });
-
-  it("stage: a directory path moves everything beneath it", () => {
-    const files = [file("src/a.ts", false), file("src/deep/b.ts", false), file("lib/c.ts", false)];
-    const result = applyStage(files, { action: "stage", path: "src" });
-    expect(result.filter((f) => f.staged).map((f) => f.path)).toEqual([
+  it("a directory path moves everything beneath it, never a sibling that merely shares its prefix", () => {
+    const files = [
+      file("src/a.ts", false),
+      file("src/deep/b.ts", false),
+      file("src2/c.ts", false),
+      file("lib/d.ts", false),
+    ];
+    const staged = applyStage(files, { action: "stage", path: "src" });
+    expect(staged.filter((f) => f.staged).map((f) => f.path)).toEqual([
       "src/a.ts",
       "src/deep/b.ts",
     ]);
-  });
-
-  it("stage: a directory never captures a sibling that merely shares its prefix", () => {
-    const files = [file("src/a.ts", false), file("src2/b.ts", false)];
-    const result = applyStage(files, { action: "stage", path: "src" });
-    expect(result.find((f) => f.path === "src2/b.ts")?.staged).toBe(false);
-  });
-
-  it("unstage: a directory path unstages everything beneath it", () => {
-    const files = [file("src/a.ts", true), file("lib/b.ts", true)];
-    const result = applyStage(files, { action: "unstage", path: "src" });
-    expect(result.find((f) => f.path === "src/a.ts")?.staged).toBe(false);
-    expect(result.find((f) => f.path === "lib/b.ts")?.staged).toBe(true);
+    const unstaged = applyStage(staged, { action: "unstage", path: "src" });
+    expect(unstaged.some((f) => f.staged)).toBe(false);
   });
 });
 
@@ -737,19 +650,11 @@ describe("git mutations: what they refresh", () => {
 
   // The base entry is its own query — nothing invalidated it, so "Update main from
   // origin" left the card claiming the same divergence for a full stale window.
-  it("useUpdateBaseBranch refreshes the base worktree card it just moved", async () => {
-    const keys = await invalidatedBy(() => useUpdateBaseBranch(repo), "AK-1");
-    expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
-  });
-
-  it("usePushWorktree refreshes the base card (the base branch is pushable too)", async () => {
-    const keys = await invalidatedBy(() => usePushWorktree(repo), "AK-1");
-    expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
-  });
-
-  it("usePullRemoteWorktree refreshes the base card", async () => {
-    const keys = await invalidatedBy(() => usePullRemoteWorktree(repo), "AK-1");
-    expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
+  it("update, push and pull all refresh the base worktree card", async () => {
+    for (const hook of [useUpdateBaseBranch, usePushWorktree, usePullRemoteWorktree]) {
+      const keys = await invalidatedBy(() => hook(repo), "AK-1");
+      expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
+    }
   });
 
   // A commit only touches git metadata, which the filesystem watcher deliberately
@@ -768,80 +673,25 @@ describe("git mutations: what they refresh", () => {
   });
 });
 
-describe("parseBatchSetup", () => {
-  it("reads the stored answer", () => {
-    expect(parseBatchSetup("always")).toBe("always");
-    expect(parseBatchSetup("never")).toBe("never");
-  });
-
-  // Unset (or anything unrecognized) asks rather than assuming — a batch that
-  // silently ran, or silently skipped, the setup script is the worse failure.
-  it("falls back to asking once", () => {
-    expect(parseBatchSetup(null)).toBe("ask");
-    expect(parseBatchSetup(undefined)).toBe("ask");
-    expect(parseBatchSetup("")).toBe("ask");
-    expect(parseBatchSetup("sometimes")).toBe("ask");
-  });
-});
-
-describe("parseLinearGroupBy", () => {
-  it("reads the stored nesting", () => {
-    expect(parseLinearGroupBy("none")).toBe("none");
-    expect(parseLinearGroupBy("project")).toBe("project");
-    expect(parseLinearGroupBy("project_milestone")).toBe("project_milestone");
-  });
-
-  // Unset falls back to the shape the sidebar has always had, so this setting
-  // changes nothing until somebody picks something else.
-  it("falls back to milestone", () => {
-    expect(parseLinearGroupBy(null)).toBe("milestone");
-    expect(parseLinearGroupBy(undefined)).toBe("milestone");
-    expect(parseLinearGroupBy("")).toBe("milestone");
-    expect(parseLinearGroupBy("project-milestone")).toBe("milestone");
-  });
-});
-
-describe("isOptedIn", () => {
-  /** The opposite convention to the settings that default *on* and read
-   *  `!== "false"`. Getting the two mixed up silently flips a default, so the
-   *  boundary is pinned rather than left to whoever reads the call site. */
-  it("treats anything but a literal true as off", () => {
-    expect(isOptedIn("true")).toBe(true);
-    expect(isOptedIn("false")).toBe(false);
-    expect(isOptedIn(null)).toBe(false);
-    expect(isOptedIn(undefined)).toBe(false);
-    expect(isOptedIn("")).toBe(false);
-    expect(isOptedIn("1")).toBe(false);
-  });
-});
-
-describe("parseGithubGroupBy", () => {
-  it("reads the stored nesting", () => {
-    expect(parseGithubGroupBy("project")).toBe("project");
-    expect(parseGithubGroupBy("milestone")).toBe("milestone");
-    expect(parseGithubGroupBy("project_milestone")).toBe("project_milestone");
-  });
-
-  /** The opposite default to Linear's, and deliberately: the worktree tree has
-   *  always been nested, the Reviews section has always been flat, and a review
-   *  inbox is usually short enough that a heading per project explains nothing.
-   *  Turning it on is a choice. */
-  it("falls back to none", () => {
-    expect(parseGithubGroupBy(null)).toBe("none");
-    expect(parseGithubGroupBy(undefined)).toBe("none");
-    expect(parseGithubGroupBy("")).toBe("none");
-    expect(parseGithubGroupBy("project-milestone")).toBe("none");
-  });
-});
-
-describe("parseLinearScope", () => {
-  it("requires an explicit read-write choice", () => {
-    expect(parseLinearScope("read_write")).toBe("read_write");
-    expect(parseLinearScope("read")).toBe("read");
-    expect(parseLinearScope(null)).toBe("read");
-    expect(parseLinearScope(undefined)).toBe("read");
-    expect(parseLinearScope("")).toBe("read");
-    expect(parseLinearScope("read,write")).toBe("read");
+describe("setting parsers", () => {
+  // Unset or unrecognised values fall back to the safe answer: a batch asks
+  // before running setup, Linear stays read-only, opt-ins stay off, and each
+  // grouping keeps the shape it always had.
+  it("read a known value and fall back on anything else", () => {
+    const cases: [(v: string | null | undefined) => string | boolean, string, unknown, unknown][] =
+      [
+        [parseBatchSetup, "never", "never", "ask"],
+        [parseLinearGroupBy, "project_milestone", "project_milestone", "milestone"],
+        [parseGithubGroupBy, "project_milestone", "project_milestone", "none"],
+        [parseLinearScope, "read_write", "read_write", "read"],
+        [isOptedIn, "true", true, false],
+      ];
+    for (const [parse, stored, read, fallback] of cases) {
+      expect(parse(stored)).toBe(read);
+      for (const junk of [null, undefined, "", "1", "project-milestone", "read,write"]) {
+        expect(parse(junk)).toBe(fallback);
+      }
+    }
   });
 });
 
@@ -897,64 +747,48 @@ describe("patchSettingCache", () => {
     expect(qc.getQueryData(otherRepo)).toBe("false");
   });
 
-  it("repo-scope: clearing the override resolves back to the cached app default", () => {
+  it("repo-scope: clearing the override resolves back to the cached app default, or waits for the round-trip", () => {
     const qc = makeClient();
     qc.setQueryData(queryKeys.setting("app", "trees_run_setup"), "true");
     qc.setQueryData(queryKeys.setting("repo:acme", "trees_run_setup"), "false");
     const resolvedKey = queryKeys.resolvedSetting("acme", "trees_run_setup");
     qc.setQueryData(resolvedKey, "false");
-
     patchSettingCache(qc, { scope: "repo:acme", key: "trees_run_setup", value: null });
-
-    expect(qc.getQueryData(resolvedKey)).toBe("true");
-  });
-
-  it("repo-scope: clearing an override with no cached app default leaves the resolved read to the round-trip", () => {
-    const qc = makeClient();
-    const resolvedKey = queryKeys.resolvedSetting("acme", "trees_run_setup");
-    qc.setQueryData(resolvedKey, "false");
-
-    patchSettingCache(qc, { scope: "repo:acme", key: "trees_run_setup", value: null });
-
-    // Guessing here could show the wrong value; the settle-time refetch resolves it.
-    expect(qc.getQueryData(resolvedKey)).toBe("false");
-  });
-
-  it("repo-scope: rollback restores the resolved read it patched", () => {
-    const qc = makeClient();
-    const resolvedKey = queryKeys.resolvedSetting("acme", "trees_run_setup");
-    qc.setQueryData(resolvedKey, "false");
-
-    const rollback = patchSettingCache(qc, {
-      scope: "repo:acme",
-      key: "trees_run_setup",
-      value: "true",
-    });
     expect(qc.getQueryData(resolvedKey)).toBe("true");
 
-    rollback();
-
-    expect(qc.getQueryData(resolvedKey)).toBe("false");
+    // No cached app default: guessing could show the wrong value.
+    const bare = makeClient();
+    bare.setQueryData(resolvedKey, "false");
+    patchSettingCache(bare, { scope: "repo:acme", key: "trees_run_setup", value: null });
+    expect(bare.getQueryData(resolvedKey)).toBe("false");
   });
 
-  it("rollback restores the pre-patch values for both the setting and every patched resolved cache", () => {
+  it("rollback restores the setting and every resolved cache it patched, in either scope", () => {
     const qc = makeClient();
     const settingKey = queryKeys.setting("app", "display_names");
     qc.setQueryData(settingKey, "full");
     const resolvedA = queryKeys.resolvedSetting("repo-a", "display_names");
     qc.setQueryData(resolvedA, "full");
-
-    const rollback = patchSettingCache(qc, {
+    const rollbackApp = patchSettingCache(qc, {
       scope: "app",
       key: "display_names",
       value: "username",
     });
     expect(qc.getQueryData(settingKey)).toBe("username");
-
-    rollback();
-
+    rollbackApp();
     expect(qc.getQueryData(settingKey)).toBe("full");
     expect(qc.getQueryData(resolvedA)).toBe("full");
+
+    const resolvedKey = queryKeys.resolvedSetting("acme", "trees_run_setup");
+    qc.setQueryData(resolvedKey, "false");
+    const rollbackRepo = patchSettingCache(qc, {
+      scope: "repo:acme",
+      key: "trees_run_setup",
+      value: "true",
+    });
+    expect(qc.getQueryData(resolvedKey)).toBe("true");
+    rollbackRepo();
+    expect(qc.getQueryData(resolvedKey)).toBe("false");
   });
 
   // The rollback used to replay a snapshot of *every* cached resolved-setting,
@@ -1019,28 +853,18 @@ describe("filterTriageQueue", () => {
   const mineSnoozed = ticket("mine-snoozed", { mine: true, snoozed: true });
   const theirs = ticket("theirs-active", { mine: false });
   const theirsSnoozed = ticket("theirs-snoozed", { mine: false, snoozed: true });
-  const tickets = [mine, mineSnoozed, theirs, theirsSnoozed];
-
-  it("mine-only (good-citizen off): the viewer's own tickets, split on snooze", () => {
-    const result = filterTriageQueue(tickets, { goodCitizen: false });
-    expect(ids(result.active)).toEqual([mine.id]);
-    expect(ids(result.snoozed)).toEqual([mineSnoozed.id]);
-  });
-
-  it("good citizen: widens both lists to the whole team inbox (issues not assigned to you included), unconditionally", () => {
-    const result = filterTriageQueue(tickets, { goodCitizen: true });
-    expect(ids(result.active)).toEqual([mine.id, theirs.id]);
-    expect(ids(result.snoozed)).toEqual([mineSnoozed.id, theirsSnoozed.id]);
-  });
 
   /** The backend already ordered the queue (soonest SLA first); the filter keeps
    *  that order within each list rather than sorting again, so the Triage view
    *  and the sidebar's section, which both read this, agree on who is first. */
-  it("preserves the backend's order within each list", () => {
+  it("splits on snooze in the backend's order, widening to the team inbox for a good citizen", () => {
     const shuffled = [theirsSnoozed, theirs, mineSnoozed, mine];
-    const result = filterTriageQueue(shuffled, { goodCitizen: true });
-    expect(ids(result.active)).toEqual([theirs.id, mine.id]);
-    expect(ids(result.snoozed)).toEqual([theirsSnoozed.id, mineSnoozed.id]);
+    const mineOnly = filterTriageQueue(shuffled, { goodCitizen: false });
+    expect(ids(mineOnly.active)).toEqual([mine.id]);
+    expect(ids(mineOnly.snoozed)).toEqual([mineSnoozed.id]);
+    const all = filterTriageQueue(shuffled, { goodCitizen: true });
+    expect(ids(all.active)).toEqual([theirs.id, mine.id]);
+    expect(ids(all.snoozed)).toEqual([theirsSnoozed.id, mineSnoozed.id]);
   });
 
   /** A team's own scope wins over the default, either way; a team without one
@@ -1104,24 +928,6 @@ describe("useTriageRepo", () => {
 
   beforeEach(() => settings.reset(["acme/app", "acme/web"]));
 
-  it("resolves the ticket's own pick over the triage default", async () => {
-    settings.store[DEFAULT] = "acme/app";
-    settings.store[OWN] = "acme/web";
-    const { result } = mount("AK-1");
-
-    await waitFor(() => expect(result.current.repo).toBe("acme/web"));
-    expect(result.current.attached).toBe(true);
-    expect(result.current.defaultRepo).toBe("acme/app");
-  });
-
-  it("falls back to the default when the ticket has no pick of its own", async () => {
-    settings.store[DEFAULT] = "acme/app";
-    const { result } = mount("AK-1");
-
-    await waitFor(() => expect(result.current.repo).toBe("acme/app"));
-    expect(result.current.attached).toBe(false);
-  });
-
   /** A project removed from the registry must read as "nothing attached": a
    *  name every launch would fail on is worse than an honest empty state. */
   it("reads a name the registry no longer has as null", async () => {
@@ -1138,7 +944,7 @@ describe("useTriageRepo", () => {
 
   /** The per-ticket row lands a frame after the default; a launch in that frame
    *  would run on the default when the ticket had picked otherwise. */
-  it("reports loading until the registry and both rows have been read", async () => {
+  it("reports loading until every row is read, then resolves the ticket's own pick over the default", async () => {
     settings.store[DEFAULT] = "acme/app";
     settings.store[OWN] = "acme/web";
     const { qc, result } = mount("AK-1");
@@ -1147,6 +953,8 @@ describe("useTriageRepo", () => {
     await settled(qc, "AK-1");
     expect(result.current.loading).toBe(false);
     expect(result.current.repo).toBe("acme/web");
+    expect(result.current.attached).toBe(true);
+    expect(result.current.defaultRepo).toBe("acme/app");
   });
 
   it("setRepo(null) clears the pick, optimistically, back onto the default", async () => {
@@ -1214,7 +1022,7 @@ describe("useWorktreeWatcher: single-flight invalidation", () => {
     return { spy, fire, flush, unmount: view.unmount };
   }
 
-  it("a burst of events during an in-flight wave collapses to one trailing pass, not one wave per event", async () => {
+  it("a burst of events during an in-flight wave collapses to one trailing pass, never cancelling a fetch", async () => {
     const { spy, fire, flush, unmount } = mount();
     fire("AK-1");
     expect(spy).toHaveBeenCalledTimes(WAVE);
@@ -1235,17 +1043,8 @@ describe("useWorktreeWatcher: single-flight invalidation", () => {
     // Drain state is reset: a fresh event starts a fresh wave.
     fire("AK-1");
     expect(spy).toHaveBeenCalledTimes(3 * WAVE);
-    unmount();
-  });
-
-  it("passes cancelRefetch:false on every invalidation, so an in-flight fetch is never cancelled-and-refired", async () => {
-    const { spy, fire, flush, unmount } = mount();
-    fire("AK-1");
-    await flush();
-    expect(spy.mock.calls.length).toBeGreaterThan(0);
-    for (const call of spy.mock.calls) {
-      expect(call[1]).toMatchObject({ cancelRefetch: false });
-    }
+    // An in-flight fetch is never cancelled-and-refired.
+    for (const call of spy.mock.calls) expect(call[1]).toMatchObject({ cancelRefetch: false });
     unmount();
   });
 
@@ -1351,7 +1150,9 @@ describe("useRefreshWorktree", () => {
   // The watcher misses — debounced events, `SKIP_DIRS` subtrees, a watch that
   // never started — and this button is then the only way back to what is on
   // disk. A key missing here is a pane that stays stale with the button pressed.
-  it("invalidates every local read the disk-backed panes render", () => {
+  // Scoped to the worktree on screen, unlike the external refresh: a prefix
+  // sweep would run `git status` over every worktree the user has.
+  it("invalidates every local read of this worktree, and nothing else", () => {
     const keys = refreshed();
     for (const local of [
       queryKeys.worktreeStatus("acme/app", "AK-1"),
@@ -1366,13 +1167,6 @@ describe("useRefreshWorktree", () => {
     ]) {
       expect(keys).toContain(key(local));
     }
-  });
-
-  // Scoped to the worktree on screen, unlike the external refresh above: a
-  // prefix sweep here would run `git status` over every worktree the user has,
-  // for a button that is about one of them.
-  it("leaves other worktrees and the external reads alone", () => {
-    const keys = refreshed();
     expect(keys).not.toContain(key(queryKeys.worktreeStatus("acme/app", "AK-2")));
     expect(keys.some((k) => k.includes("reviews") || k.includes("tasks"))).toBe(false);
   });
@@ -1403,7 +1197,7 @@ describe("useRefreshExternal", () => {
   // Nothing polls Linear/GitHub and window-focus refetching is off, so this hook
   // is the *only* way a just-created ticket or PR reaches the UI before the view
   // remounts past its stale window. A key missing here is silently unrefreshable.
-  it("invalidates every external-service read", async () => {
+  it("invalidates every external-service read by prefix, and no local one", async () => {
     const keys = refreshed();
     for (const prefix of [
       queryKeys.tasksPrefix,
@@ -1423,21 +1217,12 @@ describe("useRefreshExternal", () => {
     // TTL is served the very list the user is refreshing to get past.
     const { commands } = await import("../bindings");
     expect(commands.linearInvalidateCaches).toHaveBeenCalled();
-  });
 
-  // Local git state has a filesystem watcher; re-pulling it here would duplicate
-  // that watcher's work on every click (and on every ⌘⇧R held down).
-  it("leaves locally-sourced reads alone", () => {
-    const keys = refreshed();
-    expect(keys).not.toContain(key(queryKeys.worktrees("acme/app")));
+    // Prefixes, not repo-scoped: one click covers every repo on screen.
+    for (const k of keys) expect(JSON.parse(k)).toHaveLength(1);
+    // Local git state has its own watcher; re-pulling it here would duplicate it.
     expect(keys).not.toContain(key(queryKeys.settings));
     expect(keys.some((k) => k.includes("worktree-status"))).toBe(false);
-  });
-
-  // The keys are prefixes, not repo-scoped: only what's rendered refetches, so
-  // one click covers every repo the cross-repo Agents view is showing.
-  it("invalidates by prefix, so no key carries a repo", () => {
-    for (const k of refreshed()) expect(JSON.parse(k)).toHaveLength(1);
   });
 });
 

@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TriageDetail, TriageTicket } from "../../bindings";
@@ -38,37 +38,23 @@ describe("useTriageKeyboard", () => {
 
   beforeEach(() => vi.mocked(openUrl).mockClear());
 
-  it("j steps down the queue and k steps back up", () => {
-    const a = mount();
-    press("j");
-    expect(a.onSelect).toHaveBeenCalledWith("AK-3");
+  it("j/k step through the queue, clamping at the ends, from either end with no selection", () => {
+    const cases: [string | null, string, string | null][] = [
+      ["AK-2", "j", "AK-3"],
+      ["AK-2", "k", "AK-1"],
+      ["AK-1", "k", null],
+      ["AK-3", "j", null],
+      [null, "j", "AK-1"],
+      [null, "k", "AK-3"],
+    ];
+    for (const [activeId, key, want] of cases) {
+      const { onSelect } = mount({ activeId });
+      press(key);
+      if (want) expect(onSelect).toHaveBeenCalledWith(want);
+      else expect(onSelect).not.toHaveBeenCalled();
+      cleanup();
+    }
 
-    const b = mount();
-    press("k");
-    expect(b.onSelect).toHaveBeenCalledWith("AK-1");
-  });
-
-  it("clamps at both ends instead of wrapping", () => {
-    const top = mount({ activeId: "AK-1" });
-    press("k");
-    expect(top.onSelect).not.toHaveBeenCalled();
-
-    const bottom = mount({ activeId: "AK-3" });
-    press("j");
-    expect(bottom.onSelect).not.toHaveBeenCalled();
-  });
-
-  it("with no selection, j picks the first ticket and k the last", () => {
-    const down = mount({ activeId: null });
-    press("j");
-    expect(down.onSelect).toHaveBeenCalledWith("AK-1");
-
-    const up = mount({ activeId: null });
-    press("k");
-    expect(up.onSelect).toHaveBeenCalledWith("AK-3");
-  });
-
-  it("does nothing when the queue is empty", () => {
     const { onSelect } = mount({ ordered: [], activeId: null });
     press("j");
     expect(onSelect).not.toHaveBeenCalled();

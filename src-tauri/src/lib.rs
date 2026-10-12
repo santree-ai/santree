@@ -403,7 +403,6 @@ fn merge_paths(login: &str, current: &str) -> String {
 /// — reading that needs a `Db`, which needs an `AppHandle` and sqlx's tokio runtime,
 /// neither of which exist yet this early, and starting the runtime here would spawn
 /// worker threads before we're done mutating `PATH` (see the safety note below).
-#[cfg(unix)]
 fn hydrate_path() {
     let probe_and_seed = |cache: Option<&std::path::Path>| {
         if let Some(login) = settings::login_shell_path() {
@@ -436,7 +435,6 @@ fn hydrate_path() {
 }
 
 /// Merge a resolved login-shell PATH into the process's current PATH and apply it.
-#[cfg(unix)]
 fn apply_login_path(login: &str) {
     let current = std::env::var("PATH").unwrap_or_default();
     let merged = merge_paths(login, &current);
@@ -462,7 +460,6 @@ fn private_dir() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
     let dir = base.join("santree");
     std::fs::create_dir_all(&dir).ok()?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
@@ -476,7 +473,6 @@ fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> 
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
@@ -488,7 +484,6 @@ fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> 
 /// own [`private_dir`] rather than app data: it needs no app identifier (so it can't
 /// drift out of sync with `migrate_legacy_data_dir`'s bundle-id handling) and no async
 /// runtime to read. Losing it just costs one slow launch to reseed.
-#[cfg(unix)]
 fn path_cache_file() -> Option<std::path::PathBuf> {
     Some(private_dir()?.join("login-path"))
 }
@@ -497,7 +492,6 @@ fn path_cache_file() -> Option<std::path::PathBuf> {
 /// survives. This is what we prepend to `PATH` before any subprocess spawns, so a
 /// relative entry would resolve `git`/`claude`/hooks against whatever cwd a child
 /// happens to run in — defence in depth behind the 0700 cache dir. Pure, for testability.
-#[cfg(unix)]
 fn sanitize_path_list(raw: &str) -> Option<String> {
     let kept: Vec<&str> = raw
         .trim()
@@ -509,7 +503,6 @@ fn sanitize_path_list(raw: &str) -> Option<String> {
 
 /// Re-probe the login shell's PATH and rewrite the cache for the next launch.
 /// Runs on a background thread so it never delays startup.
-#[cfg(unix)]
 fn refresh_path_cache(cache: &std::path::Path) {
     let started = std::time::Instant::now();
     if let Some(login) = settings::login_shell_path() {
@@ -571,7 +564,6 @@ pub fn run() {
     install_panic_hook();
 
     // Must run before any subprocess is spawned (git, hooks, setup scripts, agents).
-    #[cfg(unix)]
     hydrate_path();
 
     let builder = specta_builder();
@@ -583,8 +575,8 @@ pub fn run() {
     export_bindings(&builder).expect("failed to export typescript bindings");
 
     let tauri_builder = tauri::Builder::default()
-        // Two independent instances (nothing stops this on Linux, unlike macOS's
-        // Dock/LaunchServices) would run separate PTY managers and fs watchers
+        // Two independent instances (`open -n`, or running the binary directly)
+        // would run separate PTY managers and fs watchers
         // against the same santree.db, with `set_settings` last-writer-wins
         // clobbering whichever instance saved second. Must be registered first —
         // the plugin only "runs before other plugins can interfere" in that slot.
@@ -949,54 +941,33 @@ fn build_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<tau
         &[
             &PredefinedMenuItem::minimize(app, None)?,
             &PredefinedMenuItem::maximize(app, None)?,
-            #[cfg(target_os = "macos")]
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::close_window(app, None)?,
         ],
     )?;
 
-    #[cfg(target_os = "macos")]
-    {
-        let app_menu = Submenu::with_items(
-            app,
-            pkg.name.clone(),
-            true,
-            &[
-                &PredefinedMenuItem::about(app, None, Some(about))?,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::services(app, None)?,
-                &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::hide(app, None)?,
-                &PredefinedMenuItem::hide_others(app, None)?,
-                &PredefinedMenuItem::separator(app)?,
-                &quit,
-            ],
-        )?;
-        let view = Submenu::with_items(
-            app,
-            "View",
-            true,
-            &[&PredefinedMenuItem::fullscreen(app, None)?],
-        )?;
-        Menu::with_items(app, &[&app_menu, &edit, &view, &window])
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let file = Submenu::with_items(
-            app,
-            "File",
-            true,
-            &[&PredefinedMenuItem::close_window(app, None)?, &quit],
-        )?;
-        let help = Submenu::with_items(
-            app,
-            "Help",
-            true,
-            &[&PredefinedMenuItem::about(app, None, Some(about))?],
-        )?;
-        Menu::with_items(app, &[&file, &edit, &window, &help])
-    }
+    let app_menu = Submenu::with_items(
+        app,
+        pkg.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+    let view = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[&PredefinedMenuItem::fullscreen(app, None)?],
+    )?;
+    Menu::with_items(app, &[&app_menu, &edit, &view, &window])
 }
 
 /// Whether the "confirm before quitting" setting is on. Defaults ON: a missing
@@ -1116,24 +1087,12 @@ mod tests {
     }
 
     #[test]
-    fn merge_paths_prepends_login_and_dedups() {
-        // Login PATH wins ordering; current-only entries are appended; dupes dropped.
-        let login = "/opt/homebrew/bin:/usr/bin:/bin";
-        let current = "/usr/bin:/bin:/sbin";
+    fn merge_paths_puts_login_first_and_drops_dupes_and_empties() {
+        // Login PATH wins ordering; current-only entries are appended.
         assert_eq!(
-            merge_paths(login, current),
+            merge_paths("/opt/homebrew/bin:/usr/bin:/bin", "/usr/bin:/bin:/sbin"),
             "/opt/homebrew/bin:/usr/bin:/bin:/sbin"
         );
-    }
-
-    #[test]
-    fn merge_paths_is_noop_when_login_covers_current() {
-        let path = "/opt/homebrew/bin:/usr/bin:/bin";
-        assert_eq!(merge_paths(path, path), path);
-    }
-
-    #[test]
-    fn merge_paths_skips_empty_segments() {
         assert_eq!(merge_paths("/usr/bin::", ":/bin:"), "/usr/bin:/bin");
     }
 
@@ -1175,7 +1134,6 @@ mod tests {
     /// Everything we put there (the PATH cache, headless prompt files) is either read
     /// back into `PATH` or carries repo content, so the dir must not be traversable by
     /// another local user — the reason it isn't a shared `/tmp` path any more.
-    #[cfg(unix)]
     #[test]
     fn private_dir_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
@@ -1184,7 +1142,6 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700);
     }
 
-    #[cfg(unix)]
     #[test]
     fn sanitize_path_list_drops_relative_entries() {
         assert_eq!(

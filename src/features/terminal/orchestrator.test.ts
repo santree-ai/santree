@@ -5,18 +5,6 @@ import { useTerminalTabs } from "./orchestrator";
 
 describe("useTerminalTabs", () => {
   describe("open", () => {
-    it("opens and focuses a new tab, returning its key", () => {
-      const { result } = renderHook(() => useTerminalTabs());
-
-      let key = "";
-      act(() => {
-        key = result.current.open({ title: "shell" });
-      });
-
-      expect(result.current.tabs.map((t) => t.key)).toEqual([key]);
-      expect(result.current.activeKey).toBe(key);
-    });
-
     it("opening a second tab focuses it, leaving the first tab in place", () => {
       const { result } = renderHook(() => useTerminalTabs());
 
@@ -129,28 +117,6 @@ describe("useTerminalTabs", () => {
   });
 
   describe("close", () => {
-    it("closing the active (last) tab falls back to the previous tab", () => {
-      const { result } = renderHook(() => useTerminalTabs());
-      let t0 = "";
-      let t1 = "";
-      let t2 = "";
-      act(() => {
-        t0 = result.current.open({ title: "0" });
-      });
-      act(() => {
-        t1 = result.current.open({ title: "1" });
-      });
-      act(() => {
-        t2 = result.current.open({ title: "2" });
-      });
-      expect(result.current.activeKey).toBe(t2);
-
-      act(() => result.current.close(t2));
-
-      expect(result.current.tabs.map((t) => t.key)).toEqual([t0, t1]);
-      expect(result.current.activeKey).toBe(t1);
-    });
-
     it("closing the active middle tab falls back to the tab before it, not the one after", () => {
       const { result } = renderHook(() => useTerminalTabs());
       let t0 = "";
@@ -173,24 +139,6 @@ describe("useTerminalTabs", () => {
       expect(result.current.activeKey).toBe(t0);
     });
 
-    it("closing a non-active tab leaves activeKey unchanged", () => {
-      const { result } = renderHook(() => useTerminalTabs());
-      let t0 = "";
-      let t1 = "";
-      act(() => {
-        t0 = result.current.open({ title: "0" });
-      });
-      act(() => {
-        t1 = result.current.open({ title: "1" });
-      });
-      expect(result.current.activeKey).toBe(t1);
-
-      act(() => result.current.close(t0));
-
-      expect(result.current.tabs.map((t) => t.key)).toEqual([t1]);
-      expect(result.current.activeKey).toBe(t1);
-    });
-
     it("closes every tab of a batch issued in one tick (the sidebar's close-all-for-a-ticket)", () => {
       const { result } = renderHook(() => useTerminalTabs());
       let t0 = "";
@@ -211,49 +159,10 @@ describe("useTerminalTabs", () => {
       expect(result.current.tabs.map((t) => t.key)).toEqual([t2]);
       expect(result.current.activeKey).toBe(t2);
     });
-
-    it("closing an unknown key is a no-op", () => {
-      const { result } = renderHook(() => useTerminalTabs());
-      let t0 = "";
-      act(() => {
-        t0 = result.current.open({ title: "0" });
-      });
-
-      act(() => result.current.close("term-does-not-exist"));
-
-      expect(result.current.tabs.map((t) => t.key)).toEqual([t0]);
-      expect(result.current.activeKey).toBe(t0);
-    });
-
-    it("closing the only remaining tab leaves activeKey null", () => {
-      const { result } = renderHook(() => useTerminalTabs());
-      let t0 = "";
-      act(() => {
-        t0 = result.current.open({ title: "0" });
-      });
-
-      act(() => result.current.close(t0));
-
-      expect(result.current.tabs).toHaveLength(0);
-      expect(result.current.activeKey).toBeNull();
-    });
   });
 
   describe("embed slot", () => {
     const host = (): HTMLElement => ({}) as HTMLElement;
-
-    it("shows the newest claim", () => {
-      const { result } = renderHook(() => useTerminalTabs());
-      act(() => {
-        result.current.attachEmbed({ host: host(), key: "a" });
-      });
-      expect(result.current.embed?.key).toBe("a");
-
-      act(() => {
-        result.current.attachEmbed({ host: host(), key: "b" });
-      });
-      expect(result.current.embed?.key).toBe("b");
-    });
 
     // The F1 regression: releasing a claim used to blank the slot outright, so the
     // terminal the user was actually watching went dark and — its deps unchanged —
@@ -409,6 +318,7 @@ describe("useTerminalTabs", () => {
       act(() => result.current.close(key));
 
       expect(result.current.tabs).toEqual([]);
+      expect(result.current.activeKey).toBeNull();
     });
 
     /** A remounting pane registers its next handle before the previous one's

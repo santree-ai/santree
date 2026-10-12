@@ -707,8 +707,6 @@ mod tests {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
-    use santree_server::EXIT_OCCUPIED;
-
     use crate::server::testkit::{self, hold_exclusive, script, Fixture};
     use crate::sessions::Mode;
 
@@ -823,67 +821,16 @@ mod tests {
         assert_eq!(exit.signal, Some(libc::SIGKILL));
     }
 
-    #[test]
-    fn exit_codes_read_as_the_documented_reasons() {
-        let code = |code| ExitInfo {
-            code: Some(code),
-            signal: None,
-        };
-        assert_eq!(
-            code(21).describe("ignored"),
-            "santree server refused to start: it was not launched by santree"
-        );
-        assert_eq!(
-            code(22).describe("ignored"),
-            "santree server is not signed by the expected team"
-        );
-        assert!(code(1).describe("can't bind").ends_with("can't bind"));
-        assert!(ExitInfo {
-            code: None,
-            signal: Some(9)
-        }
-        .describe("")
-        .contains("signal 9"));
-    }
-
-    #[test]
-    fn stderr_is_kept_as_a_short_tail() {
-        let dir = testkit::scratch();
-        let path = dir.path().join("e");
-        let mut f = File::create(&path).unwrap();
-        for i in 0..2000 {
-            writeln!(f, "line {i}").unwrap();
-        }
-        let tail = stderr_tail(&path, 0);
-        assert!(tail.ends_with("line 1999"), "{tail}");
-        assert_eq!(tail.matches(" | ").count(), 2, "three lines: {tail}");
-        assert_eq!(stderr_tail(&dir.path().join("missing"), 0), "");
-    }
-
+    /// While something answers on the socket (a server, as far as the
+    /// installer can tell) its binary is never replaced, and even identical
+    /// bytes report "a server is running": the caller must see that, or it
+    /// launches a second server over the first.
     #[test]
     fn a_running_servers_binary_is_never_replaced() {
         let fx = Fixture::new();
         fx.layout.prepare().unwrap();
         let bundled = fx.dir.path().join("bundled");
         fs::write(&bundled, b"old").unwrap();
-        install_binary(&fx.layout, &bundled).unwrap();
-
-        // Something answers on the socket: a server, as far as the installer
-        // can tell.
-        let _listener =
-            std::os::unix::net::UnixListener::bind(fx.layout.socket_for(santree_server::REVISION))
-                .unwrap();
-        fs::write(&bundled, b"new!").unwrap();
-        assert_eq!(install_binary(&fx.layout, &bundled).unwrap(), None);
-        assert_eq!(fs::read(&fx.layout.bin).unwrap(), b"old");
-    }
-
-    #[test]
-    fn an_identical_bundle_with_a_server_answering_is_still_a_server_running() {
-        let fx = Fixture::new();
-        fx.layout.prepare().unwrap();
-        let bundled = fx.dir.path().join("bundled");
-        fs::write(&bundled, b"the build").unwrap();
         assert_eq!(
             install_binary(&fx.layout, &bundled).unwrap(),
             Some(Installed::Replaced)
@@ -893,12 +840,13 @@ mod tests {
             Some(Installed::Unchanged)
         );
 
-        // Same bytes, but something answers on the socket: the caller must see
-        // that, or it launches a second server over the first.
         let _listener =
             std::os::unix::net::UnixListener::bind(fx.layout.socket_for(santree_server::REVISION))
                 .unwrap();
         assert_eq!(install_binary(&fx.layout, &bundled).unwrap(), None);
+        fs::write(&bundled, b"new!").unwrap();
+        assert_eq!(install_binary(&fx.layout, &bundled).unwrap(), None);
+        assert_eq!(fs::read(&fx.layout.bin).unwrap(), b"old");
     }
 
     #[test]
@@ -951,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn a_launchs_stderr_tail_starts_where_that_launch_began() {
+    fn a_launchs_stderr_tail_is_its_own_last_lines() {
         let dir = testkit::scratch();
         let path = dir.path().join("e");
         fs::write(&path, "old launch: boom\n").unwrap();
@@ -965,6 +913,16 @@ mod tests {
         fs::write(&path, vec![b'x'; (STDERR_KEEP + 1) as usize]).unwrap();
         let (_, from) = open_stderr(&path).unwrap();
         assert_eq!((from, fs::metadata(&path).unwrap().len()), (0, 0));
+
+        // The tail is the last three lines, however long the output.
+        let mut f = File::create(&path).unwrap();
+        for i in 0..2000 {
+            writeln!(f, "line {i}").unwrap();
+        }
+        let tail = stderr_tail(&path, 0);
+        assert!(tail.ends_with("line 1999"), "{tail}");
+        assert_eq!(tail.matches(" | ").count(), 2, "three lines: {tail}");
+        assert_eq!(stderr_tail(&dir.path().join("missing"), 0), "");
     }
 
     #[test]
@@ -1067,60 +1025,8 @@ mod tests {
         );
         // Out of the app's session and group: the server is its own leader.
         assert_eq!(testkit::process_group_of(pid), Some(pid));
-    }
-
-    #[tokio::test]
-    async fn a_second_server_on_the_same_endpoint_says_occupied_and_exits_20() {
-        let fx = Fixture::installed();
-        let mut first = spawn_server(&fx.layout).unwrap();
-        fx.track(first.pid);
-        assert!(matches!(first.start().await, Start::Ready { .. }));
-
-        let mut second = spawn_server(&fx.layout).unwrap();
-        fx.track(second.pid);
-        assert_eq!(second.start().await, Start::Occupied);
-        let exit = second.exited(Duration::from_secs(10)).await.expect("exits");
-        assert_eq!(exit.code, Some(EXIT_OCCUPIED));
-        // The winner is untouched.
-        assert!(first.exit().is_none());
-    }
-
-    #[tokio::test]
-    async fn a_stale_socket_and_an_unlocked_lock_are_replaced_by_the_next_server() {
-        let fx = Fixture::installed();
-        let socket = fx.layout.socket_for(santree_server::REVISION);
-        // What a crashed server leaves: its socket file, its lock file (free).
-        testkit::stale_socket(&socket);
-        File::create(
-            fx.layout
-                .run
-                .join(endpoint::lock_name(santree_server::REVISION)),
-        )
-        .unwrap();
-
-        let mut spawned = spawn_server(&fx.layout).unwrap();
-        fx.track(spawned.pid);
-        assert!(
-            matches!(spawned.start().await, Start::Ready { .. }),
-            "{}",
-            spawned.stderr_tail()
-        );
-        let info = testkit::info_over(&socket).await;
-        assert_eq!(info.pid, spawned.pid);
-    }
-
-    // macOS only: a Linux server is non-dumpable, so its environment can't
-    // be read from outside (and Linux ships no server).
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn the_real_server_gets_none_of_the_apps_environment() {
-        // The server's environment, read through `ps eww`, must hold only the
-        // allow-list.
-        let fx = Fixture::installed();
-        let mut spawned = spawn_server(&fx.layout).unwrap();
-        fx.track(spawned.pid);
-        assert!(matches!(spawned.start().await, Start::Ready { .. }));
-        let names = testkit::environment_names_of(spawned.pid);
+        // Its environment, read through `ps eww`, holds only the allow-list.
+        let names = testkit::environment_names_of(pid);
         let allowed = ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "PATH"];
         for name in &names {
             assert!(

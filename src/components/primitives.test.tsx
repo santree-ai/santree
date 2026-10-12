@@ -2,16 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { Dropdown, Segmented, Tabs, TerminalActivity } from "./primitives";
-
-describe("TerminalActivity", () => {
-  it("announces the task and renders the braille spinner", () => {
-    const { container } = render(<TerminalActivity label="Loading diff…" />);
-
-    expect(screen.getByRole("status", { name: "Loading diff…" })).toBeInTheDocument();
-    expect(container.querySelector(".terminal-activity")).toBeInTheDocument();
-  });
-});
+import { Dropdown, Segmented, Tabs } from "./primitives";
 
 function Menu() {
   return (
@@ -158,18 +149,10 @@ function Seg() {
 }
 
 describe("Segmented (radiogroup)", () => {
-  it("is a single tab stop — only the checked option is tabbable", () => {
-    render(<Seg />);
-    const [a, b, c] = screen.getAllByRole("radio");
-
-    expect(a).toHaveAttribute("tabindex", "0");
-    expect(b).toHaveAttribute("tabindex", "-1");
-    expect(c).toHaveAttribute("tabindex", "-1");
-  });
-
-  it("checks and focuses the next option on ArrowRight, wrapping on ArrowLeft", () => {
+  it("is one tab stop that arrows (wrapping) and Home/End move and check", () => {
     render(<Seg />);
     const radios = () => screen.getAllByRole("radio");
+    expect(radios().map((r) => r.getAttribute("tabindex"))).toEqual(["0", "-1", "-1"]);
 
     radios()[0].focus();
     fireEvent.keyDown(radios()[0], { key: "ArrowRight" });
@@ -184,14 +167,6 @@ describe("Segmented (radiogroup)", () => {
     fireEvent.keyDown(radios()[0], { key: "ArrowLeft" });
 
     expect(radios()[2]).toHaveFocus();
-    expect(radios()[2]).toHaveAttribute("aria-checked", "true");
-  });
-
-  it("jumps to the first/last option with Home/End", () => {
-    render(<Seg />);
-    const radios = () => screen.getAllByRole("radio");
-
-    fireEvent.keyDown(radios()[0], { key: "End" });
     expect(radios()[2]).toHaveAttribute("aria-checked", "true");
 
     fireEvent.keyDown(radios()[2], { key: "Home" });
@@ -218,19 +193,11 @@ function TabBar() {
 }
 
 describe("Tabs (tablist)", () => {
-  it("is a single tab stop — only the selected tab is tabbable", () => {
-    render(<TabBar />);
-    const [one, two, three] = screen.getAllByRole("tab");
-
-    expect(one).toHaveAttribute("aria-selected", "true");
-    expect(one).toHaveAttribute("tabindex", "0");
-    expect(two).toHaveAttribute("tabindex", "-1");
-    expect(three).toHaveAttribute("tabindex", "-1");
-  });
-
   it("moves focus with the arrow keys without activating the tab (manual activation)", () => {
     render(<TabBar />);
     const tabs = () => screen.getAllByRole("tab");
+    // A single tab stop: only the selected tab is tabbable.
+    expect(tabs().map((t) => t.getAttribute("tabindex"))).toEqual(["0", "-1", "-1"]);
 
     tabs()[0].focus();
     fireEvent.keyDown(tabs()[0], { key: "ArrowRight" });

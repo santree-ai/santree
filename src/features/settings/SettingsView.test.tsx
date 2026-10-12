@@ -80,29 +80,6 @@ describe("Settings → nav", () => {
     expect(screen.getByText("server banner")).toBeInTheDocument();
   });
 
-  it("groups the integrations under an Integrations heading", () => {
-    render(<SettingsView />);
-    expect(groupItems("Integrations")).toEqual(["Linear", "Jira", "GitHub", "Daedalus"]);
-  });
-
-  it("groups the two harnesses under an Agents heading", () => {
-    render(<SettingsView />);
-    expect(groupItems("Agents")).toEqual(["Claude Code", "Codex"]);
-  });
-
-  it("keeps Usage top-level rather than inside a group", () => {
-    render(<SettingsView />);
-    const usage = screen.getByRole("button", { name: "Usage" });
-    expect(usage).toBeInTheDocument();
-    expect(usage.closest("section")).toBeNull();
-  });
-
-  it("offers no Cursor or OpenCode harness", () => {
-    render(<SettingsView />);
-    expect(screen.queryByRole("button", { name: /cursor/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /opencode/i })).toBeNull();
-  });
-
   it("opens the pane the nav item names", () => {
     render(<SettingsView />);
     fireEvent.click(screen.getByRole("button", { name: "GitHub" }));

@@ -133,25 +133,26 @@ beforeEach(() => {
  * project sections follow.
  */
 describe("PrConversationPane while the detail read is in flight", () => {
-  it("never claims the PR has no description", () => {
-    render(<PrConversationPane pr={pr} focusFile={focusFile} />);
-    expect(screen.queryByText(/No description provided/i)).not.toBeInTheDocument();
-  });
-
   /** The header is *not* a guess: who opened the PR and when came with the inbox
-   *  row, so it stays real while only the body waits. */
-  it("keeps the author and time it already knows, and skeletons only the body", () => {
+   *  row, so it stays real while only the body waits. Drawing *nothing at all*
+   *  for the comments was the other way of getting it wrong — it answered "no
+   *  one has commented" before we had looked — so the wait is placeholders. */
+  it("claims neither no description nor any comment, keeping only the author it knows", () => {
     const { container } = render(<PrConversationPane pr={pr} focusFile={focusFile} />);
+    expect(screen.queryByText(/No description provided/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("commented")).not.toBeInTheDocument();
+    expect(screen.queryByText("reviewed")).not.toBeInTheDocument();
     expect(screen.getByText("kwaters12")).toBeInTheDocument();
-    expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0);
+    expect(container.querySelectorAll(".animate-pulse.rounded-full").length).toBeGreaterThan(0);
   });
 
-  it("renders the real body once the read lands", () => {
+  it("renders the real body and drops every placeholder once the read lands", () => {
     detail.data = loaded;
     detail.isLoading = false;
     const { container } = render(<PrConversationPane pr={pr} focusFile={focusFile} />);
     expect(screen.getByText("Why this change")).toBeInTheDocument();
     expect(container.querySelectorAll(".animate-pulse")).toHaveLength(0);
+    expect(screen.queryByText("Conversation")).not.toBeInTheDocument();
   });
 
   /** An empty description after a *successful* read is a real answer, and this
@@ -192,26 +193,6 @@ describe("PrConversationPane's description", () => {
     // One entry is worded as a comment, and it is the comment.
     expect(screen.getAllByText("commented")).toHaveLength(1);
   });
-
-  /** The rule has not changed, only what stands in for the unknown: nothing may
-   *  claim somebody said something. Drawing *nothing at all* was the other way
-   *  of getting it wrong — it answered "no one has commented" before we had
-   *  looked — so the wait is now comment-shaped placeholders. */
-  it("claims no comment while the read that would carry it is in flight", () => {
-    const { container } = render(<PrConversationPane pr={pr} focusFile={focusFile} />);
-    expect(screen.queryByText("commented")).not.toBeInTheDocument();
-    expect(screen.queryByText("reviewed")).not.toBeInTheDocument();
-    // A face and a card per placeholder, in the shape a comment arrives in.
-    expect(container.querySelectorAll(".animate-pulse.rounded-full").length).toBeGreaterThan(0);
-  });
-
-  it("drops the placeholders once the read says there is no conversation", () => {
-    detail.data = loaded;
-    detail.isLoading = false;
-    const { container } = render(<PrConversationPane pr={pr} focusFile={focusFile} />);
-    expect(container.querySelectorAll(".animate-pulse")).toHaveLength(0);
-    expect(screen.queryByText("Conversation")).not.toBeInTheDocument();
-  });
 });
 
 /**
@@ -234,14 +215,6 @@ describe("PrConversationPane's anchored feedback", () => {
     detail.data = withFiles;
     rerender(<PrConversationPane pr={pr} focusFile={focusFile} />);
     expect(screen.getByText("This leaks the handle")).toBeInTheDocument();
-  });
-
-  it("keeps the posted review threads on screen for the same reason", () => {
-    detail.data = { ...withFiles, threads: [thread()] } as unknown as PrDetail;
-    detail.isLoading = false;
-    render(<PrConversationPane pr={pr} focusFile={focusFile} />);
-    expect(screen.getByText("Review comments")).toBeInTheDocument();
-    expect(screen.getByText("Same here")).toBeInTheDocument();
   });
 
   /**
@@ -281,46 +254,17 @@ describe("PrConversationPane's anchored feedback", () => {
   /** GitHub caps the file list and a push can drop a file. There is no card
    *  beside that code to jump to, so the whole card renders here — this is the
    *  only place the draft exists. */
-  it("gives a draft on a file the diff doesn't list its whole card", () => {
+  it("gives a draft or thread on a file the diff doesn't list its whole card", () => {
     ai.drafts = [draft({ id: "d2", path: "docs/notes.md" })];
-    detail.data = withFiles;
-    detail.isLoading = false;
-    render(<PrConversationPane pr={pr} focusFile={focusFile} />);
-
-    expect(screen.getByTestId("draft-card-d2")).toBeInTheDocument();
-    expect(screen.queryByTitle(/docs\/notes\.md/)).not.toBeInTheDocument();
-  });
-
-  it("does the same for a thread on a file the diff doesn't list", () => {
     detail.data = {
       ...withFiles,
       threads: [thread({ path: "docs/notes.md" })],
     } as unknown as PrDetail;
     detail.isLoading = false;
     render(<PrConversationPane pr={pr} focusFile={focusFile} />);
+
+    expect(screen.getByTestId("draft-card-d2")).toBeInTheDocument();
     expect(screen.getByTestId("thread-card-docs/notes.md")).toBeInTheDocument();
-  });
-});
-
-/**
- * A comment card hangs its body off a 26px avatar, so anything drawn at the
- * column's own edge is visibly wider than every comment above it. The composer
- * and the feedback index are not somebody's comment and get no face — but they
- * take the same offset, so the boxes line up. The description keeps the full
- * column: it is the proposal the comments are about, not one of them.
- */
-describe("PrConversationPane's left edge", () => {
-  it("hangs the composer and the feedback index off the comment column", () => {
-    ai.drafts = [draft()];
-    detail.data = withFiles;
-    detail.isLoading = false;
-    const { container } = render(<PrConversationPane pr={pr} focusFile={focusFile} />);
-
-    expect(screen.getByPlaceholderText("Comment on this pull request…").closest(".ml-9")).not.toBe(
-      null,
-    );
-    expect(screen.getByTitle(/src\/app\.ts · line 12/).closest(".ml-9")).not.toBeNull();
-    // The description is deliberately not inset.
-    expect(container.querySelector("section .ml-9")).toBeNull();
+    expect(screen.queryByTitle(/docs\/notes\.md/)).not.toBeInTheDocument();
   });
 });

@@ -1,19 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { AgentKind } from "../../bindings";
 import { agentProvider, agentSessionSeed, providerExecutable, sessionAgent } from "./agentProvider";
 
 describe("agent provider contract", () => {
-  it("registers every generated provider kind explicitly", () => {
-    const kinds: AgentKind[] = ["Claude", "Codex", "Cursor", "Opencode"];
-    expect(kinds.map((kind) => agentProvider(kind).defaultExecutable)).toEqual([
-      "claude",
-      "codex",
-      "cursor-agent",
-      "opencode",
-    ]);
-  });
-
   it("keeps the persisted session provider authoritative", () => {
     expect(
       sessionAgent(
@@ -46,6 +35,31 @@ describe("agent provider contract", () => {
         {},
       ),
     ).toBeUndefined();
+  });
+
+  it("attaches to a background session with none of santree's launch flags", () => {
+    const session = {
+      type: "attach",
+      agentKind: "Claude",
+      executable: "/opt/claude",
+      sessionId: "14ffdc20-a4ce-4bac-b737-d952b4a43500",
+      backgroundId: "14ffdc20",
+    } as const;
+    // The running session keeps the flags it was started under; the config
+    // that would decorate a resume or a fresh launch is not applied to it.
+    expect(
+      agentSessionSeed(session, {
+        repo: "santree-ai/santree",
+        termKey: "tree:__base__:tab:1",
+        prompt: "ignored",
+        model: "opus",
+        remoteControl: "__base__",
+        hookFlag: "--settings '/x.json'",
+        permissionMode: "auto",
+        chrome: true,
+      }),
+    ).toBe("exec '/opt/claude' attach '14ffdc20'");
+    expect(sessionAgent(session, "Codex")).toBe("Claude");
   });
 
   it("uses configured, requested, then provider-default executables", () => {

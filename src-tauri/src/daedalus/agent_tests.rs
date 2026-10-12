@@ -67,13 +67,18 @@ impl BoxHome {
         std::os::unix::fs::symlink(target, self.home.join("bin").join(name)).unwrap();
     }
 
+    /// The box's PATH is its own `bin` over the system dirs only: inheriting
+    /// this process's PATH would hand the box whatever agent CLIs the
+    /// developer's machine has installed.
     fn env(&self) -> Vec<(String, String)> {
-        let path = std::env::var("PATH").unwrap_or_default();
         vec![
             ("HOME".into(), self.home.to_string_lossy().into_owned()),
             (
                 "PATH".into(),
-                format!("{}:{path}", self.home.join("bin").display()),
+                format!(
+                    "{}:/usr/bin:/bin:/usr/sbin:/sbin",
+                    self.home.join("bin").display()
+                ),
             ),
         ]
     }

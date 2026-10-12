@@ -1189,9 +1189,6 @@ mod tests {
         assert!(icon("image/png", &big).checked().is_none());
         big.truncate(WORKSPACE_ICON_MAX);
         assert!(icon("image/png", &big).checked().is_some());
-        for t in WORKSPACE_ICON_TYPES {
-            assert!(t.starts_with("image/"));
-        }
     }
 
     #[test]

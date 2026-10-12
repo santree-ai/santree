@@ -382,47 +382,33 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("Linear GraphQL returned 401"), "{msg}");
         assert!(msg.contains("invalid token"), "{msg}");
+        // A transport/status failure is *not* a GraphQL errors array — the
+        // distinction that keeps an expired token surfacing as an error.
+        assert!(graphql_errors(&err).is_none());
     }
 
-    /// The other half: a GraphQL-level failure (HTTP 200 + `errors`) carries no status,
-    /// so a caller retrying on 401 doesn't burn its single-use refresh grant on a
-    /// permission or complexity error that would only repeat.
+    /// The other half: a GraphQL-level failure (HTTP 200 + `errors`) carries no
+    /// status, so a caller retrying on 401 doesn't burn its single-use refresh
+    /// grant on an error that would only repeat. Its entries survive, so a
+    /// caller can classify one failure (Linear's "no such issue") without
+    /// matching the joined string — and `extensions` is never a decode gate.
     #[tokio::test]
-    async fn a_graphql_errors_array_carries_no_http_status() {
-        let err = post_to(&serve_once(
-            "200 OK",
-            r#"{"data":null,"errors":[{"message":"access denied"}]}"#,
-        ))
-        .await;
-        assert_eq!(status_of(&err), None);
-        assert!(format!("{err:#}").contains("access denied"));
-    }
-
-    /// …and the entries themselves survive, so a caller can classify one specific
-    /// failure (Linear's "no such issue") without matching on the joined string.
-    #[tokio::test]
-    async fn a_graphql_errors_array_keeps_its_entries_and_extensions() {
+    async fn a_graphql_errors_array_carries_its_entries_and_no_http_status() {
         let err = post_to(&serve_once(
             "200 OK",
             r#"{"data":null,"errors":[{"message":"Entity not found: Issue",
                 "extensions":{"type":"invalid_input","code":"ENTITY_NOT_FOUND","userError":true}}]}"#,
         ))
         .await;
+        assert_eq!(status_of(&err), None);
         let errors = graphql_errors(&err).expect("a GraphQL errors array");
         assert_eq!(errors.errors.len(), 1);
-        assert_eq!(errors.errors[0].message, "Entity not found: Issue");
         assert_eq!(
             errors.errors[0].extensions.code.as_deref(),
             Some("ENTITY_NOT_FOUND")
         );
-        // The user-facing string is unchanged by carrying the structure.
         assert_eq!(err.to_string(), "Linear: Entity not found: Issue");
-    }
 
-    /// An error array without `extensions` (or with only keys we don't model) still
-    /// decodes — the structure is an aid to classification, never a decode gate.
-    #[tokio::test]
-    async fn a_graphql_error_without_extensions_still_decodes() {
         let err = post_to(&serve_once(
             "200 OK",
             r#"{"data":null,"errors":[{"message":"boom","locations":[{"line":1,"column":2}]}]}"#,
@@ -431,41 +417,6 @@ mod tests {
         let errors = graphql_errors(&err).expect("a GraphQL errors array");
         assert_eq!(errors.errors[0].message, "boom");
         assert!(errors.errors[0].extensions.code.is_none());
-    }
-
-    /// A transport/status failure is *not* a GraphQL errors array — the distinction
-    /// callers rely on to keep an expired token or a rate limit surfacing as an error.
-    #[tokio::test]
-    async fn a_status_failure_is_not_a_graphql_errors_array() {
-        let err = post_to(&serve_once(
-            "429 Too Many Requests",
-            r#"{"message":"slow down"}"#,
-        ))
-        .await;
-        assert!(graphql_errors(&err).is_none());
-    }
-
-    /// A non-401 rejection is still reported with its status (nothing about the
-    /// refresh path depends on 401 being the only one carried).
-    #[tokio::test]
-    async fn a_complexity_overflow_carries_its_status_too() {
-        let err = post_to(&serve_once(
-            "400 Bad Request",
-            r#"{"message":"too complex"}"#,
-        ))
-        .await;
-        assert_eq!(status_of(&err), Some(reqwest::StatusCode::BAD_REQUEST));
-    }
-
-    #[tokio::test]
-    async fn a_successful_response_decodes_its_data() {
-        let data: serde_json::Value = post(
-            client().post(serve_once("200 OK", r#"{"data":{"viewer":{"id":"u1"}}}"#)),
-            "Linear",
-        )
-        .await
-        .unwrap();
-        assert_eq!(data["viewer"]["id"], "u1");
     }
 
     // ── A gateway failure ─────────────────────────────────────────────────

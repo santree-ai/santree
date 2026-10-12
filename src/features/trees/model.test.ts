@@ -65,12 +65,6 @@ describe("withLiveWorktreeStatus", () => {
     const idle = withLiveWorktreeStatus(worktree("AK-1"), new Map(), new Set(["tree:AK-2"]));
     expect(idle.activity).toBe("Idle");
   });
-
-  it("leaves every other field untouched", () => {
-    const w = worktree("AK-1");
-    const result = withLiveWorktreeStatus(w, new Map(), new Set());
-    expect(result).toEqual({ ...w, activity: "Idle" });
-  });
 });
 
 describe("effectiveSessionState", () => {
@@ -113,23 +107,11 @@ function tab(key: string, refId?: string): TerminalTab {
 }
 
 describe("tabsToCloseForWorktree", () => {
-  it("includes the worktree's main terminal session", () => {
-    const tabs = [tab("t1", "tree:AK-1")];
-    expect(tabsToCloseForWorktree(tabs, "AK-1")).toEqual(tabs);
-  });
-
-  it("includes extra tabs opened via the + tab", () => {
+  it("closes the worktree's main and + tabs, never another worktree's that shares a prefix", () => {
+    const main = tab("t1", "tree:AK-1");
     const extra = tab("t2", "tree:AK-1:tab:6f9a");
-    const tabs = [tab("t1", "tree:AK-1"), extra];
-    expect(tabsToCloseForWorktree(tabs, "AK-1")).toEqual(tabs);
-  });
-
-  it("excludes sessions belonging to other worktrees or ids that share a prefix", () => {
-    const other = tab("t1", "tree:AK-1");
-    const otherWorktree = tab("t2", "tree:AK-10");
-    const shell = tab("t3", undefined);
-    const tabs = [other, otherWorktree, shell];
-    expect(tabsToCloseForWorktree(tabs, "AK-1")).toEqual([other]);
+    const tabs = [main, extra, tab("t3", "tree:AK-10"), tab("t4", undefined)];
+    expect(tabsToCloseForWorktree(tabs, "AK-1")).toEqual([main, extra]);
   });
 });
 
@@ -146,32 +128,15 @@ function pendingLaunch(id: string, overrides: Partial<PendingLaunch> = {}): Pend
 }
 
 describe("pendingWorktree", () => {
-  it("synthesizes a placeholder with no branch/path/stats yet, carrying the launch's title/project/agent", () => {
-    const w = pendingWorktree(pendingLaunch("AK-1", { title: "Fix the thing", project: "Core" }));
-    expect(w).toMatchObject({
-      id: "AK-1",
-      title: "Fix the thing",
-      project: "Core",
-      agent: "Claude",
-      pending: true,
-      branch: "",
-      path: "",
-      addLines: 0,
-      delLines: 0,
-      dirty: false,
-    });
-    // A root launch has no base — an invented one would make the sidebar hunt for a
-    // parent that doesn't exist.
-    expect(w.baseBranch).toBe("");
-  });
-
-  // The stack is decided at launch, so the placeholder must carry its base through
-  // to `stackWorktrees`. Without this the sidebar shows a sub-task as a root — and
-  // placeholders sort first, so it appears *above* the parent it belongs under —
-  // until the git worktree finishes creating seconds later.
-  it("carries a stacked launch's base branch so the placeholder can nest at once", () => {
-    const w = pendingWorktree(pendingLaunch("AK-277", { baseBranch: "santree/ak-275" }));
-    expect(w.baseBranch).toBe("santree/ak-275");
+  // A root launch has no base — an invented one would make the sidebar hunt for a
+  // parent that doesn't exist. A stacked launch carries its base so the
+  // placeholder nests at once instead of sorting *above* the parent it belongs
+  // under until the git worktree finishes creating.
+  it("carries the launch's base branch, empty for a root launch", () => {
+    expect(pendingWorktree(pendingLaunch("AK-1")).baseBranch).toBe("");
+    expect(
+      pendingWorktree(pendingLaunch("AK-277", { baseBranch: "santree/ak-275" })).baseBranch,
+    ).toBe("santree/ak-275");
   });
 });
 
@@ -232,18 +197,11 @@ describe("mergeWorktrees", () => {
 });
 
 describe("tabForRun", () => {
-  it("names the agent's tab once its launch is queued", () => {
-    expect(tabForRun({ repo: "acme/app", tabId: "t1" }, false)).toBe("tab:t1");
-    // The launch outranks a setup still reported: the agent is what runs next.
+  // The launch outranks a setup still reported: the agent is what runs next. A
+  // manual "Run setup" re-run launches nothing and must not move the selection.
+  it("selects the launch's tab, else Setup during the initial setup, else nothing", () => {
     expect(tabForRun({ repo: "acme/app", tabId: "t1" }, true)).toBe("tab:t1");
-  });
-
-  it("names the Setup tab while the initial setup runs", () => {
     expect(tabForRun(undefined, true)).toBe("setup");
-  });
-
-  // A manual "Run setup" re-run launches nothing and must not move the selection.
-  it("names nothing for a worktree with no run", () => {
     expect(tabForRun(undefined, false)).toBeNull();
   });
 });
@@ -253,16 +211,11 @@ describe("shouldHoldTerminal", () => {
 
   // Regression guard for the bare-shell launch race: the terminal must be withheld
   // while the work prompt is still being written, or it mounts seedless and the
-  // launch is lost (a seed only applies at PTY creation).
-  it("holds during a launch while the work prompt is still being written", () => {
+  // launch is lost (a seed only applies at PTY creation). The setup gate withholds
+  // the terminal itself during the initial setup.
+  it("holds only during a launch whose work prompt is still being written", () => {
     expect(shouldHoldTerminal({ ...idle, launching: true })).toBe(true);
-  });
-
-  it("does not hold during the initial setup (the setup gate withholds the terminal itself)", () => {
     expect(shouldHoldTerminal({ ...idle, launching: true, initialSetup: true })).toBe(false);
-  });
-
-  it("releases once the prompt has landed, and never holds a passive reopen", () => {
     expect(shouldHoldTerminal({ ...idle, launching: true, promptFetched: true })).toBe(false);
     expect(shouldHoldTerminal(idle)).toBe(false);
   });
@@ -296,21 +249,6 @@ describe("openMainTabs", () => {
       }),
     ).toEqual(["tab:a1", "tab:b2", "prView", "issueView", "file", "setup", "checkLog"]);
   });
-
-  // The PR and ticket pages are opened on purpose and stay; a picked file comes
-  // and goes. Putting the file after them is what keeps them from shifting.
-  it("keeps the reference views ahead of a file that opens later", () => {
-    expect(openMainTabs({ ...base, hasIssueView: true, hasFile: true })).toEqual([
-      "issueView",
-      "file",
-    ]);
-  });
-
-  // A worktree with every tab closed can still be showing a diff or a setup log —
-  // those are views of the work, not tabs the workspace owns.
-  it("keeps the on-demand views when no tab is open", () => {
-    expect(openMainTabs({ ...base, hasFile: true })).toEqual(["file"]);
-  });
 });
 
 describe("focusedAgentFor", () => {
@@ -328,44 +266,18 @@ describe("focusedAgentFor", () => {
     });
   });
 
-  it("has nothing to point at with no worktree open", () => {
+  // No worktree, no tab, a plain shell, a gone tab, or a view *about* the work
+  // (diff, logs, PR or ticket page): the meter belongs to an agent session on
+  // screen and must not fall back to an agent tab beside it.
+  it("has nothing to point at unless the showing tab is a live agent row", () => {
+    const shell = [extraTabRow("t1", "terminal", "Terminal 2")];
     expect(focusedAgentFor({ ...base, activeId: "" })).toBeNull();
-  });
-
-  // Every tab closed: the main area is showing the empty surface, so the status
-  // bar's meter has no session to scope itself to either.
-  it("has nothing to point at when no tab is open", () => {
     expect(focusedAgentFor({ ...base, activeTab: null })).toBeNull();
-  });
-
-  // A "+ Terminal" tab runs a shell in the worktree, not an agent — the meter
-  // must not fall back to an agent tab beside it.
-  it("has nothing to point at on a plain Terminal tab", () => {
-    const tabs = [extraTabRow("t1", "terminal", "Terminal 2")];
-    expect(focusedAgentFor({ ...base, activeTab: "tab:t1", tabs })).toBeNull();
-  });
-
-  it("has nothing to point at for a tab that no longer exists", () => {
+    expect(focusedAgentFor({ ...base, activeTab: "tab:t1", tabs: shell })).toBeNull();
     expect(focusedAgentFor({ ...base, activeTab: "tab:gone" })).toBeNull();
-  });
-
-  // A diff, a setup log, a job log, the PR page and the ticket page are all
-  // things you read *about* the work, not the work running — the meter belongs
-  // to a session on screen.
-  it("has nothing to point at while the main area shows a view rather than a tab row", () => {
     for (const tab of ["file", "setup", "checkLog", "prView", "issueView"] as const) {
       expect(focusedAgentFor({ ...base, activeTab: tab })).toBeNull();
     }
-  });
-});
-
-describe("defaultTabTitle on a started task's tab", () => {
-  // The tab a start mints is named after the provider it runs, like every other
-  // agent tab — which is why the strip no longer needs a special case to avoid
-  // calling a Codex pane "Terminal".
-  it("names it after the provider, not after the pane", () => {
-    expect(defaultTabTitle("agent", "Codex", [])).toBe("Codex");
-    expect(defaultTabTitle("agent", "Claude", [])).toBe("Claude Code");
   });
 });
 
@@ -374,36 +286,24 @@ describe("remoteControlTab", () => {
   const codex = (id: string) => extraTabRow(id, "agent", "Codex", "Codex");
 
   // The tab a started task minted is created first, so "first Claude tab" names it
-  // without anything having to record that it was the start.
-  it("gives the claim to the worktree's first Claude tab", () => {
-    expect(remoteControlTab([claude("w1"), claude("a2")])).toBe("w1");
-  });
-
-  // Two panes under one name collide, which is the whole reason for the rule.
-  it("gives it to exactly one tab", () => {
-    const tabs = [claude("w1"), claude("a2"), claude("a3")];
-    expect(tabs.filter((t) => remoteControlTab(tabs) === t.id)).toHaveLength(1);
+  // without anything recording that it was the start. Two panes under one name
+  // collide, which is why exactly one tab gets it.
+  it("gives the claim to the worktree's first Claude tab only", () => {
+    expect(remoteControlTab([claude("w1"), claude("a2"), claude("a3")])).toBe("w1");
   });
 
   // Codex cannot use it at all (see its launch spec), so a Codex tab standing
   // first must not swallow the claim and leave the Claude tab without a name.
-  it("skips a Codex tab standing first", () => {
+  it("skips Codex and shell tabs, and claims nothing without a Claude tab", () => {
     expect(remoteControlTab([codex("c1"), claude("w1")])).toBe("w1");
-  });
-
-  it("skips a plain shell, and claims nothing when there is no Claude tab", () => {
     expect(remoteControlTab([extraTabRow("t1", "terminal", "Terminal 2")])).toBeNull();
-    expect(remoteControlTab([])).toBeNull();
   });
 });
 
 describe("hasLivePane", () => {
-  it("sees a worktree's tab panes", () => {
-    expect(hasLivePane(new Set(["tree:AK-1:tab:a1"]), "AK-1")).toBe(true);
-  });
-
   // Sessions minted before every agent lived in a tab still carry the bare key.
-  it("sees the bare key a pre-tabs session still uses", () => {
+  it("sees a worktree's tab panes and the bare pre-tabs key", () => {
+    expect(hasLivePane(new Set(["tree:AK-1:tab:a1"]), "AK-1")).toBe(true);
     expect(hasLivePane(new Set(["tree:AK-1"]), "AK-1")).toBe(true);
   });
 
@@ -411,10 +311,6 @@ describe("hasLivePane", () => {
   // AK-12's panes and report the wrong worktree as running.
   it("does not mistake another worktree whose id starts the same", () => {
     expect(hasLivePane(new Set(["tree:AK-12:tab:a1", "tree:AK-1x"]), "AK-1")).toBe(false);
-  });
-
-  it("is false with nothing live", () => {
-    expect(hasLivePane(new Set(), "AK-1")).toBe(false);
   });
 });
 
@@ -443,6 +339,7 @@ describe("availableFileTabs", () => {
   /** A ticket-tracked worktree with no PR — the ordinary case the others vary. */
   const ticketed = { isBase: false, hasPr: false, hasTicket: true };
 
+  // The queue is what you do about the PR, so it sits right after the PR's tab.
   it("offers the PR and its AI work queue only once the branch has one", () => {
     expect(availableFileTabs(ticketed)).toEqual(["issue", "files", "changes", "history"]);
     expect(availableFileTabs({ ...ticketed, hasPr: true })).toEqual([
@@ -455,31 +352,11 @@ describe("availableFileTabs", () => {
     ]);
   });
 
-  // The queue is what you do about the PR, so it sits against the PR's own tab
-  // rather than at the end of the strip.
-  it("puts the AI work queue directly after the PR", () => {
-    const tabs = availableFileTabs({ ...ticketed, hasPr: true });
-    expect(tabs[tabs.indexOf("pr") + 1]).toBe("aiWork");
-  });
-
-  it("drops the Issue pane on the base entry — it has no ticket", () => {
+  // A worktree cut from a plain branch has no Linear issue by its slug, and
+  // offering a tab onto a ticket that doesn't exist put an error toast on screen.
+  // It loses nothing else: it still has a branch, a diff, a history and a PR.
+  it("drops only the Issue pane on the base entry and on a ticket-less worktree", () => {
     expect(availableFileTabs({ ...ticketed, isBase: true })).not.toContain("issue");
-  });
-
-  // A worktree cut from a plain branch: santree keys it by a branch slug, Linear
-  // has no issue by that name, and offering a tab onto a ticket that doesn't exist
-  // is what put an error toast on screen.
-  it("drops the Issue pane on a worktree with no Linear ticket", () => {
-    expect(availableFileTabs({ ...ticketed, hasTicket: false })).toEqual([
-      "files",
-      "changes",
-      "history",
-    ]);
-  });
-
-  // …and loses nothing else with it: a ticket-less worktree is still a worktree,
-  // with a branch, a diff, a session history and — once pushed — a PR.
-  it("keeps every other pane on a ticket-less worktree", () => {
     expect(availableFileTabs({ isBase: false, hasPr: true, hasTicket: false })).toEqual([
       "files",
       "changes",
@@ -493,19 +370,11 @@ describe("availableFileTabs", () => {
 /** One dot, two signals. The strip has room for exactly one per tab, so which
  *  one wins is a real decision — see {@link aiWorkDot}. */
 describe("aiWorkDot", () => {
-  it("takes the accent while the queue has open items", () => {
-    expect(aiWorkDot(false, 3)).toBe("var(--accent)");
-  });
-
-  it("says nothing on an empty, current queue", () => {
-    expect(aiWorkDot(false, 0)).toBeNull();
-  });
-
   // A count is "there is work here"; a stale brief is "what you are reading may
-  // no longer be true". The second is the one you need to see, so it wins even
-  // when there are open items to report.
-  it("lets a stale brief beat the count", () => {
-    expect(aiWorkDot(true, 0)).toBe(palette.amber);
+  // no longer be true". The second is the one you need to see, so it wins.
+  it("shows the accent for open items, but a stale brief beats the count", () => {
+    expect(aiWorkDot(false, 0)).toBeNull();
+    expect(aiWorkDot(false, 3)).toBe("var(--accent)");
     expect(aiWorkDot(true, 3)).toBe(palette.amber);
   });
 });
@@ -519,34 +388,15 @@ describe("resolveFileTab", () => {
     }
   });
 
-  it("falls back off the Issue pane for the base entry — it has no ticket", () => {
+  // The Issue pane is the persisted default, and a remembered PR pane outlives
+  // its PR: either would leave the user on a pane the strip no longer shows. The
+  // base checkout can still carry a PR, so its AI work pane survives.
+  it("falls back to Changes off a pane the worktree no longer has", () => {
     expect(resolveFileTab("issue", { ...task, isBase: true, hasPr: false })).toBe("changes");
-  });
-
-  // The Issue pane is the persisted default, so the *first* worktree a user opens
-  // after cutting one from a plain branch lands here — it has to fall back rather
-  // than resolve to a pane the strip is no longer showing.
-  it("falls back off the Issue pane on a worktree with no Linear ticket", () => {
     expect(resolveFileTab("issue", { ...task, hasTicket: false })).toBe("changes");
-  });
-
-  // The strip hides these when there's no PR, so a remembered one would leave the
-  // user on a pane with no tab to get back to.
-  it("falls back off the PR panes when the branch has no pull request", () => {
     expect(resolveFileTab("pr", { ...task, hasPr: false })).toBe("changes");
     expect(resolveFileTab("aiWork", { ...task, hasPr: false })).toBe("changes");
-  });
-
-  // The base checkout can still carry a PR (a branch pushed from the repo root),
-  // so the AI work pane survives there even though the ticket pane doesn't.
-  it("keeps the AI work pane on the base entry when it has a pull request", () => {
     expect(resolveFileTab("aiWork", { ...task, isBase: true })).toBe("aiWork");
-  });
-
-  it("leaves the other panes alone without a ticket or a PR", () => {
-    const plain = { isBase: true, hasPr: false, hasTicket: false };
-    expect(resolveFileTab("files", plain)).toBe("files");
-    expect(resolveFileTab("history", plain)).toBe("history");
   });
 });
 
@@ -569,41 +419,27 @@ function extraTabRow(
 }
 
 describe("defaultTabTitle", () => {
-  it("names the first Codex tab plain 'Codex', then numbers from 2", () => {
+  // The tab a start mints is named after its provider like every other agent tab.
+  // Terminals number from 2: the primary Terminal tab is #1 implicitly.
+  it("names each kind on its own, numbering from 2 against its own titles", () => {
     expect(defaultTabTitle("agent", "Codex", [])).toBe("Codex");
     expect(defaultTabTitle("agent", "Codex", [extraTabRow("a", "agent", "Codex")])).toBe("Codex 2");
-  });
-
-  it("names and numbers Claude Code independently from Codex", () => {
-    expect(defaultTabTitle("agent", "Claude", [])).toBe("Claude Code");
-    expect(defaultTabTitle("agent", "Claude", [extraTabRow("a", "agent", "Claude Code")])).toBe(
-      "Claude Code 2",
-    );
     expect(defaultTabTitle("agent", "Claude", [extraTabRow("a", "agent", "Codex")])).toBe(
       "Claude Code",
     );
-  });
-
-  it("numbers terminals from 2 — the primary Terminal tab is #1 implicitly", () => {
-    expect(defaultTabTitle("terminal", null, [])).toBe("Terminal 2");
     expect(defaultTabTitle("terminal", null, [extraTabRow("a", "terminal", "Terminal 2")])).toBe(
       "Terminal 3",
     );
-  });
-
-  it("skips past renamed/deleted gaps to stay unique among existing titles", () => {
-    // "Codex" was renamed away → the base name is free again.
-    expect(defaultTabTitle("agent", "Codex", [extraTabRow("a", "agent", "Debugging")])).toBe(
-      "Codex",
-    );
-    // A middle title was taken back by a rename — pick the first free number.
-    const taken = [extraTabRow("a", "agent", "Codex"), extraTabRow("b", "agent", "Codex 3")];
-    expect(defaultTabTitle("agent", "Codex", taken)).toBe("Codex 2");
-  });
-
-  it("ignores the other kind's titles", () => {
     expect(defaultTabTitle("agent", "Codex", [extraTabRow("a", "terminal", "Terminal 2")])).toBe(
       "Codex",
     );
+  });
+
+  it("takes the first free name after renames leave gaps", () => {
+    expect(defaultTabTitle("agent", "Codex", [extraTabRow("a", "agent", "Debugging")])).toBe(
+      "Codex",
+    );
+    const taken = [extraTabRow("a", "agent", "Codex"), extraTabRow("b", "agent", "Codex 3")];
+    expect(defaultTabTitle("agent", "Codex", taken)).toBe("Codex 2");
   });
 });

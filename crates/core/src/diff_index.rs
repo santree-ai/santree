@@ -217,24 +217,17 @@ mod tests {
     }
 
     #[test]
-    fn hunk_spans_reads_both_sides() {
+    fn hunk_spans_read_both_sides_from_the_headers_only() {
         let (old, new) = hunk_spans(PATCH);
         // The second hunk is `-0,0`: nothing on the old side, so no span for it.
         assert_eq!(old, vec![[40, 52]]);
         assert_eq!(new, vec![[40, 52], [80, 85]]);
-    }
-
-    #[test]
-    fn hunk_spans_defaults_an_omitted_count_to_one() {
-        let (old, new) = hunk_spans("@@ -7 +7 @@\n-a\n+b\n");
-        assert_eq!(old, vec![[7, 7]]);
-        assert_eq!(new, vec![[7, 7]]);
-    }
-
-    #[test]
-    fn hunk_spans_ignores_body_lines_that_look_like_headers() {
-        // A diff of a diff: a body line can start with "@@" but never with "@@ "
-        // at the start of the *line* after the leading +/- marker.
+        // An omitted count is one line.
+        assert_eq!(
+            hunk_spans("@@ -7 +7 @@\n-a\n+b\n"),
+            (vec![[7, 7]], vec![[7, 7]])
+        );
+        // A diff of a diff: a body line that looks like a header is body.
         let (_, new) = hunk_spans("@@ -1,2 +1,2 @@\n+@@ -9,9 +9,9 @@\n ctx\n");
         assert_eq!(new, vec![[1, 2]]);
     }
@@ -250,24 +243,18 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_path_names_the_files_that_do_exist() {
+    fn a_file_without_hunks_says_why_and_what_would_work() {
         let err = index()
             .check_anchor("src/nope.rs", true, None, 1)
             .unwrap_err();
         assert!(err.contains("isn't a changed file"), "{err}");
         assert!(err.contains("src/a.rs"), "{err}");
-    }
 
-    #[test]
-    fn a_truncated_file_list_says_so_rather_than_asserting() {
         let mut idx = index();
         idx.files_truncated = true;
         let err = idx.check_anchor("src/nope.rs", true, None, 1).unwrap_err();
         assert!(err.contains("capped"), "{err}");
-    }
 
-    #[test]
-    fn a_binary_file_has_nothing_to_anchor_to() {
         let err = index().check_anchor("logo.png", true, None, 1).unwrap_err();
         assert!(err.contains("no textual diff"), "{err}");
     }

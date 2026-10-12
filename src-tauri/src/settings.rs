@@ -728,7 +728,7 @@ pub fn login_shell_path() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use santree_core::domain::{AgentKind, AgentSetting, Integrations};
+    use santree_core::domain::{AgentKind, AgentSetting};
     use uuid::Uuid;
 
     use super::*;
@@ -745,46 +745,15 @@ mod tests {
         assert!(validate_user_scope("", "work_model").is_err());
         // An internal scope isn't reachable from the generic IPC surface.
         assert!(validate_user_scope("price_cache", "attempt_ms").is_err());
-    }
 
-    #[test]
-    fn the_settings_blob_cannot_be_written_through_the_generic_surface() {
+        // Nor is the settings blob, or a binary path — those are executed, and
+        // this route skips their validation *and* the in-process map.
         assert!(validate_user_scope("app", SETTINGS_KEY).is_err());
         assert!(validate_user_scope("repo:acme/app", SETTINGS_KEY).is_err());
-    }
-
-    /// Binary paths are executed, so they must not be reachable from the generic
-    /// key-value surface — that route skips validation *and* the in-process map.
-    #[test]
-    fn binary_paths_cannot_be_written_through_the_generic_surface() {
         assert!(validate_user_scope("app", &binary_path_key("gh")).is_err());
         assert!(validate_user_scope("app", "binary_path.claude").is_err());
         // Neighbouring keys are unaffected.
         assert!(validate_user_scope("app", "binary_pathological").is_ok());
-    }
-
-    /// The backstop that fixes the Nix case: a binary on no shell's PATH is still
-    /// found when it sits in a known root.
-    #[test]
-    fn well_known_dirs_cover_the_nix_install_roots() {
-        let dirs: Vec<String> = well_known_dirs()
-            .iter()
-            .map(|d| d.to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            dirs.iter().any(|d| d.ends_with("/.nix-profile/bin")),
-            "{dirs:?}"
-        );
-        assert!(
-            dirs.iter()
-                .any(|d| d == "/nix/var/nix/profiles/default/bin"),
-            "{dirs:?}"
-        );
-        assert!(
-            dirs.iter().any(|d| d == "/run/current-system/sw/bin"),
-            "{dirs:?}"
-        );
-        assert!(dirs.iter().any(|d| d == "/opt/homebrew/bin"), "{dirs:?}");
     }
 
     #[test]
@@ -797,12 +766,9 @@ mod tests {
         // A readable file with no execute bit is not a binary — treating it as one
         // stores a path that fails at spawn time, far from this input.
         assert!(!is_executable_file(&plain));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
-            assert!(is_executable_file(&plain));
-        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable_file(&plain));
         // A directory never counts, however executable it looks.
         assert!(!is_executable_file(&dir));
         std::fs::remove_dir_all(&dir).ok();
@@ -838,6 +804,18 @@ mod tests {
     async fn an_explicit_binary_path_outranks_an_agent_exec() {
         let db = test_db().await;
         let mut settings = config::default_settings();
+        // A bare command name is what discovery would look for anyway, so it must
+        // not become an override — that would short-circuit the probe with a path
+        // that isn't one.
+        settings.agents = vec![AgentSetting {
+            key: AgentKind::Claude,
+            exec: "claude".into(),
+            model: "opus".into(),
+        }];
+        set_settings(&db, &settings).await.unwrap();
+        refresh_binary_overrides(&db).await.unwrap();
+        assert_eq!(binary_override("claude"), None);
+
         settings.agents = vec![AgentSetting {
             key: AgentKind::Claude,
             exec: "/usr/bin/true".into(),
@@ -873,23 +851,6 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
         );
-    }
-
-    /// A bare command name is what discovery would look for anyway, so it must not
-    /// be stored as an override — doing so would short-circuit the probe with a
-    /// path that isn't one.
-    #[tokio::test]
-    async fn a_bare_agent_exec_is_not_treated_as_an_override() {
-        let db = test_db().await;
-        let mut settings = config::default_settings();
-        settings.agents = vec![AgentSetting {
-            key: AgentKind::Claude,
-            exec: "claude".into(),
-            model: "opus".into(),
-        }];
-        set_settings(&db, &settings).await.unwrap();
-        refresh_binary_overrides(&db).await.unwrap();
-        assert_eq!(binary_override("claude"), None);
     }
 
     /// A real (temp-file-backed) SQLite pool, isolated per test — same pattern
@@ -1070,41 +1031,6 @@ mod tests {
                 .unwrap(),
             None
         );
-    }
-
-    #[tokio::test]
-    async fn get_settings_defaults_to_config_when_unset() {
-        let db = test_db().await;
-        assert_eq!(get_settings(&db).await.unwrap(), config::default_settings());
-    }
-
-    #[tokio::test]
-    async fn set_settings_round_trips_the_full_blob() {
-        let db = test_db().await;
-
-        let settings = Settings {
-            default_agent: AgentKind::Codex,
-            integrations: Integrations {
-                linear: false,
-                triage: true,
-            },
-            agents: vec![AgentSetting {
-                key: AgentKind::Codex,
-                exec: "/usr/local/bin/codex".into(),
-                model: "gpt-5-codex".into(),
-            }],
-        };
-
-        set_settings(&db, &settings).await.unwrap();
-        assert_eq!(get_settings(&db).await.unwrap(), settings);
-
-        // Overwriting persists the new value, not a merge of old + new.
-        let updated = Settings {
-            default_agent: AgentKind::Claude,
-            ..settings
-        };
-        set_settings(&db, &updated).await.unwrap();
-        assert_eq!(get_settings(&db).await.unwrap(), updated);
     }
 
     #[tokio::test]

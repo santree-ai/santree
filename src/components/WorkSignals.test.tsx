@@ -11,11 +11,8 @@ const DAY = 24 * 60 * 60 * 1000;
 const week = { startsAtMs: 0, endsAtMs: 7 * DAY };
 
 describe("cycleProgress", () => {
-  it("is the elapsed share of the cycle", () => {
+  it("is the elapsed share of the cycle, clamped before the start and after the end", () => {
     expect(cycleProgress(week, 2 * DAY)).toBeCloseTo(2 / 7);
-  });
-
-  it("clamps before the start and after the end", () => {
     expect(cycleProgress(week, -DAY)).toBe(0);
     expect(cycleProgress(week, 9 * DAY)).toBe(1);
   });

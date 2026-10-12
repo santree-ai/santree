@@ -224,18 +224,6 @@ describe("buildTicketGroups", () => {
       ]);
     });
 
-    /** The pick outlives the tickets that made it: a stored team with nothing
-     *  on the page shows every team, not an empty page. */
-    it("falls back to every team when the pick names none on the page", () => {
-      const { groups, picked } = fold({
-        repos: ["one"],
-        tasks: new Map([["one", [task("AK-1", "Alpha", team("AK", "App"))]]]),
-        teams: ["MSG"],
-      });
-      expect(picked).toEqual([]);
-      expect(groups).toHaveLength(1);
-    });
-
     /** The pick is a set: two of three teams show, in team order, the third
      *  gone; a picked key with no rows drops out and the rest still applies. */
     it("shows any set of teams together, dropping a picked key that has no rows", () => {
@@ -256,6 +244,12 @@ describe("buildTicketGroups", () => {
       const stale = fold({ repos: ["one"], tasks: rows, teams: ["DES", "AK"] });
       expect(stale.picked).toEqual(["AK"]);
       expect(stale.groups.map((g) => g.team?.key)).toEqual(["AK"]);
+
+      // The pick outlives the tickets that made it: naming none on the page
+      // shows every team, not an empty page.
+      const none = fold({ repos: ["one"], tasks: rows, teams: ["DES"] });
+      expect(none.picked).toEqual([]);
+      expect(none.groups).toHaveLength(3);
     });
   });
 

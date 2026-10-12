@@ -46,7 +46,11 @@ describe("launchesToHost", () => {
   // launch from Issues never opens Trees, so nothing was mounted to run it. The
   // worktree got created and no agent ever started, while a toast said otherwise.
   it("hosts a queued launch when Trees is showing nothing (it isn't even mounted)", () => {
-    expect(hostedIds(launchesToHost(queued("AK-1"), REPO, wts, null))).toEqual(["AK-1"]);
+    const hosted = launchesToHost(queued("AK-1"), REPO, wts, null);
+    expect(hostedIds(hosted)).toEqual(["AK-1"]);
+    // The launch names the tab, not just the worktree: the pane that consumes the
+    // work prompt has to be the one the start minted.
+    expect(hosted[0]?.tabId).toBe("tab-AK-1");
   });
 
   // …and the other half: a launch queued behind a setup run the user navigated away
@@ -75,20 +79,10 @@ describe("launchesToHost", () => {
     ).toEqual(["AK-1"]);
   });
 
-  it("waits for the real worktree — a placeholder has no path to root a terminal in", () => {
-    const pending = [worktree("AK-3", true)];
-    expect(launchesToHost(queued("AK-3"), REPO, pending, null)).toEqual([]);
-  });
-
-  it("ignores a launch whose worktree is gone (deleted mid-launch)", () => {
+  // A placeholder has no path to root a terminal in; a deleted one has nothing.
+  it("waits for the real worktree, and ignores one deleted mid-launch", () => {
+    expect(launchesToHost(queued("AK-3"), REPO, [worktree("AK-3", true)], null)).toEqual([]);
     expect(launchesToHost(queued("AK-9"), REPO, wts, null)).toEqual([]);
-  });
-
-  // The launch names the tab, not just the worktree: the pane that consumes the
-  // work prompt has to be the one the start minted, not whichever agent tab
-  // happened to mount first.
-  it("carries the tab each launch belongs to", () => {
-    expect(launchesToHost(queued("AK-1"), REPO, wts, null)[0]?.tabId).toBe("tab-AK-1");
   });
 
   // One host is mounted per project, so a launch belonging to another one is not

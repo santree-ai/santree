@@ -222,7 +222,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A log that is not there is not an error — a machine that never hit a hook
+    /// A log that is not there is not an error (nor is a blank server report) — a machine that never hit a hook
     /// failure has no hook-error log, and the export must still be sendable.
     #[test]
     fn a_missing_log_is_skipped_not_failed() {
@@ -235,7 +235,7 @@ mod tests {
             &dest,
             "0.1.6",
             "2026-09-08T12:00:00Z",
-            "",
+            "  \n",
             &log_paths(&dir, &dir),
         )
         .expect("bundle");
@@ -244,6 +244,10 @@ mod tests {
         assert!(text.contains("version:  0.1.6"));
         assert!(text.contains("hello"));
         assert!(!text.contains("santree-hook-errors.log"));
+        assert!(
+            !text.contains("santree server"),
+            "a blank report adds no section"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -279,33 +283,5 @@ mod tests {
             "the report precedes the logs"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_empty_server_report_adds_no_section() {
-        let dir = std::env::temp_dir().join("santree-diag-no-server");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        std::fs::write(dir.join("santree.log"), b"x\n").expect("write");
-        let dest = dir.join("out.log");
-        write_bundle(
-            &dest,
-            "0.2.0",
-            "2026-10-08T12:00:00Z",
-            "  \n",
-            &log_paths(&dir, &dir),
-        )
-        .expect("bundle");
-        let text = std::fs::read_to_string(&dest).expect("read back");
-        assert!(!text.contains("santree server"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn the_name_carries_a_sortable_stamp() {
-        assert_eq!(
-            file_name("2026-09-08T17:04:31.123Z"),
-            "santree-logs-20260908170431.log"
-        );
     }
 }

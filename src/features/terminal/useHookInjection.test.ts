@@ -75,10 +75,13 @@ describe("useHookInjection", () => {
     expect(flagFor("Opencode")).toBeUndefined();
   });
 
-  it("takes the commit-denying variant for a no-git launch", () => {
+  it("takes, and waits on, the commit-denying variant for a no-git launch", () => {
     expect(injection({ noGit: true }).flagFor("Claude")).toBe(
       "--settings '/data/claude-hooks-no-git.json'",
     );
+    q.noGitFetched = false;
+    expect(injection({ noGit: true }).readyFor("Claude")).toBe(false);
+    expect(injection().readyFor("Claude")).toBe(true);
   });
 
   it("prefers an explicit settings file over the standard one", () => {
@@ -139,12 +142,5 @@ describe("useHookInjection", () => {
     q.boxFetched = true;
     q.repos = undefined;
     expect(injection({ repo: "acme/web" }).readyFor("Claude")).toBe(false);
-  });
-
-  it("waits on the variant the launch will actually use", () => {
-    q.noGitFetched = false;
-
-    expect(injection({ noGit: true }).readyFor("Claude")).toBe(false);
-    expect(injection().readyFor("Claude")).toBe(true);
   });
 });

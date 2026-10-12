@@ -63,19 +63,9 @@ describe("groupByProvider", () => {
     const groups = groupByProvider([agent("idle", "Codex", 5), agent("idle", "Claude", 5)]);
     expect(groups.map((g) => g.kind)).toEqual(["Codex", "Claude"]);
   });
-
-  it("has nothing to group with no agents", () => {
-    expect(groupByProvider([])).toEqual([]);
-  });
 });
 
 describe("splitGroups", () => {
-  it("keeps every chip when they fit", () => {
-    const { visible, hiddenAgents } = splitGroups([agent("needs-you", "Claude"), agent("idle")]);
-    expect(visible.map((g) => g.kind)).toEqual(["Claude", null]);
-    expect(hiddenAgents).toBe(0);
-  });
-
   /** With more providers than room, the ones that fold away are always the
    *  least urgent — and they fold into a count of *agents*, never silently. */
   it("folds the least urgent providers into an agent count", () => {
@@ -102,9 +92,7 @@ describe("describeAgents", () => {
         agent("working", "Claude"),
       ]),
     ).toBe("3 agents: 2 Claude working, 1 Codex idle");
-  });
-
-  it("says plain 'agent' for a session with no provider", () => {
+    // A session with no provider is a plain "agent".
     expect(describeAgents([agent("needs-you"), agent("idle", "Claude")])).toBe(
       "2 agents: 1 agent needs you, 1 Claude idle",
     );

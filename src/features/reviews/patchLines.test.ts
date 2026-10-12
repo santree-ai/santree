@@ -59,8 +59,9 @@ describe("patchLineRange", () => {
 describe("clampToHunk", () => {
   const TWO_HUNKS = `${PATCH}\n@@ -40,2 +50,2 @@\n one\n two`;
 
-  it("keeps a range inside its own hunk", () => {
+  it("keeps a range inside its own hunk, read in either drag direction", () => {
     expect(clampToHunk(TWO_HUNKS, true, 11, 13)).toEqual([11, 13]);
+    expect(clampToHunk(TWO_HUNKS, true, 13, 11)).toEqual([11, 13]);
   });
 
   it("cuts a drag off at the hunk boundary", () => {
@@ -82,11 +83,5 @@ describe("hunkRanges", () => {
     ]);
     // The second hunk is a pure addition, so the old side sees only the first.
     expect(hunkRanges(`${PATCH}\n@@ -40,1 +50,1 @@\n+far away`, false)).toEqual([[10, 13]]);
-  });
-});
-
-describe("clampToHunk direction", () => {
-  it("reads a drag upwards as the same range", () => {
-    expect(clampToHunk(PATCH, true, 13, 11)).toEqual([11, 13]);
   });
 });

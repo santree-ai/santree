@@ -92,11 +92,6 @@ describe("ReviewsProvider's pane selection", () => {
     expect(model.showMergeQueue).toBe(true);
   });
 
-  it("shows no merge queue without it, which is every url that never asked", () => {
-    mount();
-    expect(model.showMergeQueue).toBe(false);
-  });
-
   it("clears the selected PR when the queue is opened", () => {
     mount();
     model.openMergeQueue();

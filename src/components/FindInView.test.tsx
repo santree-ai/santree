@@ -27,10 +27,10 @@ const type = (query: string) => fireEvent.change(field(), { target: { value: que
 const position = () => screen.getByLabelText("Find in file").parentElement?.textContent ?? "";
 
 describe("useFindInView", () => {
-  it("opens on ⌘F and counts every rendered match", () => {
+  it("opens on ⌘F and counts every rendered match, case-insensitively", () => {
     render(
       <Harness>
-        <pre>alpha beta alpha gamma alpha</pre>
+        <pre>alpha beta ALPHA gamma Alpha</pre>
       </Harness>,
     );
     expect(screen.queryByLabelText("Find in file")).toBeNull();
@@ -58,17 +58,6 @@ describe("useFindInView", () => {
     expect(position()).toContain("1/1");
   });
 
-  it("is case-insensitive", () => {
-    render(
-      <Harness>
-        <pre>Worktree worktree WORKTREE</pre>
-      </Harness>,
-    );
-    openFind();
-    type("WorkTree");
-    expect(position()).toContain("1/3");
-  });
-
   it("steps with Enter and wraps at the end", () => {
     render(
       <Harness>
@@ -92,7 +81,7 @@ describe("useFindInView", () => {
 
   /** A query with no hits has nothing to show but the number, so the number has
    *  to be there — silence would read as "still searching". */
-  it("says 0/0 when nothing matches", () => {
+  it("says 0/0 when nothing matches, and never matches its own bar", () => {
     render(
       <Harness>
         <pre>alpha beta</pre>
@@ -100,6 +89,9 @@ describe("useFindInView", () => {
     );
     openFind();
     type("gamma");
+    expect(position()).toContain("0/0");
+    // The bar is rendered inside the searched element; its own text must not count.
+    type("Find");
     expect(position()).toContain("0/0");
   });
 
@@ -117,17 +109,16 @@ describe("useFindInView", () => {
 
   /** The file view stays mounted behind whichever tab is showing. ⌘F belongs to
    *  what you are looking at, so a hidden pane must not answer it. */
-  it("ignores ⌘F while its pane is not the one showing", () => {
-    render(
+  it("ignores ⌘F while hidden, and closes when its pane stops showing", () => {
+    const hidden = render(
       <Harness enabled={false}>
         <pre>alpha</pre>
       </Harness>,
     );
     openFind();
     expect(screen.queryByLabelText("Find in file")).toBeNull();
-  });
+    hidden.unmount();
 
-  it("closes itself when the pane it belongs to goes away", () => {
     const { rerender } = render(
       <Harness>
         <pre>alpha</pre>
@@ -142,19 +133,6 @@ describe("useFindInView", () => {
       </Harness>,
     );
     expect(screen.queryByLabelText("Find in file")).toBeNull();
-  });
-
-  /** The bar is rendered inside the searched element; finding its own input's
-   *  text would count matches that aren't in the file. */
-  it("does not search itself", () => {
-    render(
-      <Harness>
-        <pre>nothing here</pre>
-      </Harness>,
-    );
-    openFind();
-    type("Find");
-    expect(position()).toContain("0/0");
   });
 
   it("clears its fallback selection on unmount", () => {
@@ -209,10 +187,6 @@ describe("findRanges", () => {
     expect(ranges[0].toString()).toBe("red");
     expect(ranges[0].startOffset).toBe(0);
     expect(ranges[1].startOffset).toBe(10);
-  });
-
-  it("finds nothing for an empty query", () => {
-    expect(findRanges(root("<p>anything</p>"), "").ranges).toHaveLength(0);
   });
 
   it("keeps offsets after Unicode whose lowercase form expands", () => {

@@ -184,19 +184,13 @@ beforeEach(() => {
 
 describe("useAgentTab", () => {
   describe("the liveSeen latch", () => {
-    it("a tab that has never run is not 'ended' — it just hasn't started", () => {
+    it("resolves a launch until a live session exists, then attaches to it instead", () => {
       const t = mount();
-
-      expect(t.tab().live).toBe(false);
+      // A tab that has never run is not 'ended' — it just hasn't started.
       expect(t.tab().ended).toBe(false);
-      // …and it resolves a launch, because there's no live PTY to attach to.
       expect(t.resolving()).toBe(true);
-    });
 
-    it("attaches to a live session instead of resolving a second launch for it", () => {
-      const t = mount();
       t.spawn();
-
       expect(t.tab().live).toBe(true);
       expect(t.tab().ended).toBe(false);
       expect(t.resolving()).toBe(false);
@@ -254,20 +248,9 @@ describe("useAgentTab", () => {
 
     // The process can die while the pane is unmounted, so the cached resolution may
     // predate the exit: replaying it would `--session-id` a session whose transcript
-    // now exists (or start fresh where a resume is now correct).
-    it("onExited drops the cached session resolution", () => {
-      const t = mount();
-
-      act(() => t.tab().onExited());
-
-      expect(t.removeQueries).toHaveBeenCalledWith({
-        queryKey: ["agent-session", "acme/app", REF, "Claude"],
-      });
-    });
-
-    /** The drop is scoped to the provider that exited: the same surface can hold
-     *  a Codex resolution the Claude tab has no business evicting. */
-    it("drops only the exiting provider's cached resolution", () => {
+    // now exists. The drop is scoped to the provider that exited: the same surface
+    // can hold a resolution of another provider's that this tab must not evict.
+    it("onExited drops only the exiting provider's cached session resolution", () => {
       const t = mount(opts({ agent: "Codex" }));
 
       act(() => t.tab().onExited());
@@ -279,11 +262,13 @@ describe("useAgentTab", () => {
   });
 
   describe("preparing (the hold gate in front of the PTY spawn)", () => {
-    it("holds the terminal while the session is still resolving", () => {
+    it("holds the terminal while the session resolves, and not once a live session exists", () => {
       backend.sessionFetching = true;
       const t = mount();
-
       expect(t.tab().preparing).toBe(true);
+
+      t.spawn();
+      expect(t.tab().preparing).toBe(false);
     });
 
     // The seed command is built ONCE and applied at session creation, so a flag that
@@ -293,6 +278,10 @@ describe("useAgentTab", () => {
     // reads `false` both when it's off and when it hasn't loaded.
     it("holds the terminal until every launch flag has resolved, not just the session", () => {
       backend.flagsFetched = false;
+      backend.chrome = false;
+      backend.model = null;
+      backend.effort = null;
+      backend.permissionMode = null;
       const t = mount();
 
       expect(t.tab().preparing).toBe(true);
@@ -302,17 +291,6 @@ describe("useAgentTab", () => {
       });
       t.rerender({ o: opts() });
       expect(t.tab().preparing).toBe(false);
-    });
-
-    it("still holds when a flag is unresolved but happens to read as its 'off' value", () => {
-      backend.flagsFetched = false;
-      backend.chrome = false;
-      backend.model = null;
-      backend.effort = null;
-      backend.permissionMode = null;
-      const t = mount();
-
-      expect(t.tab().preparing).toBe(true);
     });
 
     it("doesn't wait on Claude's flags for another agent", () => {
@@ -337,21 +315,21 @@ describe("useAgentTab", () => {
       // fetch taken once the caller is actually ready.
       expect(t.resolving()).toBe(false);
     });
-
-    it("stops preparing once a live session exists (nothing left to seed)", () => {
-      backend.sessionFetching = true;
-      const t = mount();
-      t.spawn();
-
-      expect(t.tab().preparing).toBe(false);
-    });
   });
 
   /** A triage ticket's tab is found on the `triage` surface (a worktree pane on
    *  the same key is not it) and launches with the Investigate settings, which
    *  is what the backend resolves for the same key prefix. */
   describe("the triage surface", () => {
-    it("finds its pane by the triage source and resolves the Investigate settings", () => {
+    it("resolves the Work settings by default, and the Investigate ones on triage", () => {
+      mount();
+      expect(backend.settingReads).toEqual([
+        "work_model@work_agent",
+        "work_effort@work_agent",
+        "work_permission_mode@work_agent",
+      ]);
+      backend.settingReads = [];
+
       const t = mount(opts({ surface: "triage", refId: "triage:AK-1:tab:t1", cwd: "/repo" }));
       expect(backend.settingReads).toEqual([
         "investigate_model@investigate_agent",
@@ -378,15 +356,6 @@ describe("useAgentTab", () => {
         });
       });
       expect(t.tab().live).toBe(true);
-    });
-
-    it("reads the Work settings by default", () => {
-      mount();
-      expect(backend.settingReads).toEqual([
-        "work_model@work_agent",
-        "work_effort@work_agent",
-        "work_permission_mode@work_agent",
-      ]);
     });
   });
 

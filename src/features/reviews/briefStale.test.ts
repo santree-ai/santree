@@ -18,11 +18,8 @@ function brief(over: Partial<ReviewBrief> = {}): ReviewBrief {
 }
 
 describe("reviewBriefStale", () => {
-  it("is stale once the PR's head has moved past the brief", () => {
+  it("is stale once the PR's head has moved past the brief, fresh while they agree", () => {
     expect(reviewBriefStale(brief({ headSha: "head-1" }), "head-2")).toBe(true);
-  });
-
-  it("is fresh while the heads agree", () => {
     expect(reviewBriefStale(brief(), "head-2")).toBe(false);
   });
 

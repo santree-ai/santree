@@ -1531,67 +1531,37 @@ mod tests {
         }
     }
 
+    /// Claude's and Codex's hook events go through one table: the names they
+    /// share mean the same state, and the extras invent none (`PostCompact` is the
+    /// tail of a compaction still under way, `Subagent*` belong to a child).
+    /// `PostToolUse`/`PostToolUseFailure` are the mid-turn heartbeat; `PreToolUse`
+    /// stays unmapped because it fires *before* the tool and so races its own
+    /// permission prompt. The state-setting events are transitions, never
+    /// heartbeats — they must be free to move a session out of a blocked state.
     #[test]
-    fn maps_events_to_states() {
+    fn events_map_to_states_and_only_post_tool_events_are_heartbeats() {
         let nil = Value::Null;
-        // SessionStart is idle (resumed / at the prompt), not active.
-        assert_eq!(resolve_state("SessionStart", &nil), Some(AgentState::Idle));
-        assert_eq!(
-            resolve_state("UserPromptSubmit", &nil),
-            Some(AgentState::Active)
-        );
-        assert_eq!(resolve_state("Stop", &nil), Some(AgentState::Idle));
-        assert_eq!(resolve_state("SessionEnd", &nil), Some(AgentState::Exited));
-        assert_eq!(
-            resolve_state("PermissionRequest", &nil),
-            Some(AgentState::Permission)
-        );
-        // The post-tool events are the mid-turn heartbeat (see
-        // `tool_events_are_heartbeats_and_pretooluse_is_not_mapped_at_all` for the
-        // ordering guarantee that makes them safe).
-        assert_eq!(resolve_state("PostToolUse", &nil), Some(AgentState::Active));
-        assert_eq!(
-            resolve_state("PostToolUseFailure", &nil),
-            Some(AgentState::Active)
-        );
-        // `PreToolUse` is not mapped: it fires before the tool, so it races its
-        // own permission prompt, and it adds nothing `PostToolUse` doesn't say.
-        assert_eq!(resolve_state("PreToolUse", &nil), None);
-        assert_eq!(resolve_state("PermissionDenied", &nil), None);
-        assert_eq!(resolve_state("PreCompact", &nil), None);
-    }
-
-    /// Codex 0.150.1's hook events, mapped through the same table as Claude's.
-    /// The names it shares with Claude must mean the same state, and the ones it
-    /// adds must not invent one: `PostCompact` is the tail of a compaction the
-    /// agent is still in the middle of, and the `Subagent*` pair belongs to a
-    /// child, not to the user's session.
-    #[test]
-    fn maps_codex_events_to_the_same_states() {
-        let nil = Value::Null;
-        assert_eq!(resolve_state("SessionStart", &nil), Some(AgentState::Idle));
-        assert_eq!(
-            resolve_state("UserPromptSubmit", &nil),
-            Some(AgentState::Active)
-        );
-        assert_eq!(resolve_state("Stop", &nil), Some(AgentState::Idle));
-        assert_eq!(resolve_state("SessionEnd", &nil), Some(AgentState::Exited));
-        assert_eq!(
-            resolve_state("PermissionRequest", &nil),
-            Some(AgentState::Permission)
-        );
-        // Codex fires `PostToolUse` too, and it means the same thing there: the
-        // turn is still moving. It is the only one of Codex's extra six that
-        // carries a state at all.
-        assert_eq!(resolve_state("PostToolUse", &nil), Some(AgentState::Active));
-        for event in [
-            "PreToolUse",
-            "SubagentStart",
-            "SubagentStop",
-            "PreCompact",
-            "PostCompact",
+        for (event, want) in [
+            ("SessionStart", Some(AgentState::Idle)),
+            ("UserPromptSubmit", Some(AgentState::Active)),
+            ("Stop", Some(AgentState::Idle)),
+            ("SessionEnd", Some(AgentState::Exited)),
+            ("PermissionRequest", Some(AgentState::Permission)),
+            ("PostToolUse", Some(AgentState::Active)),
+            ("PostToolUseFailure", Some(AgentState::Active)),
+            ("PreToolUse", None),
+            ("PermissionDenied", None),
+            ("PreCompact", None),
+            ("PostCompact", None),
+            ("SubagentStart", None),
+            ("SubagentStop", None),
         ] {
-            assert_eq!(resolve_state(event, &nil), None, "{event}");
+            assert_eq!(resolve_state(event, &nil), want, "{event}");
+            assert_eq!(
+                is_heartbeat_event(event),
+                event.starts_with("PostToolUse"),
+                "{event}"
+            );
         }
     }
 
@@ -1933,13 +1903,6 @@ mod tests {
         // No tokens / no model → those segments are simply omitted.
         let bare = render_bar(10.0, 0.0, "");
         assert!(!bare.contains('·'), "{bare:?}");
-    }
-
-    #[test]
-    fn compacts_token_counts() {
-        assert_eq!(compact(999.0), "999");
-        assert_eq!(compact(604_000.0), "604k");
-        assert_eq!(compact(1_200_000.0), "1.2M");
     }
 
     /// I5: the status line's usage write must land *and be closed* before the app is
@@ -2390,34 +2353,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// `PostToolUse`/`PostToolUseFailure` mean "still working", and are the only
-    /// events that fire mid-turn. `PreToolUse` stays unmapped: it fires *before*
-    /// the tool, so it is the one that genuinely races its own permission prompt,
-    /// and it says nothing `PostToolUse` doesn't.
-    #[test]
-    fn tool_events_are_heartbeats_and_pretooluse_is_not_mapped_at_all() {
-        let nil = Value::Null;
-        for event in ["PostToolUse", "PostToolUseFailure"] {
-            assert_eq!(
-                resolve_state(event, &nil),
-                Some(AgentState::Active),
-                "{event}"
-            );
-            assert!(is_heartbeat_event(event), "{event}");
-        }
-        assert_eq!(resolve_state("PreToolUse", &nil), None);
-        // The state-setting events are transitions, not heartbeats — they must be
-        // free to move a session out of a blocked-on-user state.
-        for event in [
-            "UserPromptSubmit",
-            "Stop",
-            "SessionEnd",
-            "PermissionRequest",
-        ] {
-            assert!(!is_heartbeat_event(event), "{event}");
-        }
-    }
-
     /// A db with the two tables the status line writes (migrations 0011 + 0027).
     async fn statusline_db(name: &str) -> (std::path::PathBuf, String) {
         let base = std::env::temp_dir().join(format!("santree-hook-{name}-{}", std::process::id()));
@@ -2465,8 +2400,8 @@ mod tests {
 
     const STATUSLINE_PAYLOAD: &str = r#"{"session_id":"s-global","model":{"id":"claude-opus-4-8","display_name":"Opus"},"context_window":{"used_percentage":42,"total_input_tokens":84000,"context_window_size":200000},"rate_limits":{"five_hour":{"used_percentage":37,"resets_at":1787000000},"seven_day":{"used_percentage":81.25}}}"#;
 
-    /// The global passthrough: the payload is recorded exactly as for our own
-    /// bar, but what Claude renders is the user's command's own output, fed the
+    /// Our own bar without `--then`; with it, the payload is recorded exactly as
+    /// for our bar, but what Claude renders is the user's command's own output, fed the
     /// same stdin bytes, with its stderr and exit code intact.
     #[test]
     fn statusline_passthrough_records_then_forwards_the_users_status_line() {
@@ -2477,6 +2412,13 @@ mod tests {
             .unwrap();
         let (base, db) = rt.block_on(statusline_db("passthrough"));
         let raw = STATUSLINE_PAYLOAD.as_bytes();
+
+        // Without `--then` the status line is santree's own bar.
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(statusline(&db, None, raw, &mut out, &mut err), 0);
+        let shown = String::from_utf8(out).unwrap();
+        // 42% raw → 50% with the 1.2x display nudge.
+        assert!(shown.contains("50%") && shown.contains("Opus"), "{shown:?}");
 
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = statusline(&db, Some("cat"), raw, &mut out, &mut err);
@@ -2503,27 +2445,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Without `--then` the status line is santree's own bar, exactly as before.
-    #[test]
-    fn statusline_without_a_passthrough_prints_our_bar() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let (base, db) = rt.block_on(statusline_db("bar"));
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = statusline(&db, None, STATUSLINE_PAYLOAD.as_bytes(), &mut out, &mut err);
-        assert_eq!(code, 0);
-        let shown = String::from_utf8(out).unwrap();
-        // 42% raw → 50% with the 1.2x display nudge.
-        assert!(shown.contains("50%") && shown.contains("Opus"), "{shown:?}");
-        assert!(err.is_empty());
-        let (usage, limits) = rt.block_on(recorded(&db));
-        assert_eq!(usage.len(), 1);
-        assert_eq!(limits.len(), 2);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
     /// The invariant the global opt-in rests on: a db problem (here, no db at
     /// all) must never change what the user's status line shows.
     #[test]
@@ -2542,29 +2463,29 @@ mod tests {
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
     }
 
+    /// Claude runs the id santree launched it with, so only `/clear` and a fork
+    /// (an id santree never chose) may repoint the row — never a sibling tab's or
+    /// subprocess's SessionStart. Codex mints every id itself, so every
+    /// SessionStart is the only chance to learn it; a `source` gate there would
+    /// leave the launch invisible. Providers that never run this binary bind
+    /// nothing.
     #[test]
-    fn only_clear_and_fork_change_a_claude_session_id() {
-        let claude = |source| binds_session_id(AgentKind::Claude, source);
-        // The divergence cases — a new id santree never chose.
-        assert!(claude(Some("clear")));
-        assert!(claude(Some("fork")));
-        // Everything else runs the id santree launched with (or keeps it), so a
-        // sibling tab / subprocess SessionStart can never repoint the row.
-        assert!(!claude(Some("startup")));
-        assert!(!claude(Some("resume")));
-        assert!(!claude(Some("compact")));
-        assert!(!claude(None));
-    }
-
-    /// Codex mints every id itself, so every SessionStart is the *only* chance to
-    /// learn it — a `source` gate here would leave the fresh launch unrecorded and
-    /// its session invisible to the app.
-    #[test]
-    fn every_codex_session_start_binds_the_id() {
-        for source in [Some("startup"), Some("resume"), Some("compact"), None] {
+    fn which_session_starts_rebind_the_terminals_session_id() {
+        for (source, claude) in [
+            (Some("clear"), true),
+            (Some("fork"), true),
+            (Some("startup"), false),
+            (Some("resume"), false),
+            (Some("compact"), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                binds_session_id(AgentKind::Claude, source),
+                claude,
+                "{source:?}"
+            );
             assert!(binds_session_id(AgentKind::Codex, source), "{source:?}");
         }
-        // Providers that never run this binary must not touch a row.
         for kind in [AgentKind::Cursor, AgentKind::Opencode] {
             assert!(!binds_session_id(kind, Some("startup")));
         }

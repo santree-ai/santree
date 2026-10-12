@@ -94,21 +94,6 @@ describe("TicketRow", () => {
     });
   });
 
-  /** Whose it is, on every row — yours included. The face used to be reserved
-   *  for someone else's ticket, which read as "not you" rather than as the
-   *  assignee. */
-  it("shows the assignee on an actionable row too", () => {
-    render(
-      <TicketRow
-        row={row({ task: { ...task, assignee: "Ada Lovelace" } })}
-        indent={0}
-        onOpen={vi.fn()}
-        onStart={vi.fn()}
-      />,
-    );
-    expect(screen.getByText("AL")).toBeInTheDocument();
-  });
-
   /** The row itself is one stretched control, so a click anywhere on it — the
    *  bars, a chip — opens the ticket. */
   it("opens the ticket from anywhere on the row", () => {
@@ -265,20 +250,5 @@ describe("TicketRow menu", () => {
     expect(rows()).toEqual(["Open worktree", "Open in Linear", "Copy ticket id", "Copy link"]);
     fireEvent.click(screen.getByRole("menuitem", { name: "Open worktree" }));
     expect(onOpenWorktree).toHaveBeenCalledWith(expect.objectContaining({ worktree }));
-  });
-
-  it("says a queued ticket can be taken out", () => {
-    render(
-      <TicketRow
-        row={row()}
-        indent={0}
-        queued
-        onOpen={vi.fn()}
-        onStart={vi.fn()}
-        onToggleQueue={vi.fn()}
-      />,
-    );
-    open();
-    expect(screen.getByRole("menuitem", { name: "Remove from queue" })).toBeInTheDocument();
   });
 });

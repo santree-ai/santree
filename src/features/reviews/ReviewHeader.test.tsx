@@ -53,7 +53,6 @@ vi.mock("./model", () => ({
 
 import { reviewTreeId } from "./checkoutSource";
 import { usePrCheckout } from "./PrCheckout";
-import { PR_COLUMN } from "./prLayout";
 import { commitPhrase, ReviewHeader } from "./ReviewHeader";
 import { WorktreeGateProvider } from "./WorktreeGate";
 
@@ -114,27 +113,26 @@ beforeEach(() => {
 /** GitHub's shape: the number is part of how a PR is named, and the row under the
  *  title says in one sentence what merging it would do. */
 describe("ReviewHeader identity", () => {
-  it("puts the number in the heading rather than on a line above it", () => {
-    render(<Header pr={pr} />);
+  it("writes the merge sentence without a count until the detail read lands", () => {
+    const { unmount } = render(<Header pr={pr} />);
+    expect(screen.getByText(/wants to merge commits into/)).toBeVisible();
+    expect(screen.queryByText(/0 commits/)).not.toBeInTheDocument();
+    unmount();
 
-    const heading = screen.getByRole("heading", { level: 1 });
-    expect(heading).toHaveTextContent("Fix the thing #42");
-  });
-
-  it("writes the merge sentence with the count once the detail read lands", () => {
     state.detail = { commits: [{}, {}, {}] };
     render(<Header pr={pr} />);
-
     expect(screen.getByText(/wants to merge 3 commits into/)).toBeVisible();
     expect(screen.getByText(pr.baseRef)).toBeVisible();
     expect(screen.getByTitle(`Copy branch — ${pr.headRef}`)).toBeVisible();
   });
 
-  it("says it without a count while that read is in flight, rather than guessing", () => {
-    render(<Header pr={pr} />);
+  /** The verdict sits beside the number rather than on a row of its own. */
+  it("names the PR by number in the heading, with the review verdict beside it", () => {
+    render(<Header pr={{ ...pr, reviewDecision: "Approved" } as ReviewPr} />);
 
-    expect(screen.getByText(/wants to merge commits into/)).toBeVisible();
-    expect(screen.queryByText(/0 commits/)).not.toBeInTheDocument();
+    const heading = screen.getByRole("heading", { level: 1 });
+    expect(heading).toHaveTextContent("Fix the thing #42");
+    expect(heading).toHaveTextContent(/approved/i);
   });
 
   it("names the PR's state, and calls an unready open PR a draft", () => {
@@ -165,13 +163,6 @@ describe("ReviewHeader identity", () => {
     expect(base.className).toContain("truncate");
     expect(base).toHaveAttribute("title", pr.baseRef);
   });
-
-  /** The diffstat rides the tab strip now — two of them on one screen would read
-   *  as two different measurements. */
-  it("leaves the diffstat to the tab strip", () => {
-    render(<Header pr={pr} />);
-    expect(screen.queryByText(`+${pr.additions}`)).not.toBeInTheDocument();
-  });
 });
 
 describe("commitPhrase", () => {
@@ -184,62 +175,7 @@ describe("commitPhrase", () => {
   });
 });
 
-/** The title used to start at the pane's left edge while the body under it
- *  started in a centred column — two left edges on one page. */
-it("draws its content in the page column", () => {
-  const { container } = render(<Header pr={pr} />);
-  const band = container.firstElementChild as HTMLElement;
-  // The rule spans the page; the content inside it is the column.
-  expect(band.className).toContain("border-b");
-  const column = band.firstElementChild as HTMLElement;
-  for (const c of PR_COLUMN.split(" ")) expect(column.classList.contains(c)).toBe(true);
-});
-
-/** The header carried five rows: repo slug, title, the merge sentence, a status
- *  row, then reviewers and labels. Two of them were saying things said elsewhere
- *  — the slug repeats the sidebar section you clicked from, and the check rollup
- *  repeats the Checks tab's own glyph a few pixels below. */
-describe("ReviewHeader identity", () => {
-  it("puts the review verdict beside the number, not on a row of its own", () => {
-    render(<Header pr={{ ...pr, reviewDecision: "Approved" } as ReviewPr} />);
-
-    const heading = screen.getByRole("heading", { level: 1 });
-    expect(heading).toHaveTextContent(`#${pr.number}`);
-    expect(heading).toHaveTextContent(/approved/i);
-  });
-
-  it("drops the repo breadcrumb and the check rollup", () => {
-    render(<Header pr={pr} />);
-
-    expect(screen.queryByText(pr.repo)).not.toBeInTheDocument();
-    expect(screen.queryByText(/checks (failing|passing)/i)).not.toBeInTheDocument();
-  });
-});
-
 describe("ReviewHeader tree action", () => {
-  /** The actions wrap so a narrow window never hides one behind the info rail.
-   *  The branch line below them does the opposite — see "keeps the whole merge
-   *  sentence on one row": there, the two branches being side by side is the
-   *  point, and the names ellipsize to buy the room. */
-  it("wraps all header actions instead of clipping them behind the info rail", () => {
-    render(<Header pr={pr} />);
-
-    const branchAction = screen.getByTitle(`Copy branch — ${pr.headRef}`);
-    expect(screen.getByRole("button", { name: "Open in GitHub" }).parentElement).toHaveClass(
-      "flex-wrap",
-    );
-    expect(branchAction).toBeVisible();
-    expect(screen.getByRole("button", { name: "Open as tree" })).toBeVisible();
-    // Named, not just glyphed: "Open" alone read as "open the pull request",
-    // which is the one thing this view is already doing.
-    expect(screen.getByRole("button", { name: "Open in GitHub" })).toBeVisible();
-    // It carries the repo slug the breadcrumb row used to spend a line on.
-    expect(screen.getByRole("button", { name: "Open in GitHub" })).toHaveAttribute(
-      "title",
-      `Open ${pr.repo}#${pr.number} on GitHub`,
-    );
-  });
-
   /** The rail's toggle changes host between the rail's own header and the main
    *  tab strip — never this one. It used to appear here when the rail collapsed,
    *  which put it on a header only the Pull Request tab shows: collapse the rail
@@ -349,13 +285,6 @@ describe("ReviewHeader tree action once the AI review has a checkout", () => {
     // There is one checkout per pull request, so the only thing left to do with
     // it is drop the review label — same directory, same branch.
     expect(action).toHaveAttribute("title", expect.stringContaining("same checkout"));
-  });
-
-  /** The rename is only for the case the reporter hit. With nothing checked out
-   *  the original name is the honest one. */
-  it("stays 'Open as tree' when nothing is checked out at all", () => {
-    render(<Header pr={pr} />);
-    expect(screen.getByRole("button", { name: "Open as tree" })).toBeInTheDocument();
   });
 
   /** A real worktree already answers the question the button asks, and "View

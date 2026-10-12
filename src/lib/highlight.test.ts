@@ -3,17 +3,11 @@ import { describe, expect, it } from "vitest";
 import { highlightToHtml, langForFence, langForFile } from "./highlight";
 
 describe("langForFile", () => {
-  it("maps by extension, case-insensitively", () => {
+  it("maps by extension case-insensitively, Dockerfile whole, and nothing it can't tokenize", () => {
     expect(langForFile("model.tsx")).toBe("tsx");
     expect(langForFile("Cargo.TOML")).toBe("toml");
     expect(langForFile("main.rs")).toBe("rust");
-  });
-
-  it("matches Dockerfile whole — it has no extension to read", () => {
     expect(langForFile("Dockerfile")).toBe("docker");
-  });
-
-  it("returns nothing for a language it can't tokenize", () => {
     expect(langForFile("notes.xyz")).toBeUndefined();
   });
 });
@@ -27,13 +21,10 @@ describe("langForFence", () => {
     expect(highlightToHtml("const x = 1;", langForFence("ts"))).toContain("token keyword");
   });
 
-  it("resolves the aliases a fence uses that a filename never would", () => {
+  it("resolves fence-only aliases, and treats a plain-text fence as unhighlightable", () => {
     expect(langForFence("shell")).toBe("bash");
     expect(langForFence("console")).toBe("bash");
     expect(langForFence("yml")).toBe("yaml");
-  });
-
-  it("treats an explicit plain-text fence as unhighlightable", () => {
     expect(langForFence("text")).toBeUndefined();
     expect(langForFence("")).toBeUndefined();
   });
@@ -57,13 +48,5 @@ describe("highlightToHtml", () => {
 
     const plain = highlightToHtml(attack, undefined);
     expect(plain).toBe(`&lt;img src=x onerror="alert(1)"&gt;`);
-  });
-
-  it("emits Prism token spans for a language it knows", () => {
-    expect(highlightToHtml("const x = 1;", "typescript")).toContain("token keyword");
-  });
-
-  it("falls back to escaped text for a language it doesn't", () => {
-    expect(highlightToHtml("hello & goodbye", "klingon")).toBe("hello &amp; goodbye");
   });
 });

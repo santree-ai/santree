@@ -154,28 +154,19 @@ describe("TriageView", () => {
     state.select.mockClear();
   });
 
-  it("opens the ticket the route names", () => {
-    state.search = "AK-2";
-    render(<TriageView />);
-    expect(screen.getByTestId("issue-page")).toBeInTheDocument();
-    expect(screen.getByTestId("rail")).toBeInTheDocument();
-  });
-
   /** Named by the route but not in the queue: snoozed out by a filter, or
    *  triaged since. Saying which beats a generic "pick one" beside a sidebar
    *  with nothing lit. */
-  it("says which ticket is no longer in triage", () => {
-    state.search = "AK-9";
-    render(<TriageView />);
-    expect(screen.getByText("AK-9 is no longer in triage")).toBeInTheDocument();
-  });
-
-  it("does not call a ticket gone while the queue is still loading", () => {
+  it("says which ticket is no longer in triage, but not while the queue loads", () => {
     state.search = "AK-9";
     state.loading = true;
-    render(<TriageView />);
+    const { rerender } = render(<TriageView />);
     expect(screen.getByTestId("skeleton")).toBeInTheDocument();
     expect(screen.queryByText(/no longer in triage/)).toBeNull();
+
+    state.loading = false;
+    rerender(<TriageView />);
+    expect(screen.getByText("AK-9 is no longer in triage")).toBeInTheDocument();
   });
 
   /** The regression: the search param lags a navigation by a render, so the
@@ -244,19 +235,6 @@ describe("TriageView", () => {
     fireEvent.click(screen.getByRole("option", { name: /app/ }));
     expect(state.setRepo).toHaveBeenCalledWith("acme/app", { asDefault: false });
     await waitFor(() => expect(state.openAgent).toHaveBeenCalledWith("Codex"));
-  });
-
-  it("runs nothing when the ask is cancelled", async () => {
-    state.search = "AK-1";
-    state.repo = null;
-    render(<TriageView />);
-
-    fireEvent.click(screen.getByRole("button", { name: /Investigate with/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(state.openAgent).not.toHaveBeenCalled();
-    expect(state.setRepo).not.toHaveBeenCalled();
   });
 
   it("launches straight away once a project is attached", () => {

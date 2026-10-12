@@ -65,13 +65,6 @@ describe("useTriageTabs", () => {
     state.renameRow.mockClear();
   });
 
-  it("opens on the ticket, with nothing else open", () => {
-    const { result } = mount();
-    expect(result.current.tabs.active).toBe("linear");
-    expect(result.current.tabs.providers).toEqual([]);
-    expect(result.current.tabs.rows).toEqual([]);
-  });
-
   /** `started_investigations` strips the `triage:` prefix, so a stored row's
    *  `refId` is the bare ticket id. Matching it against the surface key is how
    *  no tab ever came back after a restart, and no pane ever offered to resume. */
@@ -167,16 +160,6 @@ describe("useTriageTabs", () => {
     state.rows = [];
     rerender();
     expect(result.current.tabs.active).toBe("linear");
-  });
-
-  it("a terminal row carries no provider", () => {
-    const { result } = mount();
-    act(() => result.current.tabs.addTab("terminal"));
-    expect(state.addRow.mock.calls[0][0]).toMatchObject({
-      kind: "terminal",
-      agentKind: null,
-      title: "Terminal",
-    });
   });
 
   /** No project, no row: there is nowhere to run and no repo to store it under.

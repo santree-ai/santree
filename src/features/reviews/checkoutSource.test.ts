@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ReviewCheckout } from "../../bindings";
 import { worktree as fxWorktree } from "../../test/fixtures";
-import { checkoutSource, needsPull, openTreeAction } from "./checkoutSource";
+import { checkoutSource, needsPull } from "./checkoutSource";
 
 /** What the backend hands back for a PR that has been checked out: an ordinary
  *  worktree on the PR's branch, under the project that actually holds it. It is
@@ -43,40 +43,17 @@ describe("checkoutSource", () => {
 });
 
 describe("needsPull", () => {
+  /** The review checkout is a branch checkout like any other, so it gets the same
+   *  answer. A worktree can legitimately be *ahead* — comparing heads would offer
+   *  to "update" a checkout that is simply further along. */
   it("offers a pull only while the checkout's remote is ahead", () => {
-    const current = fxWorktree("AK-1", { branch: "feature" });
-    expect(needsPull(checkoutSource("r", current, null))).toBe(false);
-    const behind = fxWorktree("AK-1", { branch: "feature", remoteBehind: 3 });
-    expect(needsPull(checkoutSource("r", behind, null))).toBe(true);
-  });
-
-  /** The review checkout is a branch checkout like any other now, so it gets the
-   *  same answer — not the wholesale "move it to the PR's head" the detached tree
-   *  needed, which is gone along with the detached tree. */
-  it("answers the same way for the PR's own checkout", () => {
+    const wt = (over: Parameters<typeof fxWorktree>[1]) =>
+      fxWorktree("AK-1", { branch: "f", ...over });
+    expect(needsPull(checkoutSource("r", wt({}), null))).toBe(false);
+    expect(needsPull(checkoutSource("r", wt({ remoteBehind: 3 }), null))).toBe(true);
     expect(needsPull(checkoutSource("r", null, review()))).toBe(false);
     expect(needsPull(checkoutSource("r", null, review({ remoteBehind: 2 })))).toBe(true);
-  });
-
-  it("never reads a checkout's own commits as something to update", () => {
-    // A worktree on the branch can legitimately be *ahead* — comparing heads
-    // would offer to "update" a checkout that is simply further along.
-    const ahead = fxWorktree("AK-1", { branch: "feature", ahead: 2, unpushed: 2 });
-    expect(needsPull(checkoutSource("r", ahead, null))).toBe(false);
-  });
-
-  it("has nothing to offer for a PR with no checkout at all", () => {
+    expect(needsPull(checkoutSource("r", wt({ ahead: 2, unpushed: 2 }), null))).toBe(false);
     expect(needsPull(checkoutSource("r", null, null))).toBe(false);
-  });
-});
-
-describe("openTreeAction", () => {
-  /** One checkout per PR: with nothing on disk the button cuts one, and with the
-   *  review's checkout there it can only *keep* it. Offering to "add a worktree"
-   *  in the second case would promise a second directory that never appears. */
-  it("cuts a checkout when there is none and keeps the one there is", () => {
-    expect(openTreeAction(false).label).toBe("Open as tree");
-    expect(openTreeAction(true).label).toBe("Keep as a worktree");
-    expect(openTreeAction(true).title).toContain("same checkout");
   });
 });

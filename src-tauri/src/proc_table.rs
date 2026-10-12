@@ -20,8 +20,8 @@ use anyhow::{bail, Context, Result};
 ///
 /// `-ax` is every process (ours are children of the app or of the local
 /// santree server, but a `ps` restricted to the session would miss a terminal's
-/// daemonised children); `rss` is KiB on
-/// both macOS and Linux; `stat` carries the zombie and foreground-process-group
+/// daemonised children); `rss` is KiB;
+/// `stat` carries the zombie and foreground-process-group
 /// flags; `command` is the full argv and goes last because it contains spaces.
 ///
 /// `command` rather than `ucomm` (the accounting name) because `ucomm` lies
@@ -287,6 +287,17 @@ mod tests {
         );
 
         assert!(procs.iter().find(|p| p.pid == 210).unwrap().zombie);
+
+        // The `+` flag is the whole foreground signal, and it has to survive
+        // the other letters in `stat`.
+        let foreground: Vec<u32> = procs
+            .iter()
+            .filter(|p| p.foreground)
+            .map(|p| p.pid)
+            .collect();
+        assert_eq!(foreground, vec![201], "only the pane's foreground process");
+        assert!(parse_ps("1 0 0.0 100 SNs+ /bin/zsh")[0].foreground);
+
         assert!(parse_ps("").is_empty());
         assert!(parse_ps("\n\n   \n").is_empty());
     }
@@ -307,21 +318,6 @@ mod tests {
             !rendered.contains("hunter2") && !rendered.contains("password"),
             "an argument reached a Proc: {rendered}"
         );
-    }
-
-    /// The `+` flag is the whole foreground signal, and it has to survive the
-    /// other letters in `stat`.
-    #[test]
-    fn the_foreground_flag_is_read_off_stat() {
-        let procs = parse_ps(LISTING);
-        let foreground: Vec<u32> = procs
-            .iter()
-            .filter(|p| p.foreground)
-            .map(|p| p.pid)
-            .collect();
-        assert_eq!(foreground, vec![201], "only the pane's foreground process");
-        assert!(!parse_ps("1 0 0.0 100 Ss /bin/zsh")[0].foreground);
-        assert!(parse_ps("1 0 0.0 100 SNs+ /bin/zsh")[0].foreground);
     }
 
     /// Depth-ordered, prunable, and it terminates on a cyclic listing.
@@ -349,13 +345,10 @@ mod tests {
         assert!(!tree.live(999), "a vanished pid is not live");
         assert!(tree.descend(999, &none).is_empty());
         assert_eq!(tree.get(400).map(|p| p.name.as_str()), Some("codex"));
-    }
 
-    /// A parent cycle in one listing (pid reuse mid-read) must terminate.
-    #[test]
-    fn descend_survives_a_parent_cycle() {
-        let tree = ProcTree::new(parse_ps("1 2 0.0 4 S /a\n2 1 0.0 4 S /b\n"));
-        assert_eq!(tree.descend(1, &HashSet::new()).len(), 2);
+        // A parent cycle in one listing (pid reuse mid-read) must terminate.
+        let cyclic = ProcTree::new(parse_ps("1 2 0.0 4 S /a\n2 1 0.0 4 S /b\n"));
+        assert_eq!(cyclic.descend(1, &HashSet::new()).len(), 2);
     }
 
     /// The real `ps`: it runs, this process is in the listing, and a second read

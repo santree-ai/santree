@@ -1,13 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  formatRelativeTime,
-  formatShiftRange,
-  formatShiftTimes,
-  formatSla,
-  useLiveNow,
-} from "./relativeTime";
+import { formatRelativeTime, formatShiftRange, formatSla, useLiveNow } from "./relativeTime";
 
 const T0 = new Date("2026-07-13T12:00:00Z").getTime();
 
@@ -58,9 +52,7 @@ describe("formatRelativeTime", () => {
     expect(ago(14 * 86_400_000)).toBe("2w ago");
     expect(ago(90 * 86_400_000)).toBe("3mo ago");
     expect(ago(800 * 86_400_000)).toBe("2y ago");
-  });
-
-  it("clamps a future timestamp (clock skew) to 'just now'", () => {
+    // A future timestamp (clock skew) clamps rather than reading "in 1m".
     expect(formatRelativeTime(T0 + 60_000, T0)).toBe("just now");
   });
 });
@@ -93,9 +85,5 @@ describe("formatShiftRange", () => {
     expect(formatShiftRange(start, null)).toBe("Aug 27");
     expect(formatShiftRange(null, end)).toBe("Sep 3");
     expect(formatShiftRange(null, null)).toBe("");
-  });
-
-  it("spells the hand-over times out for the tooltip", () => {
-    expect(formatShiftTimes(start, end)).toMatch(/^Aug 27, 4:00\sPM – Sep 3, 4:00\sPM$/);
   });
 });

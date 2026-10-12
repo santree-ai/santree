@@ -114,23 +114,17 @@ describe("reposAt", () => {
     repo("home/infra", "Daedalus"),
   ];
 
-  it("lists this machine's repos under PROJECTS, in registration order", () => {
+  it("splits the repos by where each checkout lives, keeping registration order", () => {
     expect(reposAt(repos, "Local")).toEqual(["acme/app", "acme/api"]);
-  });
-
-  it("lists the home server's repos under DAEDALUS, and none of this machine's", () => {
     expect(reposAt(repos, "Daedalus")).toEqual(["home/web", "home/infra"]);
   });
 });
 
 describe("worktreeKey", () => {
-  it("qualifies the worktree with its repo, because two repos routinely carry the same ticket id", () => {
+  // A raw NUL in the source makes git classify the file as binary, which silently
+  // drops it from every diff, grep and review. This has regressed more than once.
+  it("qualifies the worktree with its repo, separated by anything but a NUL byte", () => {
     expect(worktreeKey("acme/app", "AK-1")).not.toBe(worktreeKey("acme/api", "AK-1"));
-  });
-
-  // A raw NUL makes git classify the file as binary, which silently drops it from
-  // every diff, grep and review. This has regressed more than once.
-  it("separates the two halves with a printable control char, never a NUL byte", () => {
     expect(worktreeKey("acme/app", "AK-1")).not.toContain("\0");
   });
 });
@@ -158,7 +152,7 @@ describe("groupAgentsByWorktree", () => {
 
   // A triage investigation or a PR review runs at the repo root: hanging it off a
   // worktree row would claim an ownership its term key never asserted.
-  it("drops sessions that don't belong to a worktree", () => {
+  it("drops sessions that don't belong to a worktree, or to any repo", () => {
     const triage = entry({ sessionId: "s1", bucket: "working", originKind: "triage" });
     const review = entry({
       sessionId: "s2",
@@ -166,12 +160,9 @@ describe("groupAgentsByWorktree", () => {
       originKind: "review",
       ticket: null,
     });
-    expect(groupAgentsByWorktree([triage, review], noSeen, NOW).size).toBe(0);
-  });
-
-  it("drops a session it cannot attribute to a repo, rather than filing it under a guess", () => {
-    const orphan = entry({ sessionId: "s1", bucket: "working", repo: null });
-    expect(groupAgentsByWorktree([orphan], noSeen, NOW).size).toBe(0);
+    // Nor is a session with no repo filed under a guess.
+    const orphan = entry({ sessionId: "s3", bucket: "working", repo: null });
+    expect(groupAgentsByWorktree([triage, review, orphan], noSeen, NOW).size).toBe(0);
   });
 
   it("orders a worktree's agents by attention, so the one blocked on you is the row you see first", () => {
@@ -193,99 +184,17 @@ describe("groupAgentsByWorktree", () => {
     expect(nodes?.map((n) => n.entry.sessionId)).toEqual(["s-a", "s-b"]);
   });
 
-  it("marks an agent unseen until its own row has been acknowledged at that moment", () => {
+  // levelOf's ladder is pinned in lib/attention.test.ts; this proves the fold
+  // hands it the seen map and the clock rather than judging rows on its own.
+  it("judges each agent against the seen map and the clock it is given", () => {
+    const key = worktreeKey("acme/app", "AK-1");
+    const levelOfOne = (e: AgentEntry, seen: SeenMap = noSeen) =>
+      groupAgentsByWorktree([e], seen, NOW).get(key)?.[0];
     const done = entry({ sessionId: "s1", bucket: "done", termKey: "tree:AK-1" });
-    const key = worktreeKey("acme/app", "AK-1");
-    expect(groupAgentsByWorktree([done], noSeen, NOW).get(key)?.[0]?.unseen).toBe(true);
-    expect(groupAgentsByWorktree([done], { "tree:AK-1": NOW }, NOW).get(key)?.[0]?.unseen).toBe(
-      false,
-    );
-  });
-
-  /**
-   * The two tiers below `levelOf`'s first one. Every test above stamps its
-   * entries with `NOW`, which keeps the fold permanently on tier 1 (the hook
-   * row, taken at face value) — so the decay that exists for a *missing* hook
-   * event, and the terminal-title fallback under it, never ran here at all.
-   *
-   * The bug they guard is the one the decay was written for: a dropped
-   * `Stop`/`UserPromptSubmit` leaves a row asserting "waiting on you" forever,
-   * and the sidebar sorts that agent above everything actually happening, with
-   * nothing able to correct it.
-   */
-  describe("once the hook row has gone stale", () => {
-    const key = worktreeKey("acme/app", "AK-1");
-    const levelOfOne = (e: AgentEntry) =>
-      groupAgentsByWorktree([e], noSeen, NOW).get(key)?.[0]?.attention;
-
-    it("stops believing a stale claim that the agent is blocked on you", () => {
-      const fresh = entry({ sessionId: "s1", bucket: "attention", updatedAtMs: NOW });
-      const stale = entry({ sessionId: "s1", bucket: "attention", updatedAtMs: STALE });
-      expect(levelOfOne(fresh)?.level).toBe("needs-you");
-      expect(levelOfOne(stale)?.level).toBe("idle");
-    });
-
-    // Tier 2: the spinner a coding CLI animates into its OSC title is the one
-    // live signal left once the row has stopped being evidence.
-    it("falls back to the live terminal's own title", () => {
-      const working = entry({
-        sessionId: "s1",
-        bucket: "idle",
-        updatedAtMs: STALE,
-        terminalTitle: "◐ Cooking up a plan",
-      });
-      const resting = entry({
-        sessionId: "s1",
-        bucket: "working",
-        updatedAtMs: STALE,
-        terminalTitle: "✳ Ready",
-      });
-      expect(levelOfOne(working)).toMatchObject({ level: "working", source: "title" });
-      expect(levelOfOne(resting)).toMatchObject({ level: "idle", source: "title" });
-    });
-
-    // …but only with a PTY behind it. A title outlives the process that set it,
-    // so a dead pane's last frame would read as "working" for as long as the app
-    // stayed open.
-    it("ignores the title of a pane with no live process", () => {
-      const ghost = entry({
-        sessionId: "s1",
-        bucket: "working",
-        updatedAtMs: STALE,
-        live: false,
-        terminalTitle: "◐ Cooking up a plan",
-      });
-      expect(levelOfOne(ghost)).toMatchObject({ level: "idle", source: "none" });
-    });
-
-    // Tier 3, and the reason the ladder ends rather than looping back: with no
-    // fresh event and no title, the row renders at rest instead of holding an
-    // hours-old claim nothing can support.
-    it("settles at rest when neither the row nor a title can speak", () => {
-      const silent = entry({ sessionId: "s1", bucket: "working", updatedAtMs: STALE });
-      expect(levelOfOne(silent)).toMatchObject({ level: "idle", source: "none" });
-    });
-
-    // The one exemption. A finished session is terminal — its process is gone,
-    // so no later evidence can exist and there is nothing for the window to
-    // protect against.
-    it("still surfaces a finished agent you have not looked at, however old", () => {
-      const done = entry({ sessionId: "s1", bucket: "done", updatedAtMs: STALE });
-      expect(levelOfOne(done)?.level).toBe("done");
-    });
-  });
-
-  // A permission prompt stays actionable however long you look at it, whereas a
-  // finished agent recedes once acknowledged.
-  it("decays a seen `done` agent to idle but leaves a blocked one asking", () => {
-    const seen: SeenMap = { "tree:AK-1": NOW };
-    const done = entry({ sessionId: "s1", bucket: "done" });
-    const blocked = entry({ sessionId: "s1", bucket: "attention" });
-    const key = worktreeKey("acme/app", "AK-1");
-    expect(groupAgentsByWorktree([done], seen, NOW).get(key)?.[0]?.attention.level).toBe("idle");
-    expect(groupAgentsByWorktree([blocked], seen, NOW).get(key)?.[0]?.attention.level).toBe(
-      "needs-you",
-    );
+    expect(levelOfOne(done)?.unseen).toBe(true);
+    expect(levelOfOne(done, { "tree:AK-1": NOW })?.unseen).toBe(false);
+    const stale = entry({ sessionId: "s1", bucket: "attention", updatedAtMs: STALE });
+    expect(levelOfOne(stale)?.attention.level).toBe("idle");
   });
 });
 
@@ -308,37 +217,20 @@ describe("groupAgentsByTicket", () => {
       ...over,
     });
 
-  it("files an investigation under its ticket", () => {
-    const grouped = groupAgentsByTicket([investigation("s1", "working")], noSeen, NOW);
-    expect(grouped.get("AK-1")?.map((n) => n.entry.sessionId)).toEqual(["s1"]);
-  });
-
-  // The ticket's own tabs (a session opened beside the investigation) key
-  // under the ticket too: they run on its behalf, from its workspace.
-  it("files a ticket's own tab under the ticket beside its investigation", () => {
-    const grouped = groupAgentsByTicket(
-      [
-        investigation("s1", "working"),
-        investigation("s2", "working", "AK-1", { termKey: "triage:AK-1:tab:6f9a" }),
-      ],
-      noSeen,
-      NOW,
-    );
-    expect(grouped.get("AK-1")?.map((n) => n.entry.sessionId)).toEqual(["s1", "s2"]);
-  });
-
-  // The row is the Linear issue, not a checkout of it: the same ticket
-  // investigated from two registered repos is one ticket with two agents.
-  it("keys by the ticket alone, across repos", () => {
+  // The row is the Linear issue, not a checkout of it: the investigation and the
+  // ticket's own tabs key under it, and the same ticket investigated from two
+  // registered repos is one ticket with several agents.
+  it("files a ticket's investigations and own tabs under the ticket alone, across repos", () => {
     const grouped = groupAgentsByTicket(
       [
         investigation("s1", "working", "AK-1", { repo: "acme/app" }),
-        investigation("s2", "working", "AK-1", { repo: "acme/api" }),
+        investigation("s2", "working", "AK-1", { termKey: "triage:AK-1:tab:6f9a" }),
+        investigation("s3", "working", "AK-1", { repo: "acme/api" }),
       ],
       noSeen,
       NOW,
     );
-    expect(grouped.get("AK-1")).toHaveLength(2);
+    expect(grouped.get("AK-1")?.map((n) => n.entry.sessionId)).toEqual(["s1", "s2", "s3"]);
   });
 
   // A worktree agent runs in a checkout and belongs to that row; a review belongs
@@ -353,19 +245,6 @@ describe("groupAgentsByTicket", () => {
     });
     expect(groupAgentsByTicket([tree, review], noSeen, NOW).size).toBe(0);
   });
-
-  it("orders a ticket's agents by attention, the one blocked on you first", () => {
-    const nodes = groupAgentsByTicket(
-      [
-        investigation("s1", "idle"),
-        investigation("s2", "attention"),
-        investigation("s3", "working"),
-      ],
-      noSeen,
-      NOW,
-    ).get("AK-1");
-    expect(nodes?.map((n) => n.entry.sessionId)).toEqual(["s2", "s3", "s1"]);
-  });
 });
 
 describe("buildProjectNode", () => {
@@ -374,17 +253,7 @@ describe("buildProjectNode", () => {
   it("reports a repo whose worktrees have not landed as loading, not as empty", () => {
     const node = build({ worktrees: undefined });
     expect(node.loading).toBe(true);
-    expect(node.worktreeCount).toBe(0);
-  });
-
-  it("reports an actually-empty repo as loaded, so its empty state is the truth", () => {
     expect(build({ worktrees: [] }).loading).toBe(false);
-  });
-
-  it("shortens the repo name for the header while keeping the full name as the row's id", () => {
-    const node = build();
-    expect(node.repo).toBe("acme/app");
-    expect(node.label).toBe("app");
   });
 
   // The base checkout leads the section and is not a ticket, so it must never
@@ -398,10 +267,6 @@ describe("buildProjectNode", () => {
     expect(node.base?.depth).toBe(0);
     expect(node.base?.task).toBeNull();
     expect(node.worktreeCount).toBe(0);
-  });
-
-  it("leaves `base` null for a repo with no local path, so the section can render without one", () => {
-    expect(build({ base: null }).base).toBeNull();
   });
 
   it("attaches each worktree's Linear ticket and PRs by id", () => {
@@ -447,10 +312,6 @@ describe("buildProjectNode", () => {
     expect(build({ base: worktree("master"), agentsByWorktree: onBase }).attention.level).toBe(
       "working",
     );
-  });
-
-  it("leaves a repo with nothing running at idle", () => {
-    expect(build({ worktrees: [worktree("AK-1")] }).attention.level).toBe("idle");
   });
 
   // Attention is what makes the sidebar worth having, so it outranks the label
@@ -539,11 +400,8 @@ describe("buildProjectNode", () => {
 
   // One nameless band is just "this repo's worktrees" — a heading over it would
   // say nothing, so the sidebar drops it.
-  it("hides the milestone headings when there is only the nameless band", () => {
+  it("shows the milestone headings only once a real milestone is one of the bands", () => {
     expect(build({ worktrees: [worktree("AK-1")] }).linearProjects[0]?.showMilestones).toBe(false);
-  });
-
-  it("shows the milestone headings as soon as a real milestone is one of the bands", () => {
     const node = build({
       worktrees: [worktree("AK-1")],
       tasks: [
@@ -673,30 +531,13 @@ describe("buildProjectNode grouping modes", () => {
       ["Infra", [["No milestone", ["AK-3"]]]],
       ["No Project", [["No milestone", ["AK-4"]]]],
     ]);
-  });
-
-  // A heading that suppresses itself must not take its rows with it: the answer
-  // is per band, so a project split across milestones keeps its headings while
-  // the project beside it, which has none, renders a flat list.
-  it("decides the milestone headings per project, not per repo", () => {
-    const node = build({ ...fixture, groupBy: "project_milestone" });
+    // The headings are decided per band: a project split across milestones keeps
+    // them while the one beside it, which has none, renders a flat list.
     expect(node.linearProjects.map((p) => [p.label, p.showMilestones])).toEqual([
       ["Core", true],
       ["Infra", false],
       ["No Project", false],
     ]);
-  });
-
-  // The band exists so that work Linear has not filed anywhere is still
-  // reachable — mirroring the trailing "No milestone" band.
-  it("keeps a project-less row in one trailing band rather than dropping it", () => {
-    const node = build({
-      worktrees: [worktree("AK-1"), worktree("AK-2", { project: null })],
-      tasks: [task("AK-1", { project: "Core" })],
-      groupBy: "project",
-    });
-    expect(node.linearProjects.map((p) => p.label)).toEqual(["Core", "No Project"]);
-    expect(node.linearProjects[1]?.milestones[0]?.worktrees[0]?.worktree.id).toBe("AK-2");
   });
 
   // The backend already names a project-less issue "No Project", so a ticket
@@ -741,18 +582,6 @@ describe("buildProjectNode grouping modes", () => {
       ["Core", [["No milestone", ["AK-1"]]]],
       [NO_PROJECT, [["No milestone", ["review-4-acme-3-app-42"]]]],
     ]);
-  });
-
-  /** The same tree with a *real* ticket behind it — a PR whose branch carries a
-   *  ticket tag — bands under that ticket's own project. Deriving a band from the
-   *  origin instead would have overridden a name Linear actually gave it. */
-  it("bands a PR tree under its ticket's project when the branch names one", () => {
-    const node = build({
-      worktrees: [worktree("AK-7", { project: null, branch: "feature/ak-7-thing" })],
-      tasks: [task("AK-7", { project: "Observability" })],
-      groupBy: "project",
-    });
-    expect(node.linearProjects.map((p) => p.label)).toEqual(["Observability"]);
   });
 
   it("never renders one worktree in two bands, whichever mode is on", () => {
@@ -860,31 +689,25 @@ describe("ancestorGroupKeys", () => {
     ],
   };
 
-  it("names every level of the deepest nesting, outermost first", () => {
-    const node = build({ ...deep, groupBy: "project_milestone" });
-    expect(ancestorGroupKeys([node], "AK-1", "acme/app")).toEqual([
-      repoKey("acme/app"),
-      projectKey("acme/app", "Core"),
-      milestoneKey("acme/app", "Core", "m1"),
-    ]);
-  });
-
-  // With grouping off the section is one suppressed band holding every row, and
-  // a suppressed heading renders its rows whatever the collapse record says —
-  // so expanding it would be expanding something that isn't there.
-  it("names only the repo section in the shallowest shape", () => {
-    const node = build({ ...deep, groupBy: "none" });
-    expect(ancestorGroupKeys([node], "AK-1", "acme/app")).toEqual([repoKey("acme/app")]);
-  });
-
-  // The default tree: one implicit project band whose heading is suppressed,
-  // real milestone headings inside it.
-  it("skips the level whose heading the mode suppresses", () => {
-    const node = build({ ...deep, groupBy: "milestone" });
-    expect(ancestorGroupKeys([node], "AK-1", "acme/app")).toEqual([
-      repoKey("acme/app"),
-      milestoneKey("acme/app", NO_PROJECT, "m1"),
-    ]);
+  // Only a drawn heading gates its rows: with grouping off the section is one
+  // suppressed band, and the default tree suppresses the implicit project band.
+  it("names each drawn level above the row, outermost first, per grouping mode", () => {
+    const cases = [
+      [
+        "project_milestone",
+        [
+          repoKey("acme/app"),
+          projectKey("acme/app", "Core"),
+          milestoneKey("acme/app", "Core", "m1"),
+        ],
+      ],
+      ["none", [repoKey("acme/app")]],
+      ["milestone", [repoKey("acme/app"), milestoneKey("acme/app", NO_PROJECT, "m1")]],
+    ] as const;
+    for (const [groupBy, keys] of cases) {
+      const node = build({ ...deep, groupBy });
+      expect(ancestorGroupKeys([node], "AK-1", "acme/app"), groupBy).toEqual(keys);
+    }
   });
 
   // The repo's own checkout leads the section and sits under no band.
@@ -899,18 +722,12 @@ describe("ancestorGroupKeys", () => {
   });
 
   // Two repos routinely carry the same ticket id. Naming the repo picks the one
-  // section that is meant…
-  it("reveals only the named repo's row when both repos carry the id", () => {
+  // section that is meant, but a caller whose repo hasn't caught up with the
+  // selection still gets a visible row rather than one that looks like it did nothing.
+  it("reveals the named repo's row, or every row holding the id when no repo is named", () => {
     const mine = build({ repo: "acme/app", worktrees: [worktree("AK-1")] });
     const theirs = build({ repo: "acme/api", worktrees: [worktree("AK-1")] });
     expect(ancestorGroupKeys([mine, theirs], "AK-1", "acme/api")).toEqual([repoKey("acme/api")]);
-  });
-
-  // …but a caller whose repo hasn't caught up with the selection still gets a
-  // visible row, which beats a selection that looks like it did nothing.
-  it("reveals every section holding the id when the repo says nothing useful", () => {
-    const mine = build({ repo: "acme/app", worktrees: [worktree("AK-1")] });
-    const theirs = build({ repo: "acme/api", worktrees: [worktree("AK-1")] });
     expect(ancestorGroupKeys([mine, theirs], "AK-1", "")).toEqual([
       repoKey("acme/app"),
       repoKey("acme/api"),

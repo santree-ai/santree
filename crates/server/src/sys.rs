@@ -39,18 +39,6 @@ pub fn fill_standard_fds() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Linux: no core dumps, and no same-user `ptrace` or `/proc/<pid>/mem` —
-/// the server holds every session's input and the env secrets passed to it.
-/// (macOS: the hardened runtime does the same for a signed build.) A PTY
-/// child is dumpable again after its exec.
-pub fn not_dumpable() {
-    #[cfg(target_os = "linux")]
-    // SAFETY: PR_SET_DUMPABLE takes an int argument and touches nothing else.
-    unsafe {
-        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
-    }
-}
-
 /// Leave the launcher's session: a terminal closing, or the app's process
 /// group being signalled, must not reach the server. EPERM (already a
 /// session leader) changes nothing worth failing over.

@@ -1305,14 +1305,10 @@ mod tests {
         let dir = scratch("short");
         let seed = "exec env SANTREE_REPO='/r' '/usr/local/bin/claude' --resume 'abc'";
         assert_eq!(seed_line(Some(&dir), seed), seed);
+        // A trailing return is not part of the line.
+        assert_eq!(seed_line(Some(&dir), "exec 'claude'\r"), "exec 'claude'");
         // Nothing was written: the common case costs no file at all.
         assert!(!dir.exists());
-    }
-
-    #[test]
-    fn a_trailing_return_is_not_part_of_the_line() {
-        let dir = scratch("cr");
-        assert_eq!(seed_line(Some(&dir), "exec 'claude'\r"), "exec 'claude'");
     }
 
     /// The regression this whole path exists for. Deliberately asserted on the
@@ -1351,7 +1347,6 @@ mod tests {
 
     /// It runs with the user's privileges, so nobody else may read it, write it,
     /// or swap it for something else on the way to `exec`.
-    #[cfg(unix)]
     #[test]
     fn the_spilled_script_and_its_directory_are_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1439,7 +1434,6 @@ mod tests {
     /// followed by `create_dir_all`'s `is_dir()` and by `chmod` — so a symlink
     /// standing in for it would hand a delete loop and a mode change to whatever
     /// it points at.
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_seed_directory_is_refused_rather_than_followed() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1474,18 +1468,13 @@ mod tests {
             "the mode of a symlink's target was changed"
         );
 
-        // …and the seed still launches: a refused spill degrades to typing it.
+        // …and the seed still launches: a refused spill (or no data directory
+        // at all) degrades to typing it.
         let seed = seed_of(MAX_SEED_LINE * 2);
         assert_eq!(seed_line(Some(&link), &seed), seed);
+        assert_eq!(seed_line(None, &seed), seed);
 
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// Every failure degrades to the old behaviour rather than to no launch.
-    #[test]
-    fn an_unresolvable_data_directory_falls_back_to_typing_the_seed() {
-        let seed = seed_of(MAX_SEED_LINE * 2);
-        assert_eq!(seed_line(None, &seed), seed);
     }
 
     /// The one OS assumption agent detection rests on, checked against a real
@@ -1568,7 +1557,7 @@ mod tests {
     //
     // `open`, `attach` and `type_seed` are the commands' bodies, so these run
     // what a pane's life runs, through the channels the frontend holds — once
-    // with no server (`Mode::Off`, the default for unsigned, dev and Linux
+    // with no server (`Mode::Off`, the default for unsigned and dev
     // builds) and once on a real `santree-server`.
 
     use crate::sessions::testkit::{until, Screen};
@@ -1737,20 +1726,23 @@ mod tests {
         let db = crate::db::init(fx.dir.path().join("t.db")).await.unwrap();
         let link = DaedalusHost::default();
         let states = Arc::new(Mutex::new(Vec::new()));
-        let servers = LocalServers::new(ServerConfig {
-            app_data_dir: fx.dir.path().to_path_buf(),
-            log_dir: Some(fx.dir.path().join("logs")),
-            bundled_binary: Some(real_binary()),
-            mode: Mode::OptIn,
-            ids: link.ids().clone(),
-            retire: retire_exited(db.clone()),
-            emit: {
-                let states = states.clone();
-                Arc::new(move |status| states.lock().unwrap().push(status.state))
+        let servers = LocalServers::in_layout(
+            ServerConfig {
+                app_data_dir: fx.dir.path().to_path_buf(),
+                log_dir: Some(fx.dir.path().join("logs")),
+                bundled_binary: Some(real_binary()),
+                mode: Mode::OptIn,
+                ids: link.ids().clone(),
+                retire: retire_exited(db.clone()),
+                emit: {
+                    let states = states.clone();
+                    Arc::new(move |status| states.lock().unwrap().push(status.state))
+                },
+                keep_awake: Arc::new(|| false),
+                keep_awake_held: Arc::new(|_| {}),
             },
-            keep_awake: Arc::new(|| false),
-            keep_awake_held: Arc::new(|_| {}),
-        });
+            fx.layout.clone(),
+        );
         servers.ensure().await;
         let ServerState::Running { pid, .. } = servers.status().state else {
             panic!("the server isn't running: {:?}", servers.status());
@@ -1806,7 +1798,7 @@ mod tests {
             .until("the echo", |s| s.text().contains("first-2"))
             .await;
         let held = terminals.local_sessions().await;
-        assert_eq!((held.len(), held[0].id), (1, id));
+        assert_eq!((held.len(), held[0].id), (1, id), "{held:#?}");
         // Input typed to a detached pane is dropped, never replayed later, so
         // the shell is told in advance to print while nobody is watching, and
         // to leave a mark once it has. It waits for `go`, created only after

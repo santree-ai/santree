@@ -43,7 +43,7 @@ pub fn lock_path(run_dir: &Path) -> PathBuf {
 }
 
 /// The longest socket path this platform can bind: `sun_path` less its NUL
-/// (103 bytes on macOS, 107 on Linux).
+/// (103 bytes on macOS).
 pub fn max_socket_path() -> usize {
     // SAFETY: an all-zero sockaddr_un is a valid value of the type.
     let addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -451,13 +451,9 @@ pub fn peer_is_unnamed(fd: RawFd) -> bool {
         if rc != 0 || i32::from(addr.sun_family) != libc::AF_UNIX {
             return false;
         }
-        // A path starts with a byte; an unnamed socket's is zero. On Linux a
-        // zero first byte is also an abstract name, which the length gives
-        // away (`len` counts the name; macOS has no abstract sockets and
-        // reports a padded length).
-        let named_len =
-            (len as usize).saturating_sub(std::mem::offset_of!(libc::sockaddr_un, sun_path));
-        addr.sun_path[0] == 0 && (cfg!(not(target_os = "linux")) || named_len == 0)
+        // A path starts with a byte; an unnamed socket's is zero (macOS has
+        // no abstract sockets).
+        addr.sun_path[0] == 0
     }
 }
 
@@ -538,13 +534,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         false
-    }
-
-    #[test]
-    fn an_intact_endpoint_is_left_alone() {
-        let (_dir, run, mut endpoint, _listener) = bound();
-        assert!(endpoint.check(Instant::now()).is_none());
-        assert!(socket_path(&run).exists());
     }
 
     #[test]

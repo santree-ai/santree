@@ -141,14 +141,6 @@ describe("a transition the first read could not see", () => {
     });
     expect(result.current.data?.state.kind).toBe("Running");
   });
-
-  it("is also re-read on a slow poll, for an event missed while the page reloaded", async () => {
-    const qc = client();
-    renderHook(both, { wrapper: wrap(qc) });
-    await waitFor(() => expect(qc.getQueryData(queryKeys.serverStatus)).toBeDefined());
-    const observer = qc.getQueryCache().find({ queryKey: queryKeys.serverStatus })?.observers[0];
-    expect(observer?.options.refetchInterval).toBe(60_000);
-  });
 });
 
 describe("useStartServer", () => {

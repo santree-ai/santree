@@ -52,8 +52,9 @@ export interface AgentLaunchConfig {
   termKey?: string;
 }
 
-/** A session santree can actually launch — everything but a plain shell. */
-type LaunchableSession = Exclude<AgentSession, { type: "shell" }>;
+/** A session santree launches with its own flags: not a plain shell, and not an
+ *  attach, which runs no flags of ours ({@link agentSessionSeed}). */
+type LaunchableSession = Exclude<AgentSession, { type: "shell" | "attach" }>;
 
 /**
  * How one CLI spells a launch: three ordered lists of shell words that follow
@@ -317,6 +318,19 @@ export function agentSessionSeed(
   if (!session || session.type === "shell") return undefined;
   const spec = agentProvider(session.agentKind).launch;
   if (!spec) return undefined;
+
+  // The conversation is already running in Claude's daemon, with the flags it
+  // was started under, so none of santree's apply: `attach` is only a view onto
+  // it. No `env` pair either — the running session's hooks keep the attribution
+  // it was launched with.
+  if (session.type === "attach") {
+    return [
+      "exec",
+      shellQuote(session.executable),
+      "attach",
+      shellQuote(session.backgroundId),
+    ].join(" ");
+  }
 
   const scoped = scopedToSession(session, config);
   const words = [

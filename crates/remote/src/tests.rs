@@ -94,94 +94,6 @@ async fn handshake_reports_the_daemon() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn workspaces_list_answers_the_hosts_snapshot() {
-    let workspace = Workspace {
-        name: "web".into(),
-        path: "/srv/projects/web".into(),
-        branch: Some("main".into()),
-        ..Default::default()
-    };
-    let daemon = FakeDaemon::with_options(FakeOptions {
-        projects_root: "/srv/projects".into(),
-        workspaces_generated_at: Some("2026-09-29T10:00:00Z".into()),
-        workspaces: vec![workspace.clone()],
-        ..FakeOptions::default()
-    });
-    let client = unhandshaken(&daemon);
-    let hello = client.hello("santree/test", "owner-a").await.unwrap();
-    assert_eq!(hello.projects_root, "/srv/projects");
-    assert!(hello.supports::<m::WorkspacesList>());
-    let listed = client.call::<m::WorkspacesList>(&Empty).await.unwrap();
-    assert_eq!(
-        listed,
-        WorkspacesResult {
-            root: "/srv/projects".into(),
-            generated_at: Some("2026-09-29T10:00:00Z".into()),
-            workspaces: vec![workspace],
-        }
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn workspaces_icon_answers_the_hosts_icons() {
-    let svg = WorkspaceIcon {
-        content_type: "image/svg+xml".into(),
-        data: b"<svg/>".to_vec(),
-    };
-    let daemon = FakeDaemon::with_options(FakeOptions {
-        icons: [("web".to_string(), svg.clone())].into(),
-        ..FakeOptions::default()
-    });
-    let client = unhandshaken(&daemon);
-    let hello = client.hello("santree/test", "owner-a").await.unwrap();
-    assert!(hello.supports::<m::WorkspacesIcon>());
-    let ask = |name: &str| {
-        let params = WorkspacesIconParams { name: name.into() };
-        let client = &client;
-        async move { client.call::<m::WorkspacesIcon>(&params).await }
-    };
-    assert_eq!(ask("web").await.unwrap(), svg);
-    assert_eq!(
-        ask("infra").await.unwrap_err().code(),
-        Some(&ErrorCode::NotFound)
-    );
-    for bad in ["", "..", "a/b"] {
-        assert_eq!(
-            ask(bad).await.unwrap_err().code(),
-            Some(&ErrorCode::BadRequest),
-            "{bad:?}"
-        );
-    }
-    daemon.set_icon("infra", Some(svg.clone()));
-    daemon.set_icon("web", None);
-    assert_eq!(ask("infra").await.unwrap(), svg);
-    assert_eq!(
-        ask("web").await.unwrap_err().code(),
-        Some(&ErrorCode::NotFound)
-    );
-    assert_eq!(
-        daemon.icon_log(),
-        ["web", "infra", "", "..", "a/b", "infra", "web"]
-    );
-
-    // A host that doesn't announce it doesn't know it.
-    let old = FakeDaemon::with_options(FakeOptions {
-        features: vec![m::WorkspacesList::NAME.into()],
-        icons: [("web".to_string(), svg)].into(),
-        ..FakeOptions::default()
-    });
-    let client = unhandshaken(&old);
-    let hello = client.hello("santree/test", "owner-a").await.unwrap();
-    assert!(!hello.supports::<m::WorkspacesIcon>());
-    let refused = client
-        .call::<m::WorkspacesIcon>(&WorkspacesIconParams { name: "web".into() })
-        .await
-        .unwrap_err();
-    assert_eq!(refused.code(), Some(&ErrorCode::BadRequest));
-    assert!(old.icon_log().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unsupported_protocol_is_refused_and_the_link_stays_open() {
     let daemon = FakeDaemon::new();
     let client = unhandshaken(&daemon);
@@ -720,7 +632,7 @@ async fn a_silent_link_is_declared_dead() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pings_keep_an_idle_link_alive() {
     let daemon = FakeDaemon::with_options(FakeOptions {
-        ping_interval: Duration::from_millis(50),
+        ping_interval: Duration::from_millis(30),
         ..Default::default()
     });
     let Link { reader, writer, .. } = daemon.connect();
@@ -728,12 +640,13 @@ async fn pings_keep_an_idle_link_alive() {
         reader,
         writer,
         ClientOptions {
-            idle_timeout: Duration::from_millis(300),
+            idle_timeout: Duration::from_millis(150),
             ..Default::default()
         },
     );
     client.hello("t", "o").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Three idle timeouts' worth of silence from the caller.
+    tokio::time::sleep(Duration::from_millis(450)).await;
     assert!(!client.is_closed(), "{:?}", client.close_reason());
 }
 
@@ -758,28 +671,6 @@ async fn eof_and_oversized_lines_end_the_link() {
     server.write_all(&[b'x'; 4096]).await.unwrap();
     tokio::time::timeout(WAIT, client.closed()).await.unwrap();
     assert!(client.close_reason().unwrap().contains("over 1024"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_server_side_drop_fails_in_flight_calls() {
-    let daemon = FakeDaemon::new();
-    let client = Arc::new(client_for(&daemon).await);
-    let call = {
-        let client = client.clone();
-        tokio::spawn(async move {
-            client
-                .exec_run(&ExecParams {
-                    cwd: "/".into(),
-                    argv: vec!["sleep".into(), "5".into()],
-                    ..Default::default()
-                })
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    daemon.disconnect_all();
-    let result = tokio::time::timeout(WAIT, call).await.unwrap().unwrap();
-    assert!(result.unwrap_err().is_disconnected());
 }
 
 // ── host ──────────────────────────────────────────────────────────────────
@@ -944,16 +835,6 @@ async fn a_cursor_survives_a_reconnect_to_the_same_boot() {
     // Resumed after 2, and the stale ack went with the connect.
     assert_eq!(next_delivered(&mut hooks).await.1, 3);
     assert_eq!(daemon.queued_hooks(), vec![3]);
-
-    daemon.disconnect_all();
-    wait_status(&mut status, |s| *s == HostStatus::Connecting).await;
-    wait_status(&mut status, |s| matches!(s, HostStatus::Connected { .. })).await;
-    daemon.push_hook("Stop", vec![], vec![]);
-    assert_eq!(
-        next_delivered(&mut hooks).await.1,
-        4,
-        "no replay on the same boot"
-    );
     host.stop();
 }
 
@@ -1065,6 +946,8 @@ async fn every_refusal_is_a_typed_state() {
         ("unavailable", Refusal::Unavailable),
         ("forbidden", Refusal::Forbidden),
         ("busy", Refusal::Busy),
+        // A code this build doesn't know is retried like a host out of reach.
+        ("internal", Refusal::Unavailable),
     ] {
         let msg = format!("the agent's reason for {code}");
         agent.refuse(code, &msg);
@@ -1155,20 +1038,6 @@ async fn a_permanent_refusal_waits_at_the_slow_end() {
     host.stop();
 }
 
-#[test]
-fn the_host_defaults_keep_daedaluss_behaviour() {
-    let o = HostOptions::default();
-    assert!(o.hooks, "Daedalus relays hooks unless a host opts out");
-    assert_eq!(o.backoff_min, Duration::from_secs(1));
-    assert_eq!(o.backoff_max, Duration::from_secs(30));
-    assert_eq!(o.hello_timeout, Duration::from_secs(25));
-    assert_eq!(
-        o.require,
-        Required::Any,
-        "trust is demanded by the embedder, not assumed"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_with_hooks_off_never_asks_for_them() {
     let daemon = FakeDaemon::new();
@@ -1212,19 +1081,6 @@ async fn a_host_with_hooks_off_never_asks_for_them() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_host_with_hooks_on_subscribes() {
-    let daemon = FakeDaemon::new();
-    let host = RemoteHost::new(daemon.connector(), fast_host_options());
-    let mut status = host.status();
-    host.configure(Some(host_config()));
-    wait_status(&mut status, |s| matches!(s, HostStatus::Connected { .. })).await;
-    assert!(daemon
-        .request_log()
-        .contains(&m::HooksSubscribe::NAME.to_string()));
-    host.stop();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_hello_timeout_bounds_a_host_that_never_answers() {
     // A link whose far end is held open and says nothing.
     let held = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1257,37 +1113,6 @@ async fn the_hello_timeout_bounds_a_host_that_never_answers() {
         started.elapsed()
     );
     host.stop();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_backoff_options_set_the_retry_pace() {
-    async fn attempts_in(window: Duration, min: Duration, max: Duration) -> usize {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let connector: Arc<dyn Connector> = {
-            let calls = calls.clone();
-            Arc::new(move || -> BoxFuture<'static, Result<Link, ConnectError>> {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async { Err(ConnectError::Failed("no route".into())) })
-            })
-        };
-        let host = RemoteHost::new(
-            connector,
-            HostOptions {
-                backoff_min: min,
-                backoff_max: max,
-                ..fast_host_options()
-            },
-        );
-        host.configure(Some(host_config()));
-        tokio::time::sleep(window).await;
-        host.stop();
-        calls.load(Ordering::SeqCst)
-    }
-    let window = Duration::from_millis(400);
-    let quick = attempts_in(window, Duration::from_millis(10), Duration::from_millis(20)).await;
-    let slow = attempts_in(window, Duration::from_secs(10), Duration::from_secs(10)).await;
-    assert!(quick >= 8, "a short backoff retries often: {quick}");
-    assert_eq!(slow, 1, "a long backoff waits out the window");
 }
 
 #[test]

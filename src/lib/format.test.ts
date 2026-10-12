@@ -1,18 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  diffLabel,
-  formatCompact,
-  formatCostPrecise,
-  formatUntil,
-  formatUntilPrecise,
-} from "./format";
+import { formatCompact, formatCostPrecise, formatUntil, formatUntilPrecise } from "./format";
 
 describe("format helpers", () => {
-  it("formats a diff with a real minus sign", () => {
-    expect(diffLabel(312, 47)).toBe("+312 −47");
-  });
-
   it("formats a compact count, dropping a trailing .0", () => {
     expect(formatCompact(null)).toBe("0");
     expect(formatCompact(812)).toBe("812");
@@ -31,13 +21,10 @@ describe("format helpers", () => {
 describe("formatCostPrecise", () => {
   /** The whole point: a sub-cent spend at two decimals is "$0.00", which a
    *  reader takes as free. Four decimals keeps a real number visible. */
-  it("keeps four decimals below a cent", () => {
+  it("keeps four decimals below a cent, two from a cent up", () => {
     expect(formatCostPrecise(0.0037)).toBe("$0.0037");
     expect(formatCostPrecise(0.00004)).toBe("$0.0000");
     expect(formatCostPrecise(0.0099)).toBe("$0.0099");
-  });
-
-  it("uses two decimals from a cent up, with thousands separators", () => {
     expect(formatCostPrecise(0.41)).toBe("$0.41");
     expect(formatCostPrecise(0.01)).toBe("$0.01");
     expect(formatCostPrecise(1204)).toBe("$1,204.00");
@@ -65,12 +52,9 @@ describe("countdown formatters", () => {
     expect(formatUntilPrecise(now + 1_000, now)).toBe("1s");
   });
 
-  it("hands anything over a minute back to the coarse formatter", () => {
+  it("hands anything over a minute back to the coarse formatter, and says now once passed", () => {
     expect(formatUntilPrecise(now + 90_000, now)).toBe("2m");
     expect(formatUntilPrecise(now + 3_600_000, now)).toBe("1h");
-  });
-
-  it("says now once the window has passed", () => {
     expect(formatUntilPrecise(now, now)).toBe("now");
     expect(formatUntilPrecise(now - 5_000, now)).toBe("now");
   });

@@ -493,29 +493,31 @@ mod tests {
         assert_eq!(result.get(&("acme/web".into(), 43)), Some(&1));
     }
 
+    /// The gate: a draft anchored to an older head, or to another pull request,
+    /// is refused before anything reaches GitHub, and stays a draft.
     #[tokio::test]
-    async fn a_draft_from_an_older_head_is_refused_rather_than_misplaced() {
-        let db = db_with("stale", &[("d1", "acme/web", 42, "0000000", "src/a.rs")]).await;
-        let out = publish_with(&db, "acme/web", 42, &anchor(), &["d1".into()], |_| async {
-            panic!("must never reach GitHub")
-        })
-        .await
-        .unwrap();
-        assert_eq!(out.published, 0);
-        assert!(out.failed.unwrap().error.contains("earlier commit"));
+    async fn a_draft_that_cannot_be_placed_never_reaches_github() {
+        let db = db_with(
+            "refused",
+            &[
+                ("stale", "acme/web", 42, "0000000", "src/a.rs"),
+                ("elsewhere", "acme/other", 7, "abc1234", "src/a.rs"),
+            ],
+        )
+        .await;
+        for (id, why) in [
+            ("stale", "earlier commit"),
+            ("elsewhere", "different pull request"),
+        ] {
+            let out = publish_with(&db, "acme/web", 42, &anchor(), &[id.into()], |_| async {
+                panic!("must never reach GitHub")
+            })
+            .await
+            .unwrap();
+            assert_eq!(out.published, 0);
+            assert!(out.failed.unwrap().error.contains(why), "{id}");
+        }
         assert_eq!(list(&db, "acme/web", 42).await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_draft_from_another_pull_request_is_not_reachable() {
-        let db = db_with("scoped", &[("d1", "acme/other", 7, "abc1234", "src/a.rs")]).await;
-        let out = publish_with(&db, "acme/web", 42, &anchor(), &["d1".into()], |_| async {
-            panic!("must never reach GitHub")
-        })
-        .await
-        .unwrap();
-        assert_eq!(out.published, 0);
-        assert!(out.failed.unwrap().error.contains("different pull request"));
     }
 
     #[tokio::test]

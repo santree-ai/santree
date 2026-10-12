@@ -182,28 +182,6 @@ describe("TerminalLayer", () => {
     vi.unstubAllGlobals();
   });
 
-  test("sits exactly on the host rect, and clips what it draws to it", async () => {
-    const { container } = render(
-      <TerminalsProvider>
-        <Host box={{ top: 46, left: 260, width: 800, height: 520 }} />
-        <TerminalLayer />
-      </TerminalsProvider>,
-    );
-
-    const layer = await settled(container);
-    expect(geometry(layer)).toEqual({
-      top: "46px",
-      left: "260px",
-      width: "800px",
-      height: "520px",
-    });
-    // The clip is the half of the fix that holds at ANY drag speed: xterm sizes
-    // its screen element from the grid, not from this box, and nothing in xterm's
-    // own stylesheet keeps an over-sized canvas inside the pane.
-    expect(layer.className).toContain("overflow-hidden");
-    expect(layer.className).not.toContain("invisible");
-  });
-
   // The regression. The observer fires after layout and before paint, so the new
   // geometry has to be on the element by the time that callback returns. It used
   // to go through React state instead, which lands a frame later — during a fast
@@ -265,7 +243,8 @@ describe("TerminalLayer", () => {
 
   // A split main area shows a terminal in each group at once. Each session has
   // its own pane, and each pane sits on its own host — not one overlay that only
-  // the newest claim gets.
+  // the newest claim gets. The clip is the half of the drag fix that holds at ANY
+  // speed: xterm sizes its screen element from the grid, not from this box.
   test("shows two embedded sessions at once, each on its own host", async () => {
     const left = { top: 46, left: 260, width: 400, height: 520 };
     const right = { top: 46, left: 661, width: 399, height: 520 };
@@ -320,24 +299,11 @@ describe("TerminalLayer session lifetime", () => {
   const livePane = async (nth: number) =>
     await waitFor(() => expect(renderers.live[nth]?.input).toBeDefined());
 
-  test("a pane that goes away detaches its session and never closes it", async () => {
-    const { unmount } = mount({ title: "shell", source: "shell", refId: fixture.freshRef });
-    await livePane(0);
-    expect(backend.open).toHaveBeenCalledTimes(1);
-
-    // The user navigated away, or the window reloaded. Neither is a decision to
-    // stop the process.
-    unmount();
-
-    expect(backend.detach).toHaveBeenCalledWith(fixture.openedId);
-    expect(backend.close).not.toHaveBeenCalled();
-  });
-
-  /** The other half: what the pane does on the way back in. The session is still
-   *  running, and the layer finds it by the pane's full address — surface plus
+  /** A pane going away detaches and never closes; on the way back the session is
+   *  still running, and the layer finds it by the pane's full address — surface plus
    *  provider — so a reload re-attaches rather than spawning a second agent
    *  beside the one already working. */
-  test("a pane that comes back attaches to the live session instead of opening a second", async () => {
+  test("a pane that goes away detaches, and one that comes back re-attaches instead of opening a second", async () => {
     const spec: EmbeddedTerminalSpec = {
       title: "AK-1",
       source: "issue",

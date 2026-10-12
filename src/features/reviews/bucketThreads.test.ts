@@ -43,22 +43,17 @@ function draft(id: string, over: Partial<ReviewDraft> = {}): ReviewDraft {
 }
 
 describe("bucketAnnotations", () => {
-  it("puts right-side threads on the new file and left-side ones on the old file", () => {
-    const right = thread("T_right", { line: 10, onRight: true });
-    const left = thread("T_left", { line: 4, onRight: false });
-    const { oldFile, newFile } = bucketAnnotations([right, left]);
-
-    expect(newFile).toEqual({ "10": { data: [{ kind: "thread", thread: right }] } });
-    expect(oldFile).toEqual({ "4": { data: [{ kind: "thread", thread: left }] } });
-  });
-
-  it("keeps both sides' threads when they share a line number", () => {
+  it("puts each side's threads and drafts on its own file, even on a shared line number", () => {
     const right = thread("T_right", { line: 7, onRight: true });
     const left = thread("T_left", { line: 7, onRight: false });
-    const { oldFile, newFile } = bucketAnnotations([right, left]);
+    const leftDraft = draft("d2", { line: 4, onRight: false });
+    const { oldFile, newFile } = bucketAnnotations([right, left], [leftDraft]);
 
-    expect(newFile["7"].data).toEqual([{ kind: "thread", thread: right }]);
-    expect(oldFile["7"].data).toEqual([{ kind: "thread", thread: left }]);
+    expect(newFile).toEqual({ "7": { data: [{ kind: "thread", thread: right }] } });
+    expect(oldFile).toEqual({
+      "7": { data: [{ kind: "thread", thread: left }] },
+      "4": { data: [{ kind: "draft", draft: leftDraft }] },
+    });
   });
 
   it("stacks several threads on one line, in order", () => {
@@ -95,12 +90,5 @@ describe("bucketAnnotations", () => {
       { kind: "thread", thread: posted },
       { kind: "draft", draft: d },
     ]);
-  });
-
-  it("puts a left-side draft on the old file", () => {
-    const d = draft("d2", { line: 4, onRight: false });
-    const { oldFile, newFile } = bucketAnnotations([], [d]);
-    expect(oldFile["4"].data).toEqual([{ kind: "draft", draft: d }]);
-    expect(newFile).toEqual({});
   });
 });

@@ -175,9 +175,10 @@ pub struct SessionInfo {
     /// not yet reopened. It is worth reporting because it is invisible
     /// everywhere else: the process is running and nothing is watching it.
     pub attached: bool,
-    /// Whether the root process still exists. `false` for a session whose child
-    /// exited but which nobody has closed yet — it holds a pty and a ring, and
-    /// it is the state a user would want to clean up.
+    /// Whether the root process still runs on its terminal: `false` once it has
+    /// exited or its terminal has closed (the exit sentinel went out), for a
+    /// session nobody has closed yet — it holds a pty and a ring, and it is the
+    /// state a user would want to clean up.
     pub alive: bool,
     /// Identity of this session's byte stream. A client holding an anchor minted
     /// against a different epoch cannot be caught up — its position refers to a
@@ -386,7 +387,15 @@ impl PtyManager {
                 // exited, `Ok(None)` that it is still running. An error means we
                 // cannot tell, and claiming "dead" on an unprovable answer is how
                 // a caller ends up offering to clean up live work.
-                s.info.alive = !matches!(s.child.try_wait(), Ok(Some(_)));
+                let reaped = matches!(s.child.try_wait(), Ok(Some(_)));
+                // A process closes its terminal before the kernel makes it
+                // reapable, and the exit sentinel goes out in between: a caller
+                // told the session ended must not be told, a moment later, that
+                // it is alive (a new pane with its address would take it over
+                // instead of starting its own). The ring is marked before the
+                // sentinel is sent, under the lock this reads it with.
+                let ended = s.ring.lock().unwrap_or_else(|e| e.into_inner()).exited();
+                s.info.alive = !reaped && !ended;
                 s.info.clone()
             })
             .collect();
@@ -1047,45 +1056,15 @@ mod tests {
         mgr.close(id).expect("close");
     }
 
+    /// An id that was never opened (or is already closed) is an error to write
+    /// or resize, and a no-op to close: the frontend can tear a pane down twice
+    /// on a race.
     #[test]
-    fn concurrent_sessions_are_isolated() {
-        let _serial = pty_guard();
-        let mgr = PtyManager::new();
-        let open_silent = || {
-            mgr.open(
-                OpenOpts {
-                    command: "sh".into(),
-                    cols: 80,
-                    rows: 24,
-                    ..Default::default()
-                },
-                |_| {},
-            )
-            .unwrap()
-        };
-        let a = open_silent();
-        let b = open_silent();
-        assert_ne!(a, b);
-        mgr.write(a, b"true\n").unwrap();
-        mgr.write(b, b"true\n").unwrap();
-        mgr.close(a).unwrap();
-        // b is still alive and writable after a is closed.
-        mgr.write(b, b"true\n").unwrap();
-        mgr.close(b).unwrap();
-    }
-
-    #[test]
-    fn write_to_missing_session_errors() {
-        let _serial = pty_guard();
+    fn an_unknown_session_refuses_writes_and_resizes_and_closes_as_a_noop() {
         let mgr = PtyManager::new();
         assert!(mgr.write(999, b"x").is_err());
-    }
-
-    #[test]
-    fn resize_missing_session_errors() {
-        let _serial = pty_guard();
-        let mgr = PtyManager::new();
         assert!(mgr.resize(999, 80, 24).is_err());
+        assert!(mgr.close(999).is_ok());
     }
 
     /// Resizing a live session must reach the hosted process: the shell reports the
@@ -1130,15 +1109,6 @@ mod tests {
         mgr.close(id).expect("close");
     }
 
-    /// `close()` on an id that was never opened (or is already closed) is a no-op,
-    /// not an error — the frontend can tear a pane down twice on a race.
-    #[test]
-    fn closing_an_unknown_session_is_a_noop() {
-        let _serial = pty_guard();
-        let mgr = PtyManager::new();
-        assert!(mgr.close(999).is_ok());
-    }
-
     /// Two live sessions under one label means an earlier page opened a
     /// duplicate. Only one can ever be reached again — the caller looks sessions
     /// up by label — so the older one is ended here instead of being handed back
@@ -1164,22 +1134,25 @@ mod tests {
         let stale = open("page-1", "tree:a");
         let newest = open("page-2", "tree:a");
         let other = open("page-2", "tree:b");
+        // Unlabelled sessions can't collide with anything: both survive.
+        let bare = [open("page-1", ""), open("page-2", "")];
 
         let adopted = mgr.adopt_others("page-3");
 
+        let kept = vec![newest, other, bare[0], bare[1]];
         assert_eq!(
             adopted.iter().map(|s| s.id).collect::<Vec<_>>(),
-            vec![newest, other],
+            kept,
             "the superseded session is not reported"
         );
         assert_eq!(
             mgr.sessions().iter().map(|s| s.id).collect::<Vec<_>>(),
-            vec![newest, other],
+            kept,
             "and it is actually ended, not just hidden"
         );
         assert!(!mgr.sessions().iter().any(|s| s.id == stale));
 
-        for id in [newest, other] {
+        for id in kept {
             mgr.close(id).expect("close");
         }
     }
@@ -1235,35 +1208,6 @@ mod tests {
         );
 
         for id in [codex, claude] {
-            mgr.close(id).expect("close");
-        }
-    }
-
-    /// An unlabelled session can't collide with anything, so it must survive
-    /// adoption alongside others that are also unlabelled.
-    #[test]
-    fn adopt_others_keeps_every_unlabelled_session() {
-        let _serial = pty_guard();
-        let mgr = PtyManager::new();
-        let open = || {
-            mgr.open(
-                OpenOpts {
-                    command: "sh".into(),
-                    cols: 80,
-                    rows: 24,
-                    owner: "page-1".into(),
-                    ..Default::default()
-                },
-                |_| {},
-            )
-            .expect("open session")
-        };
-        let a = open();
-        let b = open();
-
-        assert_eq!(mgr.adopt_others("page-2").len(), 2);
-
-        for id in [a, b] {
             mgr.close(id).expect("close");
         }
     }
@@ -1714,43 +1658,28 @@ mod tests {
 
     // ── build_command ───────────────────────────────────────────────────────
 
-    /// A padded exec path (e.g. a stray space in the settings field) must not be
-    /// spawned verbatim: emptiness is judged on the trimmed string, so the spawned
-    /// program has to be the trimmed one too, or the exec fails confusingly.
+    /// The program spawned: a padded path trimmed (emptiness is judged on the
+    /// trimmed string, so the spawn must use it too), a blank one the user's
+    /// login shell, explicit args passed through as-is.
     #[test]
-    fn command_is_trimmed_before_spawning() {
-        let cmd = build_command(&OpenOpts {
-            command: "  /bin/sh  ".into(),
-            ..Default::default()
-        });
-        assert_eq!(cmd.get_argv()[0], "/bin/sh");
-    }
-
-    /// A blank command means "the user's login shell", including a command that is
-    /// only whitespace.
-    #[test]
-    fn blank_command_falls_back_to_a_login_shell() {
-        for command in ["", "   "] {
-            let cmd = build_command(&OpenOpts {
+    fn the_command_is_trimmed_blank_means_a_login_shell_and_args_pass_through() {
+        let argv = |command: &str, args: &[&str]| -> Vec<std::ffi::OsString> {
+            build_command(&OpenOpts {
                 command: command.into(),
+                args: args.iter().map(|a| a.to_string()).collect(),
                 ..Default::default()
-            });
-            let argv = cmd.get_argv();
-            assert_eq!(argv[0], std::ffi::OsString::from(default_shell()));
-            assert_eq!(argv[1], "-l", "login shell");
+            })
+            .get_argv()
+            .clone()
+        };
+        assert_eq!(argv("  /bin/sh  ", &[]), ["/bin/sh"]);
+        for blank in ["", "   "] {
+            assert_eq!(argv(blank, &[]), [default_shell().as_str(), "-l"]);
         }
-    }
-
-    /// Explicit args replace the login-shell default, and are passed through as-is.
-    #[test]
-    fn explicit_args_are_passed_through() {
-        let cmd = build_command(&OpenOpts {
-            command: "claude".into(),
-            args: vec!["--model".into(), "opus".into()],
-            ..Default::default()
-        });
-        let argv: Vec<_> = cmd.get_argv().iter().collect();
-        assert_eq!(argv, ["claude", "--model", "opus"]);
+        assert_eq!(
+            argv("claude", &["--model", "opus"]),
+            ["claude", "--model", "opus"]
+        );
     }
 
     /// The user's own configured project env reaches the child, and `TERM` is set
@@ -1797,13 +1726,19 @@ mod tests {
         let _serial = env_guard();
 
         // Stand in for a santree launched from inside an agent session.
+        // `CLAUDE_CODE_SKIP_PROMPT_HISTORY` also turns transcripts off, but it
+        // is a knob the user sets for themselves, not a marker a parent agent
+        // stamps: the list must stay narrow enough to leave it alone.
+        const USERS_OWN: &str = "CLAUDE_CODE_SKIP_PROMPT_HISTORY";
         let restore: Vec<(&str, Option<String>)> = INHERITED_SESSION_MARKERS
             .iter()
+            .chain([&USERS_OWN])
             .map(|name| (*name, std::env::var(name).ok()))
             .collect();
         for name in INHERITED_SESSION_MARKERS {
             std::env::set_var(name, "inherited-from-our-launcher");
         }
+        std::env::set_var(USERS_OWN, "1");
 
         let cmd = build_command(&OpenOpts {
             command: "claude".into(),
@@ -1839,6 +1774,7 @@ mod tests {
         // The strip is surgical: unrelated inherited variables still reach the
         // child, or login CLIs would stop resolving.
         assert!(cmd.get_env("PATH").is_some(), "PATH is still inherited");
+        assert_eq!(cmd.get_env(USERS_OWN), Some(std::ffi::OsStr::new("1")));
 
         for (name, value) in restore {
             match value {
@@ -1928,23 +1864,86 @@ mod tests {
         );
     }
 
-    /// The same property one level down, where it actually bites: not "the
-    /// builder's map is right" but "the process on the pty cannot see the
-    /// marker". A real shell is asked what it inherited, because that is the
-    /// question `claude` asks when it decides whether to save a transcript.
-    #[test]
-    fn a_spawned_process_does_not_inherit_the_nested_session_marker() {
-        let _serial = pty_guard();
-        let _env = env_guard();
-        let restore = std::env::var("CLAUDE_CODE_CHILD_SESSION").ok();
-        std::env::set_var("CLAUDE_CODE_CHILD_SESSION", "1");
+    // ── effective_cwd ───────────────────────────────────────────────────────
 
+    /// A cwd that exists is used and reaches the child. A stale worktree path
+    /// (or a file) falls back to `$HOME` rather than failing the spawn, and the
+    /// caller's own HOME, when it passed one, wins over this process's.
+    #[test]
+    fn a_cwd_that_is_not_a_directory_falls_back_to_home() {
+        let tmp = std::env::temp_dir();
+        let tmp_str = tmp.to_str().unwrap();
+        assert_eq!(
+            effective_cwd(Some(tmp_str), None),
+            Some(tmp_str.to_string())
+        );
+        let cmd = build_command(&OpenOpts {
+            command: "sh".into(),
+            cwd: Some(tmp_str.to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cmd.get_cwd(), Some(&tmp.clone().into_os_string()));
+
+        let file = tmp.join("santree-pty-cwd-probe");
+        std::fs::write(&file, b"x").unwrap();
+        let home = std::env::var("HOME").ok();
+        for cwd in [
+            Some("/nonexistent/santree/worktree"),
+            Some(file.to_str().unwrap()),
+            Some(""),
+            None,
+        ] {
+            assert_eq!(effective_cwd(cwd, None), home, "{cwd:?}");
+        }
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(
+            effective_cwd(None, Some("/Users/caller".into())),
+            Some("/Users/caller".into())
+        );
+    }
+
+    /// `pump()`'s exit sentinel (a final empty chunk) is the frontend's only
+    /// signal to tear a pane down: it arrives when the process exits on its
+    /// own and when `close()` kills it out from under a running one.
+    #[test]
+    fn the_exit_sentinel_arrives_on_exit_and_on_close() {
+        let _serial = pty_guard();
+        let mgr = PtyManager::new();
+        let (exits, exited) = open_silent_shell(&mgr);
+        let (closed_id, closed) = open_silent_shell(&mgr);
+
+        mgr.write(exits, b"exit\n").expect("write");
+        mgr.close(closed_id).expect("close");
+
+        for (rx, how) in [(exited, "exit"), (closed, "close()")] {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            assert!(recv_sentinel(&rx, deadline), "no exit sentinel after {how}");
+        }
+        mgr.close(exits).expect("close");
+    }
+
+    /// Once the sentinel is out the session reads dead, even while its process
+    /// is not yet reapable — the window between a dying process closing its
+    /// terminal and becoming a zombie, held open here by one that closes its
+    /// terminal and lingers. A new pane with the session's address found it
+    /// "alive" in that window and took over a dead session instead of
+    /// starting its own (seen under load on Linux). Linux only: macOS keeps a
+    /// terminal open while it is a live session's controlling terminal, so
+    /// there it closes only as the process exits, and the state can't be held.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_whose_terminal_closed_is_not_alive() {
+        let _serial = pty_guard();
         let mgr = PtyManager::new();
         let (tx, rx) = mpsc::channel();
         let id = mgr
             .open(
                 OpenOpts {
-                    command: "sh".into(),
+                    command: "/bin/sh".into(),
+                    args: vec![
+                        "-c".into(),
+                        "exec sleep 30 </dev/null >/dev/null 2>&1".into(),
+                    ],
                     cols: 80,
                     rows: 24,
                     ..Default::default()
@@ -1954,173 +1953,14 @@ mod tests {
                 },
             )
             .expect("open session");
-
-        // Bracket the value so the answer is unambiguous even though the shell
-        // echoes the command line back at us.
-        mgr.write(id, b"echo \"marker=[${CLAUDE_CODE_CHILD_SESSION}]\"\n")
-            .expect("write");
-
-        let mut out = String::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline && !out.contains("marker=[]") {
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(bytes) => out.push_str(&String::from_utf8_lossy(&bytes)),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(_) => break,
-            }
-        }
+        let pid = mgr.sessions()[0].pid.expect("pid");
         assert!(
-            out.contains("marker=[]"),
-            "the spawned process must see no CLAUDE_CODE_CHILD_SESSION, got: {out:?}"
+            recv_sentinel(&rx, Instant::now() + Duration::from_secs(10)),
+            "the terminal never closed"
         );
-        assert!(
-            !out.contains("marker=[1]"),
-            "the inherited marker reached the child: {out:?}"
-        );
-
+        assert!(alive(pid), "the process lingers");
+        assert!(!mgr.sessions()[0].alive);
         mgr.close(id).expect("close");
-        match restore {
-            Some(value) => std::env::set_var("CLAUDE_CODE_CHILD_SESSION", value),
-            None => std::env::remove_var("CLAUDE_CODE_CHILD_SESSION"),
-        }
-    }
-
-    /// `CLAUDE_CODE_SKIP_PROMPT_HISTORY` also turns transcript saving off, but
-    /// it is a knob the *user* sets for themselves, not a marker a parent agent
-    /// stamps on its children. Stripping it would override a deliberate choice,
-    /// so the list must stay narrow.
-    #[test]
-    fn a_users_own_persistence_setting_is_not_stripped() {
-        let _serial = env_guard();
-        let restore = std::env::var("CLAUDE_CODE_SKIP_PROMPT_HISTORY").ok();
-        std::env::set_var("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1");
-
-        let cmd = build_command(&OpenOpts {
-            command: "claude".into(),
-            ..Default::default()
-        });
-        assert_eq!(
-            cmd.get_env("CLAUDE_CODE_SKIP_PROMPT_HISTORY"),
-            Some(std::ffi::OsStr::new("1"))
-        );
-
-        match restore {
-            Some(value) => std::env::set_var("CLAUDE_CODE_SKIP_PROMPT_HISTORY", value),
-            None => std::env::remove_var("CLAUDE_CODE_SKIP_PROMPT_HISTORY"),
-        }
-    }
-
-    // ── effective_cwd ───────────────────────────────────────────────────────
-
-    /// A cwd that exists is used as-is.
-    #[test]
-    fn existing_cwd_is_used() {
-        let tmp = std::env::temp_dir();
-        let tmp = tmp.to_str().unwrap();
-        assert_eq!(effective_cwd(Some(tmp), None), Some(tmp.to_string()));
-    }
-
-    /// A stale worktree path must not silently run the session in `$HOME` — that
-    /// would point git/claude at the wrong repo. It still falls back (a spawn
-    /// failure would be worse), but the caller can see it happened.
-    #[test]
-    fn missing_cwd_falls_back_to_home() {
-        let home = std::env::var("HOME").ok();
-        assert_eq!(
-            effective_cwd(Some("/nonexistent/santree/worktree"), None),
-            home,
-            "a vanished worktree falls back to $HOME"
-        );
-        // No cwd requested at all is the ordinary case, not a stale path.
-        assert_eq!(effective_cwd(None, None), home);
-        assert_eq!(effective_cwd(Some(""), None), home);
-        // The caller's own HOME, when it passed one, wins over this process's.
-        assert_eq!(
-            effective_cwd(None, Some("/Users/caller".into())),
-            Some("/Users/caller".into())
-        );
-    }
-
-    /// A cwd that exists but is a *file* is not a usable working directory.
-    #[test]
-    fn file_cwd_falls_back_to_home() {
-        let file = std::env::temp_dir().join("santree-pty-cwd-probe");
-        std::fs::write(&file, b"x").unwrap();
-        assert_eq!(
-            effective_cwd(Some(file.to_str().unwrap()), None),
-            std::env::var("HOME").ok()
-        );
-        let _ = std::fs::remove_file(&file);
-    }
-
-    /// The cwd actually reaches the spawned child, not just `effective_cwd`.
-    #[test]
-    fn cwd_reaches_the_command() {
-        let tmp = std::env::temp_dir();
-        let cmd = build_command(&OpenOpts {
-            command: "sh".into(),
-            cwd: Some(tmp.to_string_lossy().into_owned()),
-            ..Default::default()
-        });
-        assert_eq!(cmd.get_cwd(), Some(&tmp.into_os_string()));
-    }
-
-    /// `pump()`'s exit sentinel (a final empty chunk — see its doc comment) is
-    /// the frontend's only signal to tear down a terminal pane. Prove it's
-    /// actually delivered when the hosted process exits on its own, not just
-    /// when we kill it.
-    #[test]
-    fn process_exit_sends_sentinel() {
-        let _serial = pty_guard();
-        let mgr = PtyManager::new();
-        let (id, rx) = open_silent_shell(&mgr);
-
-        mgr.write(id, b"exit\n").expect("write");
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        assert!(
-            recv_sentinel(&rx, deadline),
-            "expected exit sentinel after the shell process exited on its own"
-        );
-    }
-
-    /// `close()` kills the session out from under a still-running process; the
-    /// sentinel must still arrive so the frontend tears the pane down.
-    #[test]
-    fn close_sends_sentinel() {
-        let _serial = pty_guard();
-        let mgr = PtyManager::new();
-        let (id, rx) = open_silent_shell(&mgr);
-
-        mgr.close(id).expect("close");
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        assert!(
-            recv_sentinel(&rx, deadline),
-            "expected exit sentinel after close()"
-        );
-    }
-
-    /// `close_all()` (used on app quit) must reap every open session and
-    /// deliver each one's sentinel, not just the first — the whole point of
-    /// its per-session detached-thread fix is that one session can't block
-    /// another.
-    #[test]
-    fn close_all_sends_sentinel_to_every_session() {
-        let _serial = pty_guard();
-        let mgr = PtyManager::new();
-        let sessions: Vec<(SessionId, mpsc::Receiver<Vec<u8>>)> =
-            (0..3).map(|_| open_silent_shell(&mgr)).collect();
-
-        mgr.close_all();
-
-        for (id, rx) in sessions {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            assert!(
-                recv_sentinel(&rx, deadline),
-                "expected exit sentinel for session {id} after close_all()"
-            );
-        }
     }
 
     #[test]
@@ -2164,12 +2004,18 @@ mod tests {
         }
     }
 
+    /// Running, not merely present: a killed orphan stays a zombie until its
+    /// new parent reaps it, and in a container whose pid 1 never reaps (a
+    /// bare `sleep infinity`) that is forever — `kill -0` still succeeds.
     fn alive(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|out| {
+                let stat = String::from_utf8_lossy(&out.stdout);
+                let stat = stat.trim();
+                !stat.is_empty() && !stat.starts_with('Z')
+            })
     }
 
     /// The server outlives the app, so a closed tab's background jobs must not

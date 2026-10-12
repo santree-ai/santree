@@ -2633,12 +2633,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The whole setup pipeline on its happy path, through a real PTY: the script's
-    /// output is classified and streamed (a `\r`-terminated frame is a transient
-    /// `Progress` redraw, a `\n`-terminated one a committed `Line` — the PTY is where
-    /// `drain_setup_events` meets real bytes, `\r\n` line endings and all), the run
-    /// closes with `Done { ok: true }`, and the success is *persisted* so the Trees
-    /// tab doesn't offer to run setup again on the next refresh.
     /// Start a gated setup run in the background, returning its handle and event log.
     fn start_setup(db: &Db) -> (tokio::task::JoinHandle<Result<()>>, Arc<Mutex<Vec<String>>>) {
         let (channel, log) = recording_channel();
@@ -2654,18 +2648,32 @@ mod tests {
     /// `Progress` redraw, a `\n`-terminated one a committed `Line` — the pty is where
     /// `drain_setup_events` meets real bytes, `\r\n` endings and all), the run closes
     /// with `Done { ok: true }`, and the success is *persisted* so the Trees tab stops
-    /// offering to run setup again on the next refresh.
+    /// offering to run setup again on the next refresh. A script that *fails*
+    /// first reports it — its stderr folded onto the same pty — and is NOT
+    /// recorded: marking it done would hide the missing setup forever.
     #[tokio::test]
-    async fn a_successful_setup_streams_its_output_and_is_recorded() {
+    async fn a_setup_streams_its_output_and_only_a_success_is_recorded() {
         let _serial = crate::stream::pty_guard().await;
         let (base, repo_dir, db) = test_repo("setup-success").await;
         spawn_worktree(&db, "AK-1").await;
-        assert!(
-            !get(&db, &test_root(&db).await, "AK-1")
+        let setup_ran = || async {
+            get(&db, &test_root(&db).await, "AK-1")
                 .await
                 .unwrap()
                 .unwrap()
                 .setup_ran
+        };
+
+        let gate = base.join("fail-gate");
+        write_init_script(&repo_dir, &gated_script("echo nope >&2", &gate, 3));
+        let (run, log) = start_setup(&db);
+        wait_for(&log, "nope").await;
+        std::fs::write(&gate, "").unwrap();
+        run.await.unwrap().unwrap();
+        assert!(events_contain(&log, r#""ok":false"#));
+        assert!(
+            !setup_ran().await,
+            "a failed setup must not be marked as run"
         );
 
         // A redrawing progress bar (`printf`, not `echo`, so the `\r` stands alone),
@@ -2686,44 +2694,7 @@ mod tests {
             events_contain(&log, r#""ok":true"#),
             "the run reports success"
         );
-        assert!(
-            get(&db, &test_root(&db).await, "AK-1")
-                .await
-                .unwrap()
-                .unwrap()
-                .setup_ran,
-            "a successful setup is recorded, so the tab stops offering to re-run it"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// A script that *fails* (exits non-zero) reports the failure — with its own output,
-    /// stderr folded onto the same pty so the log stays ordered — and must NOT be
-    /// recorded as run: the worktree still needs its setup, and marking it done would
-    /// hide that from the Trees tab forever.
-    #[tokio::test]
-    async fn a_failing_setup_script_is_not_recorded_as_run() {
-        let _serial = crate::stream::pty_guard().await;
-        let (base, repo_dir, db) = test_repo("setup-failure").await;
-        spawn_worktree(&db, "AK-1").await;
-        let gate = base.join("gate");
-        write_init_script(&repo_dir, &gated_script("echo nope >&2", &gate, 3));
-
-        let (run, log) = start_setup(&db);
-        wait_for(&log, "nope").await;
-        std::fs::write(&gate, "").unwrap();
-        run.await.unwrap().unwrap();
-
-        assert!(events_contain(&log, r#""ok":false"#));
-        assert!(
-            !get(&db, &test_root(&db).await, "AK-1")
-                .await
-                .unwrap()
-                .unwrap()
-                .setup_ran,
-            "a failed setup must not be marked as run"
-        );
+        assert!(setup_ran().await, "a successful setup is recorded");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2954,6 +2925,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        assert_eq!((wt.title.as_str(), wt.branch.as_str()), ("main", "main"));
         assert_eq!(
             wt.behind, 1,
             "the base card must freshen origin/<branch> before measuring against it"
@@ -2962,20 +2934,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The base card *is* the repo root as it stands: its dirty/behind/unpushed stats
-    /// and its commit box all act on HEAD. So when the root is checked out on a feature
-    /// branch it must say so — labelling that branch's state "main" (and committing to
-    /// it) is how you commit to the wrong branch.
+    /// The base card *is* the repo root as it stands: its stats and commit box
+    /// all act on HEAD. So when the root is checked out on a feature branch it
+    /// must say so — labelling that branch's state "main" (and committing to it)
+    /// is how you commit to the wrong branch.
     #[tokio::test]
     async fn base_worktree_reports_the_branch_the_root_is_on() {
         let (base, repo_dir, db) = test_repo("base-head").await;
-
-        let wt = base_worktree(&db, &no_link(), "test")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!((wt.title.as_str(), wt.branch.as_str()), ("main", "main"));
-
         run_git(&repo_dir, &["checkout", "-b", "feature"]);
         let wt = base_worktree(&db, &no_link(), "test")
             .await
@@ -3058,26 +3023,7 @@ mod tests {
     /// `commit_worktree` / `remove_worktree` commands drive, minus Tauri/Linear.
     #[tokio::test]
     async fn worktree_lifecycle_e2e() {
-        let base = std::env::temp_dir().join(format!("santree-e2e-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let repo_dir = base.join("repo");
-        std::fs::create_dir_all(&repo_dir).unwrap();
-
-        // A real git repo with one commit on `main`.
-        run_git(&repo_dir, &["init", "-b", "main"]);
-        run_git(&repo_dir, &["config", "user.email", "t@t.test"]);
-        run_git(&repo_dir, &["config", "user.name", "Test"]);
-        std::fs::write(repo_dir.join("README.md"), "hello\n").unwrap();
-        run_git(&repo_dir, &["add", "-A"]);
-        run_git(&repo_dir, &["commit", "-m", "init"]);
-
-        // Real SQLite (migrations applied) with a repo row pointing at our git dir.
-        let db = crate::db::init(base.join("test.db")).await.unwrap();
-        sqlx::query("INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)")
-            .bind(repo_dir.to_string_lossy().as_ref())
-            .execute(&db)
-            .await
-            .unwrap();
+        let (base, repo_dir, db) = test_repo("e2e").await;
 
         // 1. Create the worktree and record the link.
         let wt = create(
@@ -3279,24 +3225,7 @@ mod tests {
     /// base (`main`), not leave it dangling on the now-deleted branch.
     #[tokio::test]
     async fn remove_restacks_children_onto_grandparent_base() {
-        let base = std::env::temp_dir().join(format!("santree-restack-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let repo_dir = base.join("repo");
-        std::fs::create_dir_all(&repo_dir).unwrap();
-
-        run_git(&repo_dir, &["init", "-b", "main"]);
-        run_git(&repo_dir, &["config", "user.email", "t@t.test"]);
-        run_git(&repo_dir, &["config", "user.name", "Test"]);
-        std::fs::write(repo_dir.join("README.md"), "hello\n").unwrap();
-        run_git(&repo_dir, &["add", "-A"]);
-        run_git(&repo_dir, &["commit", "-m", "init"]);
-
-        let db = crate::db::init(base.join("test.db")).await.unwrap();
-        sqlx::query("INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)")
-            .bind(repo_dir.to_string_lossy().as_ref())
-            .execute(&db)
-            .await
-            .unwrap();
+        let (base, _repo_dir, db) = test_repo("restack").await;
 
         // AK-1 branches off main.
         let ak1 = create(
@@ -3353,25 +3282,7 @@ mod tests {
     /// zero (it never looked), and the probing `get` path then reports it.
     #[tokio::test]
     async fn create_skips_the_remote_probe_and_get_reconciles() {
-        let base = std::env::temp_dir().join(format!("santree-noprobe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let repo_dir = base.join("repo");
-        let origin = base.join("origin.git");
-        std::fs::create_dir_all(&repo_dir).unwrap();
-        std::fs::create_dir_all(&origin).unwrap();
-
-        run_git(&origin, &["init", "--bare", "-b", "main"]);
-        run_git(&repo_dir, &["init", "-b", "main"]);
-        run_git(&repo_dir, &["config", "user.email", "t@t.test"]);
-        run_git(&repo_dir, &["config", "user.name", "Test"]);
-        std::fs::write(repo_dir.join("README.md"), "hello\n").unwrap();
-        run_git(&repo_dir, &["add", "-A"]);
-        run_git(&repo_dir, &["commit", "-m", "init"]);
-        run_git(
-            &repo_dir,
-            &["remote", "add", "origin", origin.to_string_lossy().as_ref()],
-        );
-        run_git(&repo_dir, &["push", "-u", "origin", "main"]);
+        let (base, repo_dir, db) = test_repo_with_origin("noprobe").await;
 
         // Someone else already pushed a commit on the exact branch `create` will cut
         // (its name is derived from the issue id + title), so origin/<branch> is one
@@ -3384,13 +3295,6 @@ mod tests {
         run_git(&repo_dir, &["push", "origin", branch]);
         run_git(&repo_dir, &["checkout", "main"]);
         run_git(&repo_dir, &["branch", "-D", branch]);
-
-        let db = crate::db::init(base.join("test.db")).await.unwrap();
-        sqlx::query("INSERT INTO repos (name, tracker, path) VALUES ('test','Local git',?)")
-            .bind(repo_dir.to_string_lossy().as_ref())
-            .execute(&db)
-            .await
-            .unwrap();
 
         let wt = create(
             &db,

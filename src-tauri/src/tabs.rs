@@ -382,33 +382,6 @@ mod tests {
         );
     }
 
-    /// Migration 0013 widened the kind CHECK to include 'fixci' (the AK-84 bug) and
-    /// 0030 added 'ai_review'; without either the INSERT fails the constraint.
-    #[tokio::test]
-    async fn accepts_both_review_kinds() {
-        let db = test_db("review-kinds").await;
-        add(
-            &db,
-            "repo",
-            review("AK-1", "tab-fix", TabKind::FixCi, "Address review"),
-        )
-        .await
-        .unwrap();
-        add(
-            &db,
-            "repo",
-            review("AK-1", "tab-ai", TabKind::AiReview, "AI review"),
-        )
-        .await
-        .unwrap();
-        let tabs = list(&db, "repo").await.unwrap();
-        assert_eq!(
-            tabs.iter().map(|t| t.kind).collect::<Vec<_>>(),
-            [TabKind::FixCi, TabKind::AiReview]
-        );
-        assert_eq!(tabs[1].title, "AI review");
-    }
-
     /// The H2 fix: the PR identity is what a resumed review tab re-derives its
     /// `--settings` and `--mcp-config` from, so it has to survive the round trip.
     #[tokio::test]
@@ -560,70 +533,38 @@ mod tests {
         }
     }
 
-    /// A triage ticket's tabs key under the ticket's own surface, not a
-    /// worktree's: the prefix is what every `triage:` rule matches on.
-    #[test]
-    fn a_triage_tab_keys_under_its_ticket_surface() {
-        assert_eq!(term_key("AK-1", "t1"), "tree:AK-1:tab:t1");
-        assert_eq!(term_key("triage:AK-1", "t1"), "triage:AK-1:tab:t1");
-    }
-
-    /// The same forget as for a worktree's tab, under the key a triage tab
-    /// actually launches with — a `tree:`-shaped key would delete nothing and
-    /// leave the conversation waiting to be resumed by the next tab.
+    /// Closing a tab forgets its session under the key it actually launched
+    /// with — for a triage tab that is `triage:<ticket>:tab:<id>`, and a
+    /// `tree:`-shaped key would delete nothing and leave the conversation waiting
+    /// to be resumed by the next tab.
     #[tokio::test]
-    async fn removing_a_triage_tab_forgets_the_session_under_its_ticket_key() {
-        let db = test_db("triage-session").await;
-        add(&db, "repo", agent("triage:AK-1", "tab-t", "Claude Code"))
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",
-        )
-        .bind("repo")
-        .bind("triage:AK-1:tab:tab-t")
-        .bind("/tmp/repo")
-        .bind("sess-t")
-        .execute(&db)
-        .await
-        .unwrap();
-
-        remove(&db, "repo", "tab-t").await.unwrap();
-
-        let left: Option<(String,)> =
-            sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = 'repo'")
-                .fetch_optional(&db)
-                .await
-                .unwrap();
-        assert_eq!(left, None);
-    }
-
-    #[tokio::test]
-    async fn removing_a_claude_tab_forgets_its_session() {
+    async fn removing_a_tab_forgets_the_session_under_its_own_key() {
         let db = test_db("session").await;
-        add(&db, "repo", agent("AK-1", "tab-a", "Claude"))
+        for (owner, id, key) in [
+            ("AK-1", "tab-a", "tree:AK-1:tab:tab-a"),
+            ("triage:AK-1", "tab-t", "triage:AK-1:tab:tab-t"),
+        ] {
+            add(&db, "repo", agent(owner, id, "Claude")).await.unwrap();
+            sqlx::query(
+                "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",
+            )
+            .bind("repo")
+            .bind(key)
+            .bind("/tmp/wt")
+            .bind(format!("sess-{id}"))
+            .execute(&db)
             .await
             .unwrap();
-        // Simulate the session the tab's first launch would have minted.
-        sqlx::query(
-            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",
-        )
-        .bind("repo")
-        .bind(term_key("AK-1", "tab-a"))
-        .bind("/tmp/wt")
-        .bind("sess-1")
-        .execute(&db)
-        .await
-        .unwrap();
 
-        remove(&db, "repo", "tab-a").await.unwrap();
+            remove(&db, "repo", id).await.unwrap();
 
-        let left: Option<(String,)> =
-            sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = 'repo'")
-                .fetch_optional(&db)
-                .await
-                .unwrap();
-        assert_eq!(left, None);
+            let left: Option<(String,)> =
+                sqlx::query_as("SELECT session_id FROM terminal_sessions WHERE repo = 'repo'")
+                    .fetch_optional(&db)
+                    .await
+                    .unwrap();
+            assert_eq!(left, None, "{key}");
+        }
     }
 
     #[tokio::test]

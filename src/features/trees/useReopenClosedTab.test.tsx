@@ -71,22 +71,19 @@ describe("useReopenClosedTab", () => {
   });
 
   /** An empty list mid-fetch is "we haven't looked", not "there is nothing" —
-   *  acting on it would drop the request the user just made. */
-  it("waits for the sessions read rather than giving up on an empty one", () => {
+   *  acting on it would drop the request. And the resumer mints its tab in
+   *  whatever worktree Trees is showing, so acting before the selection lands
+   *  would put the conversation in the wrong tree. */
+  it("holds the request until the sessions are read and its worktree is active", () => {
     state.reopenTab = { worktreeId: "AK-1", tabId: "t1" };
-    render(<Host />);
-
+    const { unmount } = render(<Host />);
     expect(spies.resume).not.toHaveBeenCalled();
     expect(spies.consume).not.toHaveBeenCalled();
-  });
+    unmount();
 
-  /** The resumer mints its tab in whatever worktree Trees is showing, so acting
-   *  before the selection lands would put the conversation in the wrong tree. */
-  it("does nothing until the worktree it names is the active one", () => {
     state.reopenTab = { worktreeId: "AK-2", tabId: "t1" };
     state.sessions = [session()];
     render(<Host />);
-
     expect(spies.resume).not.toHaveBeenCalled();
     expect(spies.consume).not.toHaveBeenCalled();
   });

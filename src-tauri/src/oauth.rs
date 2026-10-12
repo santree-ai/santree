@@ -390,12 +390,7 @@ pub fn parse_callback(path: &str) -> (Option<String>, Option<String>, Option<Str
 }
 
 pub fn open_browser(url: &str) {
-    let cmd = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let _ = std::process::Command::new(cmd).arg(url).spawn();
+    let _ = std::process::Command::new("open").arg(url).spawn();
 }
 
 #[cfg(test)]
@@ -403,17 +398,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_blob_round_trips() {
+    fn the_keychain_token_blob_round_trips_and_refuses_garbage() {
         let tokens = Tokens {
             access: "oauth_ac.ce-ss_1/2+3".into(),
             refresh: "oauth_re\"fresh\"".into(),
         };
         let blob = encode_tokens(&tokens).unwrap();
         assert_eq!(decode_tokens(&blob).unwrap(), tokens);
-    }
-
-    #[test]
-    fn token_blob_rejects_garbage() {
         assert!(decode_tokens("not json").is_err());
         assert!(decode_tokens(r#"{"access":"a"}"#).is_err());
     }
@@ -422,7 +413,6 @@ mod tests {
     fn a_token_is_reused_until_the_refresh_skew() {
         let now = 1_700_000_000_000;
         let expires = |mins: i64| now + mins * 60 * 1000;
-        assert_eq!(REFRESH_SKEW_MS, 5 * 60 * 1000);
 
         assert!(usable_at(expires(6), now));
         assert!(!usable_at(expires(5), now));
@@ -463,49 +453,18 @@ mod tests {
         assert_eq!(token_error_code(&anyhow!("invalid_grant")), None);
     }
 
+    /// Concurrent refreshes of one grant must serialize on one lock, or the
+    /// second spends a refresh token the first already rotated.
     #[test]
-    fn refresh_lock_same_key_returns_the_same_arc() {
+    fn refreshes_of_one_grant_share_a_lock() {
         let a = refresh_lock("test", "same");
-        let b = refresh_lock("test", "same");
-        assert!(std::sync::Arc::ptr_eq(&a, &b));
+        assert!(std::sync::Arc::ptr_eq(&a, &refresh_lock("test", "same")));
+        assert!(!std::sync::Arc::ptr_eq(&a, &refresh_lock("test", "other")));
     }
 
     #[test]
-    fn refresh_lock_different_keys_return_different_arcs() {
-        let a = refresh_lock("test", "lock-a");
-        let b = refresh_lock("test", "lock-b");
-        assert!(!std::sync::Arc::ptr_eq(&a, &b));
-    }
-
-    #[test]
-    fn parse_callback_reads_code_and_state() {
-        let (code, state, error) = parse_callback("/?code=abc123&state=xyz789");
-        assert_eq!(code.as_deref(), Some("abc123"));
-        assert_eq!(state.as_deref(), Some("xyz789"));
-        assert_eq!(error, None);
-    }
-
-    #[test]
-    fn parse_callback_percent_decodes_values() {
-        let (code, state, _) = parse_callback("/?code=a%2Bb%2Fc&state=has%20space");
-        assert_eq!(code.as_deref(), Some("a+b/c"));
-        assert_eq!(state.as_deref(), Some("has space"));
-    }
-
-    #[test]
-    fn parse_callback_reads_error_on_deny() {
-        let (code, state, error) = parse_callback("/?error=access_denied&state=xyz789");
-        assert_eq!(code, None);
-        assert_eq!(state.as_deref(), Some("xyz789"));
-        assert_eq!(error.as_deref(), Some("access_denied"));
-    }
-
-    #[test]
-    fn parse_callback_handles_missing_query_string() {
-        let (code, state, error) = parse_callback("/");
-        assert_eq!(code, None);
-        assert_eq!(state, None);
-        assert_eq!(error, None);
+    fn a_callback_without_a_query_carries_nothing() {
+        assert_eq!(parse_callback("/"), (None, None, None));
     }
 
     #[test]

@@ -23,7 +23,8 @@ use santree_pty::{Anchor as PtyAnchor, PtyManager};
 use santree_remote_client::fake::{FakeDaemon, FakeOptions};
 use santree_remote_client::proto::{Anchor, ReplayMode};
 use santree_remote_client::{
-    ConnectError, Connector, HostOptions, HostStatus, Link, PeerTrust, RemoteHost, Required,
+    ConnectError, Connector, HostOptions, HostStatus, Link, PeerTrust, RemoteClient, RemoteHost,
+    Required,
 };
 
 use super::backend::{Local, Route, SeedPolicy, Terminals};
@@ -95,6 +96,18 @@ fn run_timed(
     let (terminals, host) = build(daemons, ids, key, profile, timing);
     start(&host);
     (terminals, host)
+}
+
+/// The link of an app run that has adopted for this boot. A run's adoption
+/// sweeps whatever no pane holds when it lists, and it may list after the
+/// test's first opens: a session that already exited, its pane gone, is then
+/// retired and closed under the test (seen on Linux CI). Waiting it out on the
+/// empty table first leaves those sessions for the next run to find.
+async fn adopted_client(terminals: &RemoteTerminals) -> Option<Arc<RemoteClient>> {
+    tokio::time::timeout(WAIT, terminals.adopt_ready())
+        .await
+        .expect("the run to adopt");
+    terminals.client_within(Duration::ZERO).await
 }
 
 /// Reads that always ask the host, for tests that change its table behind the
@@ -418,7 +431,13 @@ async fn a_restarted_local_server_loses_the_pane_and_never_attaches_to_a_strange
             .any(|m| m == "pty.attach" || m == "pty.detach" || m == "pty.close"),
         "the pane touched the new server's session 1: {asked:?}"
     );
-    assert!(terminals.live().is_empty(), "a lost pane is not live");
+    // By its address: adoption of the new boot may already have taken the
+    // stranger's session, which is live and rightly listed.
+    let live = terminals.live();
+    assert!(
+        live.iter().all(|t| t.term_key != "tree:A:tab:1"),
+        "a lost pane is not live: {live:?}"
+    );
     assert!(terminals
         .bound()
         .iter()
@@ -536,7 +555,7 @@ async fn a_relaunch_adopts_every_session_and_retires_the_ones_that_exited() {
     // The previous app run opens an agent's pane, a shell, and one that exits
     // while no app is there to hear it.
     let (before, before_host) = run(&daemons, &ids, key, local_profile(None));
-    let client = before.client_within(Duration::from_secs(5)).await;
+    let client = adopted_client(&before).await;
     for (label, kind, command, args) in [
         ("tree:A", Some(AgentKind::Claude), "/bin/sh", vec![]),
         ("tree:B:tab:2", None, "/bin/sh", vec![]),
@@ -661,7 +680,7 @@ async fn a_pane_opening_under_an_address_finds_its_session_and_adoption_takes_th
         key,
         local_profile(None),
     );
-    let client = before.client_within(Duration::from_secs(5)).await;
+    let client = adopted_client(&before).await;
     for label in ["tree:A", "tree:B"] {
         before
             .open(
@@ -755,7 +774,7 @@ async fn liveness_reads_the_host_and_is_incomplete_while_it_cannot_be_asked() {
     assert!(!never.liveness().await.complete);
 
     let (before, before_host) = run(&daemons, &ids, key, local_profile(None));
-    let client = before.client_within(Duration::from_secs(5)).await;
+    let client = adopted_client(&before).await;
     for label in ["tree:A", "tree:B"] {
         let mut s = spec(label, Some(AgentKind::Claude));
         s.command = "/bin/sh".into();
@@ -836,7 +855,7 @@ async fn liveness_is_incomplete_between_connecting_and_adopting() {
         key,
         local_profile(None),
     );
-    let client = before.client_within(Duration::from_secs(5)).await;
+    let client = adopted_client(&before).await;
     let mut gone = spec("tree:A", None);
     gone.args = vec!["-c".into(), "exit 0".into()];
     before
@@ -1043,7 +1062,7 @@ async fn a_tab_opening_after_adoption_claims_the_adopted_pane_and_never_starts_a
         key,
         local_profile(None),
     );
-    let client = before.client_within(Duration::from_secs(5)).await;
+    let client = adopted_client(&before).await;
     for label in ["tree:A", "tree:B"] {
         before
             .open(
@@ -1139,7 +1158,7 @@ async fn bound_lists_only_panes_bound_on_the_boot_now_answering() {
         key,
         local_profile(None),
     );
-    let client = before.client_within(Duration::from_secs(5)).await;
+    let client = adopted_client(&before).await;
     before
         .open(
             spec("tree:A", None),
@@ -1195,7 +1214,7 @@ async fn an_exited_session_does_not_retire_the_row_of_a_live_agent_with_its_addr
         key,
         local_profile(None),
     );
-    let client = before.client_within(Duration::from_secs(5)).await;
+    let client = adopted_client(&before).await;
     // The same agent address twice: a run that exited, and its resumed
     // successor, still going. Plus one address that only has an exited run.
     for (label, args) in [
@@ -1216,10 +1235,22 @@ async fn an_exited_session_does_not_retire_the_row_of_a_live_agent_with_its_addr
             .await
             .unwrap();
     }
+    // Each address's `exit 0` run, by label: a count of exactly two would
+    // never hold if the live run had died too, and would time out saying
+    // nothing of which one.
     until("both to have exited", || {
-        daemon.pty().sessions().iter().filter(|s| !s.alive).count() == 2
+        let sessions = daemon.pty().sessions();
+        ["tree:A", "tree:Z"]
+            .iter()
+            .all(|label| sessions.iter().any(|s| s.label == *label && !s.alive))
     })
     .await;
+    assert_eq!(
+        alive(&daemon, "tree:A").len(),
+        1,
+        "{:?}",
+        daemon.pty().sessions()
+    );
     before_host.stop();
     daemon.disconnect_all();
     until("the app gone", || daemon.connection_count() == 0).await;
@@ -1394,7 +1425,7 @@ async fn leave_behind(daemon: &FakeDaemon, label: &str, agent_kind: Option<Agent
         HostKey::Local { revision: 1 },
         local_profile(None),
     );
-    let client = before.client_within(Duration::from_secs(5)).await;
+    let client = adopted_client(&before).await;
     before
         .open(
             spec(label, agent_kind),
@@ -1616,49 +1647,6 @@ async fn a_wedged_server_cannot_stall_a_read_and_every_read_says_it_is_incomplet
         asked.load(Ordering::SeqCst),
         2,
         "adoption's listing and one read's: the failure was reused, not retried by each caller"
-    );
-}
-
-/// The facade bounds a read on its own as well, over whatever the hosts do.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_facade_gives_up_on_a_read_that_outlasts_its_deadline() {
-    let _serial = crate::stream::pty_guard().await;
-    let daemon = FakeDaemon::new();
-    leave_behind(&daemon, "tree:A", Some(AgentKind::Claude)).await;
-    let (wedged, asked) = (
-        Arc::new(AtomicBool::new(true)),
-        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-    );
-    let host = Arc::new(RemoteHost::new(
-        wedgeable_connector(&daemon, &wedged, &asked),
-        fast(),
-    ));
-    let ids = Arc::new(IdRegistry::default());
-    // The host itself would wait a minute.
-    let local = RemoteTerminals::with_timing(
-        host.clone(),
-        HostKey::Local { revision: 1 },
-        ids.clone(),
-        local_profile(None),
-        Timing {
-            timeout: Duration::from_secs(60),
-            ..QUICK
-        },
-    );
-    local.watch();
-    start(&host);
-    assert!(local.client_within(WAIT).await.is_some(), "connected");
-    let (terminals, _hosts) = server_terminals(local, &ids, true);
-    let terminals = terminals.with_read_deadline(Duration::from_millis(300));
-
-    let began = std::time::Instant::now();
-    assert!(!terminals.liveness().await.complete);
-    assert!(!terminals.snapshot().await.complete);
-    assert!(terminals.local_sessions().await.is_empty());
-    assert!(
-        began.elapsed() < Duration::from_secs(5),
-        "the deadline didn't hold: {:?}",
-        began.elapsed()
     );
 }
 

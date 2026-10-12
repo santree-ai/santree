@@ -237,6 +237,23 @@ mod tests {
     #[tokio::test]
     async fn source_add_is_deduplicated_and_crud_is_pr_scoped() {
         let db = db().await;
+        // The dedupe key is the `(kind, id)` pair, not the id alone: a check
+        // named "1234" must not collide with review thread 1234 on the same PR.
+        add(
+            &db,
+            "acme/api",
+            7,
+            &uuid::Uuid::new_v4().to_string(),
+            "Fix failing check: 1234",
+            ReviewWorkItemSource::Check,
+            Some("1234"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let first_id = uuid::Uuid::new_v4().to_string();
         let second_id = uuid::Uuid::new_v4().to_string();
         let first = add(
@@ -270,7 +287,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(duplicate.id, first.id);
-        assert_eq!(list(&db, "acme/api", 7).await.unwrap().len(), 1);
+        assert_eq!(list(&db, "acme/api", 7).await.unwrap().len(), 2);
 
         let updated = update(&db, "acme/api", 7, &first.id, "Implemented", true)
             .await
@@ -280,7 +297,7 @@ mod tests {
             .await
             .is_err());
         delete(&db, "acme/api", 7, &first.id).await.unwrap();
-        assert!(list(&db, "acme/api", 7).await.unwrap().is_empty());
+        assert_eq!(list(&db, "acme/api", 7).await.unwrap().len(), 1);
     }
 
     /// Proves three things at once, against a real migrated database: 0029's
@@ -367,43 +384,5 @@ mod tests {
         )
         .await
         .is_err());
-    }
-
-    /// The dedupe key is the `(kind, id)` pair, not the id alone — a check named
-    /// "1234" must not collide with review thread 1234 on the same PR.
-    #[tokio::test]
-    async fn check_and_thread_source_ids_do_not_collide() {
-        let db = db().await;
-        add(
-            &db,
-            "acme/api",
-            7,
-            &uuid::Uuid::new_v4().to_string(),
-            "Fix failing check: 1234",
-            ReviewWorkItemSource::Check,
-            Some("1234"),
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        add(
-            &db,
-            "acme/api",
-            7,
-            &uuid::Uuid::new_v4().to_string(),
-            "Address the review comment",
-            ReviewWorkItemSource::GithubThread,
-            Some("1234"),
-            Some("src/api.rs"),
-            Some(42),
-            None,
-            Some(true),
-        )
-        .await
-        .unwrap();
-        assert_eq!(list(&db, "acme/api", 7).await.unwrap().len(), 2);
     }
 }

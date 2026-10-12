@@ -54,13 +54,11 @@ function worktree(id: string): Worktree {
 }
 
 describe("startCandidates", () => {
-  it("offers ready issues with no worktree", () => {
-    const tasks = [task("AK-1"), task("AK-2", false)];
-    expect(startCandidates(tasks, [], new Set()).map((t) => t.id)).toEqual(["AK-1"]);
-  });
-
-  it("excludes issues that already have a worktree", () => {
-    expect(startCandidates([task("AK-1")], [worktree("AK-1")], new Set())).toEqual([]);
+  it("offers only ready issues that have no worktree", () => {
+    const tasks = [task("AK-1"), task("AK-2", false), task("AK-3")];
+    expect(startCandidates(tasks, [worktree("AK-3")], new Set()).map((t) => t.id)).toEqual([
+      "AK-1",
+    ]);
   });
 
   // The Trees model hides pending deletes from `worktrees` optimistically, so a

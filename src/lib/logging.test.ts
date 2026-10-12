@@ -64,7 +64,7 @@ describe("forwardConsoleToLog", () => {
     expect(logMock.warn).not.toHaveBeenCalled();
   });
 
-  it("forwards unhandled promise rejections to the on-disk log", () => {
+  it("forwards unhandled rejections and uncaught window errors to the on-disk log", () => {
     const event = new PromiseRejectionEvent("unhandledrejection", {
       promise: Promise.reject(new Error("boom")).catch(() => {}),
       reason: new Error("boom"),
@@ -74,17 +74,15 @@ describe("forwardConsoleToLog", () => {
     expect(logMock.error).toHaveBeenCalledTimes(1);
     expect(logMock.error.mock.calls[0][0]).toContain("unhandledrejection");
     expect(logMock.error.mock.calls[0][0]).toContain("boom");
-  });
 
-  it("forwards uncaught window errors to the on-disk log", () => {
-    const event = new ErrorEvent("error", {
+    const error = new ErrorEvent("error", {
       error: new Error("kaboom"),
       message: "kaboom",
     });
-    window.dispatchEvent(event);
+    window.dispatchEvent(error);
 
-    expect(logMock.error).toHaveBeenCalledTimes(1);
-    expect(logMock.error.mock.calls[0][0]).toContain("uncaught error");
-    expect(logMock.error.mock.calls[0][0]).toContain("kaboom");
+    expect(logMock.error).toHaveBeenCalledTimes(2);
+    expect(logMock.error.mock.calls[1][0]).toContain("uncaught error");
+    expect(logMock.error.mock.calls[1][0]).toContain("kaboom");
   });
 });

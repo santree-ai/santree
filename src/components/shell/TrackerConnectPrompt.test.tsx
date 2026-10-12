@@ -25,14 +25,11 @@ beforeEach(() => {
 describe("TrackerConnectPrompt", () => {
   /** An unknown is not a no: a cold start must not flash a warning at an install
    *  that is connected. */
-  it("draws nothing while the connection reads are in flight", () => {
-    state.connected = null;
-    const { container } = render(<TrackerConnectPrompt />);
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("draws nothing once a tracker is connected", () => {
-    state.connected = true;
+  it.each([
+    ["the connection reads are in flight", null],
+    ["a tracker is connected", true],
+  ])("draws nothing while %s", (_, connected) => {
+    state.connected = connected;
     const { container } = render(<TrackerConnectPrompt />);
     expect(container).toBeEmptyDOMElement();
   });

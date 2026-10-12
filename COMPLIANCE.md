@@ -52,8 +52,8 @@ and four frontend tests pin that no PTY output is decoded and fed back.
 
 **No unattended loop.** No auto-responders, no retry or "keep going" loops, no
 always-on drivers. santree never starts, resumes, retries, or continues a
-session on the user's behalf. A `--resume` seed is built only when a human opens
-the tab. Closing a tab hangs up every process on its terminal (a tty `SIGHUP`,
+session on the user's behalf. A `--resume` seed (or the `attach` one for a session
+Claude's daemon is already running) is built only when a human opens the tab. Closing a tab hangs up every process on its terminal (a tty `SIGHUP`,
 `crates/pty` `hang_up`): that is the user's close, not control of the vendor
 CLI's loop.
 
@@ -72,8 +72,8 @@ one bounded read is below. App-owned secrets never land in plaintext SQLite.
 model prompt from a diff, a PR, a Linear ticket, or a transcript is
 attacker-influenceable — a malicious diff hunk, a comment any org member can
 write. Headless helpers run with tool use denied by default for exactly this
-reason, prompts go over stdin rather than argv (argv is world-readable on
-Linux), and untrusted spans are fenced.
+reason, prompts go over stdin rather than argv (any local process can read
+argv through `ps`), and untrusted spans are fenced.
 → `the_fix_prompt_boundary_survives_hostile_check_output`,
 `a_suggestion_is_fenced_past_any_backticks_inside_it`
 
@@ -472,8 +472,8 @@ credential file is read to build it. A same-user process connecting in a loop ca
 only delay the app: signature checks run four at a time, at most 32 connections
 wait for one, and the rest are closed at once.
 
-**The bound is the signature.** Unsigned, dev and Linux builds do not use the
-server by default. Opting into it there is the documented exception: admission
+**The bound is the signature.** Unsigned and dev builds do not use the server
+by default. Opting into it there is the documented exception: admission
 is by uid alone, so **any agent in any of that user's sessions could drive
 another's terminal.** That is the cost of a dev build, not something the app
 does on the user's behalf, and a signed release never runs that way (a build with

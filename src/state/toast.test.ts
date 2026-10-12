@@ -12,34 +12,32 @@ describe("toast store", () => {
     vi.useRealTimers();
   });
 
-  it("dedups identical live toasts and separates by variant", () => {
+  it("dedups identical live toasts, and keeps apart any that differ by variant, title or duration", () => {
     const a = showToast("error", "boom", { duration: 0 });
     expect(showToast("error", "boom", { duration: 0 })).toBe(a); // identical → same toast
     const other = showToast("success", "boom", { duration: 0 }); // different variant → new
     expect(other).not.toBe(a);
     dismissToast(a);
     dismissToast(other);
-  });
 
-  // Two unrelated failures can share an error string while carrying different
-  // titles; collapsing them would show one of them under the other's heading.
-  it("keeps toasts that differ only by title or duration apart", () => {
-    const a = showToast("error", "Request failed", {
+    // Two unrelated failures can share an error string while carrying different
+    // titles; collapsing them would show one of them under the other's heading.
+    const t = showToast("error", "Request failed", {
       title: "Couldn't create the PR",
       duration: 0,
     });
     const b = showToast("error", "Request failed", { title: "Couldn't push", duration: 0 });
-    expect(b).not.toBe(a);
+    expect(b).not.toBe(t);
     expect(showToast("error", "Request failed", { title: "Couldn't push", duration: 0 })).toBe(b);
 
     const untitled = showToast("error", "Request failed", { duration: 0 });
-    expect(untitled).not.toBe(a);
+    expect(untitled).not.toBe(t);
     expect(untitled).not.toBe(b);
 
     const shorter = showToast("error", "Request failed", { duration: 1 });
     expect(shorter).not.toBe(untitled);
 
-    for (const id of [a, b, untitled, shorter]) dismissToast(id);
+    for (const id of [t, b, untitled, shorter]) dismissToast(id);
   });
 
   it("auto-dismisses after the duration, then an identical show is fresh", () => {

@@ -67,11 +67,8 @@ describe("filterByAudience", () => {
     expect(filterByAudience(tricky, "bots").map((c) => c.author)).toEqual(["linear-code"]);
   });
 
-  it("shows everything under All", () => {
+  it("shows everything under All, and no GitHub comments under Santree (those are the drafts)", () => {
     expect(filterByAudience(comments, "all")).toHaveLength(3);
-  });
-
-  it("shows no GitHub comments under Santree — those entries are the drafts", () => {
     expect(filterByAudience(comments, "santree")).toEqual([]);
   });
 });

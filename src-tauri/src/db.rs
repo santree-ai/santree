@@ -255,19 +255,13 @@ fn migrate_error(err: MigrateError, db_path: &Path, backup: Option<&Path>) -> an
     }
 }
 
-#[cfg(unix)]
 fn chmod(path: &std::path::Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .with_context(|| format!("chmod {path:?}"))
 }
 
-#[cfg(not(unix))]
-fn chmod(_path: &std::path::Path, _mode: u32) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
@@ -404,9 +398,11 @@ mod tests {
     }
 
     /// A downgrade (older DMG opening a newer db) must say so, not surface sqlx's
-    /// "migration N was previously applied but is missing" to the user.
+    /// "migration N was previously applied but is missing" to the user; anything
+    /// else keeps sqlx's own diagnosis; and when a snapshot was taken, the user is
+    /// told where their data is rather than to throw it away.
     #[test]
-    fn migrate_error_names_the_downgrade() {
+    fn migrate_error_names_the_downgrade_keeps_real_failures_and_points_at_the_backup() {
         let err = migrate_error(
             MigrateError::VersionMissing(14),
             Path::new("/data/santree.db"),
@@ -417,34 +413,19 @@ mod tests {
         assert!(msg.contains("migration 14"), "{msg}");
         assert!(msg.contains("/data/santree.db"), "{msg}");
         assert!(!msg.contains("backed up"), "no backup was taken: {msg}");
-    }
 
-    /// Anything that isn't a version skew is a genuine migration failure and must
-    /// keep sqlx's own diagnosis rather than being retold as a downgrade.
-    #[test]
-    fn migrate_error_keeps_real_failures() {
-        let err = migrate_error(MigrateError::Dirty(3), Path::new("/data/santree.db"), None);
+        let backup = Path::new("/data/backups/santree-20260713-120000.db");
+        let err = migrate_error(
+            MigrateError::Dirty(3),
+            Path::new("/data/santree.db"),
+            Some(backup),
+        );
         let msg = format!("{err:#}");
         assert!(msg.contains("running migrations"), "{msg}");
         assert!(msg.contains("partially applied"), "{msg}");
         assert!(!msg.contains("newer version"), "{msg}");
-    }
-
-    /// The whole point of the pre-migration snapshot: when a migration blows up, the
-    /// user is told how to get their data back rather than to throw it away.
-    #[test]
-    fn migrate_error_points_at_the_backup() {
-        let err = migrate_error(
-            MigrateError::Dirty(3),
-            Path::new("/data/santree.db"),
-            Some(Path::new("/data/backups/santree-20260713-120000.db")),
-        );
-        let msg = format!("{err:#}");
         assert!(msg.contains("backed up"), "{msg}");
-        assert!(
-            msg.contains("/data/backups/santree-20260713-120000.db"),
-            "{msg}"
-        );
+        assert!(msg.contains(&backup.display().to_string()), "{msg}");
     }
 
     /// A fresh db has nothing to lose, and an up-to-date one isn't about to change —

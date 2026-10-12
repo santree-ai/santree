@@ -154,7 +154,6 @@ describe("SessionHistory rows", () => {
     mount();
     fireEvent.click(rowToggle("Refactor the parser"));
     expect(spies.subagentCalls.at(-1)).toEqual(["s1", true]);
-    expect(screen.getByText("Find the parser")).toBeTruthy();
     expect(screen.getByText("Check the tests")).toBeTruthy();
   });
 
@@ -190,36 +189,23 @@ describe("SessionHistory rows", () => {
   });
 
   /** An unpriced model sends `null`, and a `$0.00` would read as free. */
-  it("omits the cost when the session has no priced model", () => {
+  it("shows the cost beside the tokens only when the model is priced", () => {
+    const spend = (costUsd: number | null) => ({
+      totalTokens: 12_300,
+      costUsd,
+      models: [{ model: "m", totalTokens: 12_300, costUsd }],
+    });
     reset([
-      session({
-        spend: {
-          totalTokens: 12_300,
-          costUsd: null,
-          models: [{ model: "mystery", totalTokens: 12_300, costUsd: null }],
-        },
-      }),
+      session({ spend: spend(0.41) }),
+      session({ sessionId: "s2", title: "Unpriced", spend: spend(null) }),
     ]);
     mount();
-    const row = rowToggle("Refactor the parser");
-    expect(within(row).getByText(/12\.3k/)).toBeTruthy();
-    expect(row.textContent).not.toContain("$");
-  });
-
-  it("shows tokens and cost together when the model is priced", () => {
-    reset([
-      session({
-        spend: {
-          totalTokens: 12_300,
-          costUsd: 0.41,
-          models: [{ model: "claude-opus-4-8", totalTokens: 12_300, costUsd: 0.41 }],
-        },
-      }),
-    ]);
-    mount();
-    const row = rowToggle("Refactor the parser");
-    expect(within(row).getByText(/12\.3k/)).toBeTruthy();
-    expect(within(row).getByText(/\$0\.41/)).toBeTruthy();
+    const priced = rowToggle("Refactor the parser");
+    expect(within(priced).getByText(/12\.3k/)).toBeTruthy();
+    expect(within(priced).getByText(/\$0\.41/)).toBeTruthy();
+    const unpriced = rowToggle("Unpriced");
+    expect(within(unpriced).getByText(/12\.3k/)).toBeTruthy();
+    expect(unpriced.textContent).not.toContain("$");
   });
 
   it("reveals the transcript by session id, never by a path", () => {

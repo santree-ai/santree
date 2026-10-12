@@ -6,7 +6,7 @@
  * when the session ends so the badge flips without hunting for Refresh.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GithubStatus } from "../../../bindings";
@@ -77,30 +77,21 @@ describe("Settings → GitHub → gh auth login", () => {
     embedded = null;
   });
 
-  it("offers the login button while gh is installed but signed out", () => {
+  // The command that signs you in is the one that switches account, so it
+  // stays offered once connected; with no gh at all there is nothing to run.
+  it("offers the login while gh is installed, signed in or out", () => {
     renderPane();
     expect(loginButton()).toBeInTheDocument();
-    expect(screen.getByText("signed out")).toBeInTheDocument();
-  });
+    cleanup();
 
-  // Same as the agent panes: the command that signs you in is the command that
-  // switches account, so it stays reachable once connected.
-  it("still offers it once the session is authenticated", () => {
     status = { ...signedOut, authenticated: true, account: "octocat" };
     renderPane();
     expect(loginButton()).toBeInTheDocument();
-    expect(screen.getByText("connected")).toBeInTheDocument();
-  });
+    cleanup();
 
-  it("offers nothing to run when gh is not installed at all", () => {
     status = { ...signedOut, installed: false, detectedExec: "", version: "" };
     renderPane();
     expect(screen.queryByRole("button", { name: "Run gh auth login" })).toBeNull();
-  });
-
-  it("keeps the manual Refresh control beside it", () => {
-    renderPane();
-    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
   });
 
   it("mounts the terminal on click, seeded with the resolved gh path", () => {
@@ -119,18 +110,17 @@ describe("Settings → GitHub → gh auth login", () => {
     expect(screen.queryByRole("button", { name: "Run gh auth login" })).toBeNull();
   });
 
-  it("falls back to the bare command when nothing was detected", () => {
-    status = { ...signedOut, detectedExec: "" };
-    renderPane();
-    fireEvent.click(loginButton());
-    expect(embedded?.spec.seed).toBe("gh auth login");
-  });
-
-  it("quotes a resolved path that would otherwise split into two arguments", () => {
-    status = { ...signedOut, detectedExec: "/Users/me/My Tools/gh" };
-    renderPane();
-    fireEvent.click(loginButton());
-    expect(embedded?.spec.seed).toBe("'/Users/me/My Tools/gh' auth login");
+  it("seeds the bare command when nothing was detected, and quotes a spaced path", () => {
+    for (const [detectedExec, seed] of [
+      ["", "gh auth login"],
+      ["/Users/me/My Tools/gh", "'/Users/me/My Tools/gh' auth login"],
+    ] as const) {
+      status = { ...signedOut, detectedExec };
+      renderPane();
+      fireEvent.click(loginButton());
+      expect(embedded?.spec.seed).toBe(seed);
+      cleanup();
+    }
   });
 
   it("re-reads the auth status when the session exits", () => {

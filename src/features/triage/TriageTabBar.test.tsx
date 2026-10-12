@@ -99,16 +99,9 @@ const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent);
 beforeEach(() => localStorage.clear());
 
 describe("TriageTabBar", () => {
-  /** It is not a stored row — it is what the workspace *is*, so there is
-   *  nothing for a ✕ to close it to. */
-  it("leads with the ticket, and offers no way to close it", () => {
-    mount(tabsModel());
-
-    expect(tabNames()).toEqual(["Linear"]);
-    expect(screen.queryByRole("button", { name: "Close Linear" })).not.toBeInTheDocument();
-  });
-
-  it("puts one closable tab per investigating provider after it, then the ticket's rows", () => {
+  /** The ticket tab is not a stored row — it is what the workspace *is*, so
+   *  there is nothing for a ✕ to close it to. */
+  it("leads with the unclosable ticket, then a closable tab per provider, then the rows", () => {
     mount(
       tabsModel({
         providers: ["Codex", "Claude"],
@@ -121,6 +114,7 @@ describe("TriageTabBar", () => {
     expect(screen.getByRole("button", { name: "Close Claude Code" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Close Codex 2" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Close Terminal" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Close Linear" })).not.toBeInTheDocument();
   });
 
   /** A tab is its process: the ✕ ends the PTY and then forgets the session. Only

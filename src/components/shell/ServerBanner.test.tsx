@@ -44,26 +44,28 @@ describe("ServerBanner", () => {
     }
   });
 
-  it("explains a server that is down, with its reason and a Start server button", () => {
-    world.status = status({ kind: "Down", reason: "It was stopped from outside santree." });
-    const { getByRole } = render(<ServerBanner />);
-
-    expect(getByRole("alert")).toHaveTextContent("The santree server isn't running.");
-    expect(getByRole("alert")).toHaveTextContent("It was stopped from outside santree.");
-    // Nothing starts by itself: the call is made on the click.
-    expect(world.mutate).not.toHaveBeenCalled();
-    fireEvent.click(getByRole("button", { name: "Start server" }));
-    expect(world.mutate).toHaveBeenCalledTimes(1);
-  });
-
-  it("says a server that keeps dying is failing, and still leaves the start to the user", () => {
-    world.status = status({ kind: "Failing", reason: "Exited 5 times in a minute." });
-    const { getByRole } = render(<ServerBanner />);
-
-    expect(getByRole("alert")).toHaveTextContent("The santree server keeps stopping.");
-    expect(getByRole("alert")).toHaveTextContent("Exited 5 times in a minute.");
-    fireEvent.click(getByRole("button", { name: "Start server" }));
-    expect(world.mutate).toHaveBeenCalledTimes(1);
+  it("explains a down or failing server with its reason, and leaves the start to a click", () => {
+    for (const [state, headline] of [
+      [
+        { kind: "Down", reason: "It was stopped from outside santree." },
+        "The santree server isn't running.",
+      ],
+      [
+        { kind: "Failing", reason: "Exited 5 times in a minute." },
+        "The santree server keeps stopping.",
+      ],
+    ] as const) {
+      world.mutate.mockClear();
+      world.status = status(state);
+      const { getByRole, unmount } = render(<ServerBanner />);
+      expect(getByRole("alert")).toHaveTextContent(headline);
+      expect(getByRole("alert")).toHaveTextContent(state.reason);
+      // Nothing starts by itself: the call is made on the click.
+      expect(world.mutate).not.toHaveBeenCalled();
+      fireEvent.click(getByRole("button", { name: "Start server" }));
+      expect(world.mutate).toHaveBeenCalledTimes(1);
+      unmount();
+    }
   });
 
   it("disables the button while the start is in flight", () => {

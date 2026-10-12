@@ -216,16 +216,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn refusal_codes_read_as_refusals() {
-        assert_eq!(Refusal::of("santree_off"), Refusal::SantreeOff);
-        assert_eq!(Refusal::of("host_key_changed"), Refusal::HostKeyChanged);
-        assert_eq!(Refusal::of("forbidden"), Refusal::Forbidden);
-        assert_eq!(Refusal::of("busy"), Refusal::Busy);
-        assert_eq!(Refusal::of("unavailable"), Refusal::Unavailable);
-        assert_eq!(Refusal::of("internal"), Refusal::Unavailable);
-    }
-
-    #[test]
     fn only_what_waits_on_a_person_is_permanent() {
         let refused = |refusal| ConnectError::Refused {
             refusal,

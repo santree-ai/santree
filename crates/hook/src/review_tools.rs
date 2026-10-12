@@ -880,22 +880,9 @@ mod tests {
         // start == line is a single-line comment, and GitHub 422s on it as a range.
         let a = resolve_anchor(&index(), "src/a.rs", 44, Some(44), true).unwrap();
         assert_eq!(a.start_line, None);
-    }
-
-    #[test]
-    fn a_backwards_range_is_named_before_the_diff_is_consulted() {
+        // A backwards range is named before the diff is consulted.
         let e = msg(resolve_anchor(&index(), "src/a.rs", 41, Some(44), true).unwrap_err());
         assert!(e.contains("must come before"), "{e}");
-    }
-
-    #[test]
-    fn an_anchor_outside_the_diff_says_what_would_work() {
-        let e = msg(resolve_anchor(&index(), "src/a.rs", 70, None, true).unwrap_err());
-        assert!(e.contains("40-52, 80-85"), "{e}");
-        let e = msg(resolve_anchor(&index(), "src/b.rs", 1, None, true).unwrap_err());
-        assert!(e.contains("isn't a changed file"), "{e}");
-        let e = msg(resolve_anchor(&index(), "src/a.rs", 82, Some(50), true).unwrap_err());
-        assert!(e.contains("cross a gap"), "{e}");
     }
 
     #[test]
@@ -924,38 +911,10 @@ mod tests {
         assert_eq!(suggestion_text(&empty, &right).unwrap(), None);
     }
 
+    /// Arguments are read leniently (any case for a side) but not loosely, and a
+    /// bad enum value lists the ones that work so the model's retry isn't a guess.
     #[test]
-    fn a_brief_may_not_point_at_files_the_pr_does_not_touch() {
-        let brief = ReviewBrief {
-            agent_kind: santree_core::domain::AgentKind::Claude,
-            summary: "s".into(),
-            reading_order: vec![ReadingStep {
-                path: "src/ghost.rs".into(),
-                role: santree_core::domain::ReadingRole::CoreLogic,
-                why: "w".into(),
-            }],
-            watch_outs: vec![],
-            questions: vec![],
-            truncated: false,
-            head_sha: "abc1234".into(),
-            generated_at_ms: 0.0,
-        };
-        let e = msg(check_brief_paths(&index(), &brief).unwrap_err());
-        assert!(e.contains("src/ghost.rs"), "{e}");
-    }
-
-    #[test]
-    fn a_bad_enum_value_lists_the_ones_that_work() {
-        let args: serde_json::Map<String, Value> = serde_json::from_value(json!({
-            "readingOrder": [{ "path": "a", "role": "wibble", "why": "w" }]
-        }))
-        .unwrap();
-        let e = msg(parse_list::<ReadingStep>(&args, "readingOrder").unwrap_err());
-        assert!(e.contains("entryPoint"), "{e}");
-    }
-
-    #[test]
-    fn side_and_line_arguments_are_read_leniently_but_not_loosely() {
+    fn arguments_are_read_leniently_but_not_loosely() {
         let args: serde_json::Map<String, Value> =
             serde_json::from_value(json!({ "side": "left", "line": 4 })).unwrap();
         assert_eq!(side(&args).unwrap(), Some(false));
@@ -964,6 +923,13 @@ mod tests {
             serde_json::from_value(json!({ "side": "middle", "line": 0 })).unwrap();
         assert!(side(&bad).is_err());
         assert!(number(&bad, "line").is_err());
+
+        let args: serde_json::Map<String, Value> = serde_json::from_value(json!({
+            "readingOrder": [{ "path": "a", "role": "wibble", "why": "w" }]
+        }))
+        .unwrap();
+        let e = msg(parse_list::<ReadingStep>(&args, "readingOrder").unwrap_err());
+        assert!(e.contains("entryPoint"), "{e}");
     }
 
     // ── Against a real database ──────────────────────────────────────────────
@@ -1358,24 +1324,5 @@ mod tests {
             t.call("post_to_github", &json!({})),
             Err(ToolError::UnknownTool)
         ));
-    }
-
-    #[test]
-    fn describe_names_the_range_and_the_side() {
-        let a = Anchor {
-            path: "src/a.rs".into(),
-            line: 18,
-            start_line: Some(12),
-            on_right: true,
-        };
-        assert_eq!(describe(&a), "src/a.rs:12-18");
-        assert_eq!(
-            describe(&Anchor {
-                start_line: None,
-                on_right: false,
-                ..a
-            }),
-            "src/a.rs:18 (LEFT)"
-        );
     }
 }

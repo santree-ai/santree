@@ -33,7 +33,7 @@ the real CLI                claude / codex / zsh, spawned on the pty slave
 In the diagram `PtyManager` is in the app's own process. On a signed build the
 same `PtyManager` runs inside the detached santree server and the adapter reaches
 it over protocol v1 through `sessions::Terminals`
-([The santree server](#the-santree-server)). `Mode::Off` (unsigned, dev and Linux
+([The santree server](#the-santree-server)). `Mode::Off` (unsigned and dev
 builds) keeps `PtyManager` in the app as `Local::InApp`.
 
 Five facts that explain most of the rest:
@@ -630,6 +630,12 @@ exec <env> <bin> <remote><settings><mcp><chrome><permission><model><effort>--ses
 - `--permission-mode`, `--remote-control` and `--chrome` are pass-throughs of the
   user's own settings. **santree never selects a permissive permission mode.**
 - `--model`/`--effort` only on a fresh launch; a resume carries the session's own.
+- A tab whose stored Claude session is running as one of Claude's own background
+  sessions (`claude --bg`, hosted by Claude's daemon, so it outlives any pane)
+  launches `exec <bin> attach <id>` instead of `--resume`, which the CLI refuses:
+  `session::resolve` asks `claude agents --json` (process identity, never terminal
+  output; any failure reads "none") and returns `AgentSession::Attach`, with none
+  of the flags above. Daedalus panes never attach.
 
 Every value is single-quoted through `shellQuote`, which strips newlines and all
 C0/C1 control characters first — the seed is written to a PTY, where control
@@ -723,7 +729,7 @@ from a PTY on the box (`daedalus/setup.rs`, docs/remote.md).
 
 **`agent.rs` — headless one-shots.** `claude -p` / `codex exec` to draft a commit
 message, a PR body, or an English-tutor analysis. Prompts go over **stdin, never
-argv** (argv is world-readable on Linux). Tool use is denied by default because
+argv** (any local process can read argv through `ps`). Tool use is denied by default because
 these prompts embed diff, PR and ticket content that an attacker can influence.
 Every call site names its own timeout; there is no shared default.
 

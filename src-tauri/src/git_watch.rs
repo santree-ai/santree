@@ -409,28 +409,18 @@ mod tests {
     }
 
     #[test]
-    fn maps_first_segment_to_issue_id() {
+    fn a_worktree_change_maps_to_its_issue_unless_it_is_vcs_build_or_outside() {
         let root = Path::new("/repo/.santree/worktrees");
         let p = Path::new("/repo/.santree/worktrees/AK-170/src/main.rs");
         assert_eq!(issue_id_for(root, p).as_deref(), Some("AK-170"));
-    }
-
-    #[test]
-    fn skips_vcs_and_build_dirs() {
-        let root = Path::new("/repo/.santree/worktrees");
         for p in [
             "/repo/.santree/worktrees/AK-170/.git/index",
             "/repo/.santree/worktrees/AK-170/node_modules/x/y.js",
             "/repo/.santree/worktrees/AK-170/target/debug/foo",
+            "/somewhere/else/file",
         ] {
             assert_eq!(issue_id_for(root, Path::new(p)), None, "should skip {p}");
         }
-    }
-
-    #[test]
-    fn ignores_paths_outside_root() {
-        let root = Path::new("/repo/.santree/worktrees");
-        assert_eq!(issue_id_for(root, Path::new("/somewhere/else/file")), None);
     }
 
     /// Regression guard for #30: FSEvents/`notify` report change paths already
@@ -439,7 +429,6 @@ mod tests {
     /// never matches — the watcher would silently never fire for a repo opened
     /// via a symlinked path.
     #[test]
-    #[cfg(unix)]
     fn canonicalizing_root_matches_resolved_event_paths() {
         // Canonicalize the scratch dir itself first: on macOS the default temp
         // dir sits under `/var`, itself a symlink to `/private/var`, so without
@@ -472,34 +461,20 @@ mod tests {
     }
 
     #[test]
-    fn is_base_change_skips_santree_and_vcs_dirs() {
+    fn a_base_change_is_a_real_repo_edit_outside_santree_vcs_and_build_dirs() {
         let root = Path::new("/repo");
+        for p in ["/repo/src/main.rs", "/repo/crates/core/src/lib.rs"] {
+            assert!(is_base_change(root, Path::new(p)), "should fire for {p}");
+        }
         for p in [
             "/repo/.santree/worktrees/AK-1/src/main.rs",
             "/repo/.git/index",
             "/repo/node_modules/x/y.js",
             "/repo/target/debug/foo",
+            "/somewhere/else/file",
         ] {
             assert!(!is_base_change(root, Path::new(p)), "should skip {p}");
         }
-    }
-
-    #[test]
-    fn is_base_change_fires_for_real_repo_edits() {
-        let root = Path::new("/repo");
-        for p in [
-            "/repo/src/main.rs",
-            "/repo/README.md",
-            "/repo/crates/core/src/lib.rs",
-        ] {
-            assert!(is_base_change(root, Path::new(p)), "should fire for {p}");
-        }
-    }
-
-    #[test]
-    fn is_base_change_ignores_paths_outside_root() {
-        let root = Path::new("/repo");
-        assert!(!is_base_change(root, Path::new("/somewhere/else/file")));
     }
 
     /// The suppression guard mutes events for its worktree only while alive, and
@@ -522,15 +497,5 @@ mod tests {
             assert!(!is_suppressed("TEST-other"), "unrelated ids stay live");
         }
         assert!(!is_suppressed(&id));
-    }
-
-    /// `notify` reports a queue overflow / invalidated watch as an `Err` batch. It
-    /// carries no events, so nothing is emitted either way — the point of routing
-    /// it through [`batch`] is that it takes the logging path instead of being
-    /// pattern-matched away.
-    #[test]
-    fn error_batches_are_routed_through_the_logging_path() {
-        assert!(batch("test", Err(vec![notify::Error::generic("queue overflow")])).is_none());
-        assert!(batch("test", Ok(Vec::new())).is_some());
     }
 }

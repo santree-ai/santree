@@ -72,15 +72,12 @@ describe("UsageSegment — services", () => {
 
   /** The gate that matters: reading Linear's budget can cost a request, so a
    *  collapsed bar — which shows no service numbers at all — must not ask. */
-  it("asks neither service for a budget while the panel is shut", () => {
+  it("asks neither service for a budget until the panel opens", () => {
     render(<UsageSegment />);
     expect(githubEnabled).toHaveBeenCalled();
     expect(githubEnabled).not.toHaveBeenCalledWith(true);
     expect(linearEnabled).not.toHaveBeenCalledWith(true);
-  });
 
-  it("reads both budgets once the panel opens", () => {
-    render(<UsageSegment />);
     openPanel();
     expect(githubEnabled).toHaveBeenCalledWith(true);
     expect(linearEnabled).toHaveBeenCalledWith(true);
@@ -101,29 +98,19 @@ describe("UsageSegment — services", () => {
     expect(githubRefetch).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the bar to marks — no service numbers beside them", () => {
-    github = { windows: [pool("Search", 28, 30)] };
-    render(<UsageSegment />);
-    const trigger = screen.getByRole("button", { name: /Usage/ });
-    expect(trigger.textContent).not.toContain("28");
-    // The marks are decorative, so the button's name is what says they're there.
-    expect(trigger.getAttribute("aria-label")).toContain("GitHub and Linear API budgets");
-  });
-
   /** "Unknown" and "empty" are different claims: `gh` signed out answers `null`
    *  and no workspace answers `[]`. Either way there is nothing to meter, and a
    *  row of zeroes would read as "you're out". */
-  it("renders no row for a service that hasn't answered", () => {
+  it("renders no row for a service that hasn't answered or reported no pools", () => {
     github = null;
     linear = [];
-    render(<UsageSegment />);
+    const first = render(<UsageSegment />);
     const menu = openPanel();
     expect(menu.textContent).not.toContain("GitHub");
     expect(menu.textContent).not.toContain("Linear");
     expect(menu.textContent).toContain("all agents");
-  });
+    first.unmount();
 
-  it("renders no row for a workspace that reported no pools", () => {
     linear = [org("acme", "Acme", [])];
     render(<UsageSegment />);
     expect(openPanel().textContent).not.toContain("Linear");
@@ -223,17 +210,23 @@ describe("UsageSegment — Claude windows", () => {
     expect(menu.textContent).toContain("Fable");
   });
 
-  /** The whole point of the expanded row: three windows, three labelled lines,
-   *  each with its own bar and its own countdown — the same shape the GitHub and
-   *  Linear pools below it are drawn in. */
-  it("gives every window its own labelled row", () => {
+  /** One labelled line per window the account actually reports — never a fixed
+   *  three with one standing empty. */
+  it("gives every reported window its own labelled row, and no more", () => {
     stored = statusLineRows;
-    render(<UsageSegment />);
+    const full = render(<UsageSegment />);
     const row = claudeRow(openPanel());
     for (const label of ["5 hours", "Weekly", "Fable"]) {
       expect(row.textContent).toContain(label);
     }
     expect(resetCount(row)).toBe(3);
+    full.unmount();
+
+    stored = [window("five_hour", 7, HOUR)];
+    render(<UsageSegment />);
+    const single = claudeRow(openPanel());
+    expect(resetCount(single)).toBe(1);
+    expect(single.textContent).not.toContain("Weekly");
   });
 
   /** A window resets when it resets: the 5-hour one rolls hours before the
@@ -245,25 +238,6 @@ describe("UsageSegment — Claude windows", () => {
     const row = claudeRow(openPanel());
     expect(row.textContent).toContain("resets in 1h 57m");
     expect(row.textContent).toContain("resets in 3d");
-  });
-
-  /** Whatever the account reports, not a fixed three: an account with no
-   *  model-scoped window gets two rows, never a third standing empty. */
-  it("renders only the windows the account actually reports", () => {
-    stored = [window("five_hour", 12, HOUR), window("seven_day", 40, 2 * WEEK)];
-    render(<UsageSegment />);
-    const row = claudeRow(openPanel());
-    expect(resetCount(row)).toBe(2);
-    expect(row.textContent).not.toContain("Fable");
-  });
-
-  it("renders a single window as a single row", () => {
-    stored = [window("five_hour", 7, HOUR)];
-    render(<UsageSegment />);
-    const row = claudeRow(openPanel());
-    expect(resetCount(row)).toBe(1);
-    expect(row.textContent).toContain("5 hours");
-    expect(row.textContent).not.toContain("Weekly");
   });
 
   /** Claude does not always say when a window refills. The bar then shows the

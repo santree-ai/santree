@@ -196,7 +196,13 @@ mod tests {
 
         assert_eq!(signed.root, app.join("server"));
         assert_eq!(opt_in.root, app.join("server-optin"));
+        // A short app data dir keeps the run dir in it, and discovery scans
+        // the fallback too.
         assert_eq!(signed.run, app.join("server/run"));
+        assert_eq!(
+            signed.run_dirs(),
+            [app.join("server/run"), tmp.path().join("santree-501/run")]
+        );
         assert_eq!(
             signed.bin,
             app.join(format!(
@@ -209,26 +215,6 @@ mod tests {
         // An opted-in dev server can never be the one a signed app dials.
         assert_ne!(signed.socket_for(1), opt_in.socket_for(1));
         assert_ne!(signed.fallback_parent, opt_in.fallback_parent);
-    }
-
-    #[test]
-    fn a_short_app_data_dir_keeps_the_run_dir_in_it_and_scans_the_fallback_too() {
-        let tmp = scratch();
-        let layout = Layout::resolve_in(
-            &tmp.path().join("app"),
-            SIGNED,
-            &tmp.path().join("logs"),
-            tmp.path(),
-            501,
-        )
-        .unwrap();
-        assert_eq!(layout.run, tmp.path().join("app/server/run"));
-        assert_eq!(
-            layout.other_run.as_deref(),
-            Some(tmp.path().join("santree-501/run").as_path())
-        );
-        assert_eq!(layout.run_dirs().len(), 2);
-        assert_eq!(layout.run_dirs()[0], layout.run);
     }
 
     #[test]

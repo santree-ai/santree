@@ -174,7 +174,8 @@ mod tests {
     }
 
     /// The whole contract in one: stdin reaches the command, its stdout and
-    /// stderr come back separately, and its exit code is preserved.
+    /// stderr come back separately, and its exit code is preserved — a signal
+    /// death as `128 + signal`, like a shell would report it.
     #[test]
     fn passthrough_forwards_stdin_stdout_stderr_and_exit_code() {
         let payload = br#"{"session_id":"s1","context_window":{"used_percentage":12}}"#;
@@ -192,19 +193,10 @@ mod tests {
         let out = run("definitely-not-a-command-xyz", b"", TIMEOUT);
         assert_eq!(out.exit, Exit::Code(127));
         assert!(!out.stderr.is_empty());
-    }
 
-    /// The command string is the shell's to interpret — quotes, pipes and
-    /// expansions all work because we never split it ourselves.
-    #[test]
-    fn passthrough_hands_the_command_to_sh_as_one_argument() {
-        let out = run(
-            r#"printf '%s|%s' "a b" 'c d' | tr a-z A-Z; printf "$X""#,
-            b"",
-            TIMEOUT,
-        );
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "A B|C D");
-        assert_eq!(out.exit, Exit::Code(0));
+        // A signal death reads like a shell's exit code.
+        let out = run("kill -TERM $$", b"", TIMEOUT);
+        assert_eq!(out.exit, Exit::Code(128 + 15));
     }
 
     /// A hung script is killed at the deadline, what it printed first is kept,
@@ -224,11 +216,5 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
-    }
-
-    #[test]
-    fn a_signal_death_reads_like_a_shell_exit_code() {
-        let out = run("kill -TERM $$", b"", TIMEOUT);
-        assert_eq!(out.exit, Exit::Code(128 + 15));
     }
 }

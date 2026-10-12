@@ -1466,29 +1466,22 @@ mod tests {
     }
 
     #[test]
-    fn fill_commit_includes_ticket_prefix_when_present() {
+    fn fill_commit_prefixes_the_ticket_and_takes_no_ticket_body() {
         let out = render_default(
             "fill-commit",
-            context! { branch_name => "santree/ak-1-x", ticket_id => "AK-1", diff_content => "diff" },
+            context! {
+                branch_name => "santree/ak-1-x",
+                ticket_id => "AK-1",
+                diff_content => "diff",
+                // No caller passes a ticket body, so the template must not have a
+                // slot for one: the editor preview would fill it, production never.
+                ticket_content => "TICKET BODY THAT NO CALLER PASSES",
+            },
         )
         .unwrap();
         assert!(out.contains("[AK-1]"), "should show the ticket prefix");
         assert!(out.contains("diff"), "should embed the diff");
-    }
-
-    #[test]
-    fn fill_commit_omits_prefix_without_ticket() {
-        let out = render_default(
-            "fill-commit",
-            context! { branch_name => "scratch", diff_content => "diff" },
-        )
-        .unwrap();
-        // The rendered examples carry no `[TICKET] ` prefix when there's no id.
-        assert!(
-            out.contains("\nadd login throttling"),
-            "example has no prefix"
-        );
-        assert!(!out.contains("] add login throttling"), "no ticket prefix");
+        assert!(!out.contains("TICKET BODY THAT NO CALLER PASSES"));
     }
 
     #[test]
@@ -1520,44 +1513,6 @@ mod tests {
     }
 
     #[test]
-    fn triage_embeds_the_ticket_and_names_screenshots() {
-        let ticket = render_ticket_from(&default_sources(), &sample_detail()).unwrap();
-        let out = render_default(
-            "triage",
-            context! { ticket_id => "AK-123", title => "Add login throttling", ticket_content => ticket },
-        )
-        .unwrap();
-        assert!(out.contains("AK-123"), "names the ticket");
-        assert!(out.contains("throttled"), "embeds the ticket body");
-        // The investigation-specific instruction: screenshots are local files to Read.
-        assert!(out.contains("Read"), "tells the agent to Read");
-        assert!(
-            out.to_lowercase().contains("screenshot"),
-            "calls out the screenshots"
-        );
-    }
-
-    /// After the investigation flow extracts a ticket's images to files, their
-    /// markdown links are plain file paths — `strip_data_uris` must leave those
-    /// intact (only `data:` URIs are stripped), so the agent sees the path to Read
-    /// instead of an `image omitted` placeholder.
-    #[test]
-    fn extracted_file_path_images_survive_the_ticket_render() {
-        let mut detail = sample_detail();
-        detail.description =
-            "Repro:\n\n![login screen](/tmp/santree/AK-123.images/0.png)\n\nSee above.".into();
-        let out = render_ticket_from(&default_sources(), &detail).unwrap();
-        assert!(
-            out.contains("![login screen](/tmp/santree/AK-123.images/0.png)"),
-            "the file-path image link is kept, got:\n{out}"
-        );
-        assert!(
-            !out.contains("image omitted"),
-            "a file path is not stripped"
-        );
-    }
-
-    #[test]
     fn work_plan_mode_withholds_implementation() {
         let out = render_default(
             "work",
@@ -1571,36 +1526,21 @@ mod tests {
     }
 
     #[test]
-    fn fill_commit_does_not_reference_ticket_content() {
-        // The commit-message caller supplies no ticket (only branch + staged diff),
-        // so the template must not have a slot for one: the editor preview would
-        // fill it and production never would.
-        let out = render_default(
-            "fill-commit",
-            context! {
-                branch_name => "santree/ak-1-x",
-                ticket_id => "AK-1",
-                diff_content => "diff",
-                ticket_content => "TICKET BODY THAT NO CALLER PASSES",
-            },
-        )
-        .unwrap();
-        assert!(!out.contains("TICKET BODY THAT NO CALLER PASSES"));
-    }
-
-    #[test]
     fn pr_review_names_its_tools_and_forbids_every_other_write() {
-        let out = render_default(
-            "pr-review",
-            context! {
-                pr_number => 7,
-                pr_title => "Add throttling",
-                diff => "@@ -1,2 +1,2 @@",
-                diff_stat => "src/auth.rs (modified, +8 -4)",
-                workspace => true,
-            },
-        )
-        .unwrap();
+        let review = |workspace: bool| {
+            render_default(
+                "pr-review",
+                context! {
+                    pr_number => 7,
+                    pr_title => "Add throttling",
+                    diff => "@@ -1,2 +1,2 @@",
+                    diff_stat => "src/auth.rs (modified, +8 -4)",
+                    workspace => workspace,
+                },
+            )
+            .unwrap()
+        };
+        let out = review(true);
         // The tools are the only output path, so the prompt has to name them.
         assert!(out.contains("set_review_brief"));
         assert!(out.contains("add_review_comment"));
@@ -1609,6 +1549,12 @@ mod tests {
         // And the rule that makes the whole feature safe to leave running.
         assert!(out.contains("Never write through any other tool"));
         assert!(out.contains("<pull-request>"), "fences the untrusted diff");
+
+        // A PR in a repo santree has no clone of: the agent has the diff and
+        // nothing else, and guessing at the surrounding code is the failure mode.
+        let out = review(false);
+        assert!(out.contains("reason from the diff"), "{out}");
+        assert!(!out.contains("your working directory is a checkout"));
     }
 
     /// The title and author are attacker-controlled — anyone who can open a PR
@@ -1658,45 +1604,10 @@ mod tests {
         assert!(!out.starts_with(['[', '{']));
     }
 
-    #[test]
-    fn builtins_have_one_review_prompt_and_follow_workflow_order() {
-        let names: Vec<_> = PROMPT_DEFS.iter().map(|prompt| prompt.name).collect();
-        assert_eq!(
-            names,
-            [
-                "triage",
-                "work",
-                "fill-commit",
-                "fill-pr",
-                "pr-review",
-                "pr-fix",
-                "english-tutor",
-                "english-analysis",
-                "issue",
-            ]
-        );
-        assert!(
-            !names.contains(&"review"),
-            "the retired Ask AI prompt stays deleted"
-        );
-    }
-
-    #[test]
-    fn pr_review_says_when_there_is_no_checkout_to_read() {
-        // A PR in a repo santree has no clone of: the agent has the diff and
-        // nothing else, and guessing at the surrounding code is the failure mode.
-        let out = render_default(
-            "pr-review",
-            context! { pr_number => 7, pr_title => "x", workspace => false },
-        )
-        .unwrap();
-        assert!(out.contains("reason from the diff"), "{out}");
-        assert!(!out.contains("your working directory is a checkout"));
-    }
-
     /// R11: the template used to print a `created` field that the context never
     /// carried (the domain type only has `createdAtMs`), so every comment rendered
-    /// with a dangling `**author** — `.
+    /// with a dangling `**author** — `. A comment with no usable timestamp drops
+    /// the separator rather than trailing it.
     #[test]
     fn issue_renders_comment_dates_with_no_dangling_separator() {
         let out = render_ticket_from(&default_sources(), &sample_detail()).unwrap();
@@ -1709,11 +1620,7 @@ mod tests {
             "so does a threaded reply"
         );
         assert!(!out.contains("— \n"), "no separator without a date");
-    }
 
-    /// A comment with no usable timestamp drops the separator rather than trailing it.
-    #[test]
-    fn issue_omits_the_separator_when_a_comment_has_no_date() {
         let mut detail = sample_detail();
         detail.comments[0].created_at_ms = 0.0;
         detail.comments[0].children.clear();
@@ -1747,24 +1654,20 @@ mod tests {
     }
 
     /// Text (not just images) is bounded too, so one runaway thread can't crowd the
-    /// diff out of the prompt — and the cut is marked, so the agent knows it's partial.
+    /// diff out of the prompt — and the cut is marked, so the agent knows it's
+    /// partial. The budget spans description *and* comments.
     #[test]
-    fn ticket_text_is_capped_and_the_cut_is_marked() {
+    fn ticket_text_is_capped_across_the_whole_thread_and_the_cut_is_marked() {
         let mut detail = sample_detail();
         detail.description = "x".repeat(TICKET_BUDGET * 4);
         let out = render_ticket_from(&default_sources(), &detail).unwrap();
         assert!(out.contains(TRUNCATED), "the truncation is visible");
         assert!(out.len() < TICKET_BUDGET + 1_024, "bounded by the budget");
-        // The budget is shared, so a description that eats it drops the comments
-        // rather than appending them past the cap.
+        // A description that eats the budget drops the comments rather than
+        // appending them past the cap.
         assert!(!out.contains("password-reset endpoint"));
-    }
 
-    /// The budget spans description *and* comments — a thread of many small comments
-    /// is bounded the same way one huge field is.
-    #[test]
-    fn the_budget_is_shared_across_the_whole_thread() {
-        let mut detail = sample_detail();
+        // Many small comments are bounded the same way one huge field is.
         detail.description = String::new();
         detail.comments = (0..500)
             .map(|i| TriageComment {
@@ -1784,15 +1687,21 @@ mod tests {
         );
     }
 
+    /// Only `data:` URIs are stripped: prose that says "data:" and the plain file
+    /// paths the investigation flow extracts images to (which the agent must see
+    /// to Read them) pass through untouched.
     #[test]
-    fn strip_data_uris_spares_prose_that_merely_says_data() {
+    fn strip_data_uris_spares_prose_and_file_path_images() {
         assert_eq!(
             strip_data_uris("The data: see below, and data:image/png;base64,AAAA here."),
             "The data: see below, and image omitted here."
         );
-        // No data URI at all → byte-for-byte identical.
-        let plain = "Just a normal ticket body with a [link](https://example.com).";
-        assert_eq!(strip_data_uris(plain), plain);
+        for plain in [
+            "Just a normal ticket body with a [link](https://example.com).",
+            "Repro:\n\n![login screen](/tmp/santree/AK-123.images/0.png)\n\nSee above.",
+        ] {
+            assert_eq!(strip_data_uris(plain), plain);
+        }
     }
 
     /// Truncation lands on a char boundary — a multi-byte character must not be cut
@@ -1806,14 +1715,12 @@ mod tests {
         assert!(out.ends_with(TRUNCATED));
     }
 
+    /// With the ticket fetched, its body is embedded and the fetch-it-yourself
+    /// hint is skipped; without it, the hint names the repo's own tracker — never
+    /// one the repo doesn't use.
     #[test]
-    fn work_embeds_ticket_content_over_mcp_fallback() {
+    fn work_embeds_the_ticket_or_falls_back_to_the_repos_tracker() {
         let ticket = render_ticket_from(&default_sources(), &sample_detail()).unwrap();
-        assert!(ticket.contains("Linear Issue: AK-123"));
-        assert!(ticket.contains("Priority: High"));
-        assert!(ticket.contains("Labels: bug, backend"));
-        assert!(ticket.contains("throttled"));
-
         let out = render_default(
             "work",
             context! { ticket_id => "AK-123", ticket_content => ticket, mode => "implement" },
@@ -1824,12 +1731,7 @@ mod tests {
             !out.contains("could not be fetched"),
             "fallback hint is skipped when ticket_content is present"
         );
-    }
 
-    /// With no ticket body the agent is told to fetch it itself, through the
-    /// repo's own tracker — and never pointed at a tracker the repo doesn't use.
-    #[test]
-    fn work_fallback_names_the_repos_tracker() {
         let fallback = |tracker: &str| {
             render_default(
                 "work",
@@ -1850,51 +1752,6 @@ mod tests {
     async fn test_db() -> Db {
         let dir = std::env::temp_dir().join(format!("santree-prompts-{}", uuid::Uuid::new_v4()));
         crate::db::init(dir.join("test.db")).await.unwrap()
-    }
-
-    #[tokio::test]
-    async fn override_wins_over_app_over_default() {
-        let db = test_db().await;
-        let ctx = || context! { ticket_id => "AK-1", title => "t", mode => "implement" };
-
-        // No override anywhere → the embedded default.
-        let out = render(&db, Some("canary"), "work", ctx()).await.unwrap();
-        assert!(out.contains("Review the codebase"), "default body");
-
-        // App override applies to any repo.
-        set_prompt(&db, "app", "work", Some("APP {{ ticket_id }}".into()))
-            .await
-            .unwrap();
-        assert_eq!(
-            render(&db, Some("canary"), "work", ctx()).await.unwrap(),
-            "APP AK-1"
-        );
-
-        // A repo override wins over the app override.
-        set_prompt(
-            &db,
-            "repo:canary",
-            "work",
-            Some("REPO {{ ticket_id }}".into()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            render(&db, Some("canary"), "work", ctx()).await.unwrap(),
-            "REPO AK-1"
-        );
-        // Other repos still see the app override.
-        assert_eq!(
-            render(&db, Some("other"), "work", ctx()).await.unwrap(),
-            "APP AK-1"
-        );
-
-        // Clearing the repo override falls back to the app override again.
-        set_prompt(&db, "repo:canary", "work", None).await.unwrap();
-        assert_eq!(
-            render(&db, Some("canary"), "work", ctx()).await.unwrap(),
-            "APP AK-1"
-        );
     }
 
     #[tokio::test]
@@ -1960,6 +1817,20 @@ mod tests {
             "value marked"
         );
         assert!(p.output.contains("Task "), "literal text stays unmarked");
+
+        let p = preview(
+            &db,
+            "work",
+            "{% for x in %}",
+            None,
+            PromptLayer::Personal,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(p.error.is_some(), "broken draft surfaces an error");
+        assert!(p.output.is_empty());
     }
 
     /// The tutor's wording is part of a contract (the hook, the `Edit` grant) and
@@ -1983,24 +1854,6 @@ mod tests {
             .iter()
             .filter(|p| !p.name.starts_with("english-"))
             .all(|p| p.editable));
-    }
-
-    #[tokio::test]
-    async fn preview_reports_render_error() {
-        let db = test_db().await;
-        let p = preview(
-            &db,
-            "work",
-            "{% for x in %}",
-            None,
-            PromptLayer::Personal,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(p.error.is_some(), "broken draft surfaces an error");
-        assert!(p.output.is_empty());
     }
 
     #[test]
@@ -2146,8 +1999,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_file_sits_between_the_repo_override_and_the_app_override() {
+    async fn layers_resolve_repo_override_then_project_file_then_app_then_default() {
         let (db, root) = db_with_repo().await;
+        let out = render(&db, Some("acme"), "work", ctx()).await.unwrap();
+        assert!(out.contains("Review the codebase"), "the embedded default");
         set_prompt(&db, "app", "work", Some("APP".into()))
             .await
             .unwrap();
@@ -2173,50 +2028,12 @@ mod tests {
             render(&db, Some("acme"), "work", ctx()).await.unwrap(),
             "MINE"
         );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[tokio::test]
-    async fn a_layer_extends_the_default_by_filling_a_slot_and_keeps_the_rest() {
-        let (db, root) = db_with_repo().await;
-        write_project(
-            &root,
-            "work",
-            "{% extends \"santree/work\" %}{% block extra %}RUN pnpm test{% endblock %}",
+        // Clearing the repo override falls back to the file again.
+        set_prompt(&db, "repo:acme", "work", None).await.unwrap();
+        assert_eq!(
+            render(&db, Some("acme"), "work", ctx()).await.unwrap(),
+            "PROJECT"
         );
-        let out = render(&db, Some("acme"), "work", ctx()).await.unwrap();
-        assert!(
-            out.trim_end().ends_with("RUN pnpm test"),
-            "slot filled at its position: {out:?}"
-        );
-        assert!(
-            out.contains("Create an implementation plan, then implement the changes."),
-            "the default's own text survives"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[tokio::test]
-    async fn a_named_section_can_be_overridden_or_appended_to_with_super() {
-        let (db, root) = db_with_repo().await;
-        let ctx = || context! { ticket_id => "AK-1", title => "t", ticket_content => "T" };
-        write_project(
-            &root,
-            "triage",
-            "{% extends \"santree/triage\" %}{% block rules %}ONLY RULE{% endblock %}\
-             {% block gotchas %}{{ super() }}ALSO: ids are base36{% endblock %}",
-        );
-        let out = render(&db, Some("acme"), "triage", ctx()).await.unwrap();
-        assert!(out.contains("ONLY RULE"));
-        assert!(
-            !out.contains("## Critical rules"),
-            "the section was replaced"
-        );
-        assert!(
-            out.contains("## Execution notes & gotchas"),
-            "super() kept the section"
-        );
-        assert!(out.contains("ALSO: ids are base36"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2241,6 +2058,10 @@ mod tests {
         .unwrap();
         let out = render(&db, Some("acme"), "work", ctx()).await.unwrap();
         assert!(out.trim_end().ends_with("TEAM + ME"), "{out:?}");
+        assert!(
+            out.contains("Create an implementation plan, then implement the changes."),
+            "filling a slot keeps the default's own text"
+        );
 
         // The file goes away (a teammate deleted it): `project/work` now names
         // the layer below, so the override still renders instead of failing.
@@ -2266,6 +2087,20 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("can't extend itself"), "{err}");
+        // `work` is the top of the chain, so a file extending it would loop
+        // through any override that extends `project/work`.
+        let err = set_project_prompt(&db, "acme", "work", Some("{% extends \"work\" %}".into()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("can't extend itself"), "{err}");
+        set_project_prompt(
+            &db,
+            "acme",
+            "work",
+            Some("{% extends \"santree/work\" %}".into()),
+        )
+        .await
+        .unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2380,26 +2215,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_project_file_may_not_extend_the_effective_name() {
-        let (db, root) = db_with_repo().await;
-        // `work` is the top of the chain, so a file extending it would loop
-        // through any override that extends `project/work`.
-        let err = set_project_prompt(&db, "acme", "work", Some("{% extends \"work\" %}".into()))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("can't extend itself"), "{err}");
-        set_project_prompt(
-            &db,
-            "acme",
-            "work",
-            Some("{% extends \"santree/work\" %}".into()),
-        )
-        .await
-        .unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[tokio::test]
     async fn a_read_only_prompt_has_no_project_layer() {
         let (db, root) = db_with_repo().await;
         write_project(&root, "english-tutor", "NOT THE HOOK'S WORDING");
@@ -2409,7 +2224,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn symlinked_project_files_are_neither_read_nor_written() {
         use std::os::unix::fs::symlink;

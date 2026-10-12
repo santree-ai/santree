@@ -17,27 +17,23 @@ function schedule(teamKey: string, team: string): TriageSchedule {
 }
 
 describe("groupTriageByTeam", () => {
-  it("hangs each ticket under its team's schedule, schedules in the backend's order", () => {
+  // A rotation with nothing in it is still a rotation: its card stays.
+  it("hangs each ticket under its team's schedule, schedules in the backend's order, empty ones kept", () => {
     const groups = groupTriageByTeam(
       [triageTicket("MS-1", { team: "MSG" }), triageTicket("AK-1", { team: "AK" })],
       [triageTicket("AK-9", { team: "AK" })],
-      [schedule("AK", "App"), schedule("MSG", "Messaging")],
+      [schedule("AK", "App"), schedule("MSG", "Messaging"), schedule("OPS", "Ops")],
     );
     expect(groups.map((g) => [g.key, g.name])).toEqual([
       ["AK", "App"],
       ["MSG", "Messaging"],
+      ["OPS", "Ops"],
     ]);
+    expect(groups[2].active).toEqual([]);
     expect(groups[0].active.map((t) => t.id)).toEqual(["AK-1"]);
     expect(groups[0].snoozed.map((t) => t.id)).toEqual(["AK-9"]);
     expect(groups[1].active.map((t) => t.id)).toEqual(["MS-1"]);
     expect(groups[1].schedule?.scheduleName).toBe("Messaging on-call");
-  });
-
-  /** A rotation with nothing in it is still a rotation: its card stays. */
-  it("keeps a schedule with no tickets", () => {
-    const groups = groupTriageByTeam([], [], [schedule("AK", "App")]);
-    expect(groups).toHaveLength(1);
-    expect(groups[0].active).toEqual([]);
   });
 
   /** The schedule read can land after the queue's, or miss a team a ticket was

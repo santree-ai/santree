@@ -77,13 +77,14 @@ describe("useDetectedAgents", () => {
     expect(sawSessions()).toBe(false);
   });
 
-  it("re-reads the session rows when a pane opens", () => {
+  it("re-reads the session rows and scans the process table when a pane opens", () => {
     const { rerender } = mount([]);
 
     rerender([pane("tree:AK-1:tab:a1")]);
 
     expect(sawSessions()).toBe(true);
     expect(invalidated.some((k) => k[0] === "worktree-sessions")).toBe(true);
+    expect(sawProcesses()).toBe(true);
   });
 
   // The bug: closing the last agent tab is exactly when a stale row is left
@@ -97,14 +98,6 @@ describe("useDetectedAgents", () => {
     expect(sawSessions()).toBe(true);
     expect(invalidated.some((k) => k[0] === "worktree-sessions")).toBe(true);
     expect(sawProcesses()).toBe(false);
-  });
-
-  it("still scans the process table when a pane opens", () => {
-    const { rerender } = mount([]);
-
-    rerender([pane("tree:AK-1:tab:a1")]);
-
-    expect(sawProcesses()).toBe(true);
   });
 
   // A re-render that hands back an equal-but-new array is not a change; the

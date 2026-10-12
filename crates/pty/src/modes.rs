@@ -212,28 +212,30 @@ mod tests {
         String::from_utf8(t.snapshot().preamble(false)).unwrap()
     }
 
+    /// The last explicit state of each tracked mode: several parameters in one
+    /// sequence, untracked ones ignored, the three alt-screen modes as one
+    /// state, and RIS resetting everything.
     #[test]
-    fn decset_and_decrst_record_the_last_explicit_state() {
-        assert_eq!(
-            pre(b"\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?1000l\x1b[?1002h\x1b[?1h"),
-            "\x1b[?1h\x1b[?2004h\x1b[?1002h\x1b[?1006h"
-        );
-        assert_eq!(pre(b"\x1b[?2004h\x1b[?2004l"), "");
-    }
-
-    #[test]
-    fn several_parameters_in_one_sequence_and_untracked_ones_ignored() {
-        assert_eq!(
-            pre(b"\x1b[?1;2004;25;1049h"),
-            "\x1b[?1049h\x1b[?1h\x1b[?2004h"
-        );
-        assert_eq!(pre(b"\x1b[?25l\x1b[?7h\x1b[?1005h\x1b[?1015h"), "");
-    }
-
-    #[test]
-    fn the_three_alt_screen_modes_are_one_state() {
-        assert_eq!(pre(b"\x1b[?47h"), "\x1b[?1049h");
-        assert_eq!(pre(b"\x1b[?1047h\x1b[?1049l"), "");
+    fn the_tracker_keeps_the_last_explicit_state_of_each_mode() {
+        for (stream, preamble) in [
+            (
+                &b"\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?1000l\x1b[?1002h\x1b[?1h"[..],
+                "\x1b[?1h\x1b[?2004h\x1b[?1002h\x1b[?1006h",
+            ),
+            (b"\x1b[?2004h\x1b[?2004l", ""),
+            (b"\x1b[?1;2004;25;1049h", "\x1b[?1049h\x1b[?1h\x1b[?2004h"),
+            (b"\x1b[?25l\x1b[?7h\x1b[?1005h\x1b[?1015h", ""),
+            (b"\x1b[?47h", "\x1b[?1049h"),
+            (b"\x1b[?1047h\x1b[?1049l", ""),
+            (b"\x1b[?2004h\x1b[?1049h\x1b[?1000h\x1bc", ""),
+        ] {
+            assert_eq!(
+                pre(stream),
+                preamble,
+                "{:?}",
+                String::from_utf8_lossy(stream)
+            );
+        }
     }
 
     #[test]
@@ -249,11 +251,6 @@ mod tests {
                 "cut at {cut}"
             );
         }
-    }
-
-    #[test]
-    fn ris_resets_everything() {
-        assert_eq!(pre(b"\x1b[?2004h\x1b[?1049h\x1b[?1000h\x1bc"), "");
     }
 
     #[test]

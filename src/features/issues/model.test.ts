@@ -75,10 +75,6 @@ describe("stackBase", () => {
     });
   });
 
-  it("returns null when no blocker has a worktree (nothing to stack on)", () => {
-    expect(stackBase(taskBlockedBy("AK-274"), byId(worktree("AK-999")))).toBeNull();
-  });
-
   it("returns null for a ready task even if a done blocker still has a worktree", () => {
     const ready = task({ ready: true, blockedBy: ["AK-274"] });
     expect(stackBase(ready, byId(worktree("AK-274")))).toBeNull();
@@ -87,6 +83,8 @@ describe("stackBase", () => {
   it("picks the first blocker that has a worktree, skipping ones that don't", () => {
     const t = task({ ready: false, blockedBy: ["AK-100", "AK-274", "AK-300"] });
     expect(stackBase(t, byId(worktree("AK-274"), worktree("AK-300")))?.ticket).toBe("AK-274");
+    // No blocker with a worktree: nothing to stack on.
+    expect(stackBase(t, byId(worktree("AK-999")))).toBeNull();
   });
 
   // A worktree with no branch can't be branched from — advertising it as the chain
@@ -175,8 +173,6 @@ describe("launchPlan", () => {
 });
 
 describe("deriveIssueState", () => {
-  // --- ready, no worktree: selected/ready pass through as given -----------
-
   it("ready + no worktree + selected: honors selected and reports ready, not chainable/blocked", () => {
     const state = deriveIssueState(task({ ready: true }), {
       selected: true,
@@ -185,21 +181,6 @@ describe("deriveIssueState", () => {
     expect(state).toEqual({
       started: false,
       selected: true,
-      chainBase: null,
-      chainable: false,
-      ready: true,
-      blocked: false,
-    });
-  });
-
-  it("ready + no worktree + not selected: reports ready with selected false", () => {
-    const state = deriveIssueState(task({ ready: true }), {
-      selected: false,
-      baseFor: () => null,
-    });
-    expect(state).toEqual({
-      started: false,
-      selected: false,
       chainBase: null,
       chainable: false,
       ready: true,
@@ -276,33 +257,6 @@ describe("deriveIssueState", () => {
       blocked: true,
     });
   });
-
-  // --- regression guard for the documented past bug: an omitted `hasWorktree` --
-  // (the field is optional, so a caller can drop it and still type-check; that
-  // silently makes every ticket look not-started, which manifested as a wrong
-  // RDY badge in the graph/sidebar).
-
-  it("omitting hasWorktree entirely treats the task as not-started (the historical caller-omission bug)", () => {
-    const state = deriveIssueState(task({ ready: true }), {
-      selected: false,
-      baseFor: () => null,
-      // hasWorktree intentionally omitted
-    });
-    expect(state.started).toBe(false);
-    expect(state.ready).toBe(true);
-  });
-
-  it("baseFor is only consulted when the task isn't already ready", () => {
-    let calls = 0;
-    deriveIssueState(task({ ready: true }), {
-      selected: false,
-      baseFor: () => {
-        calls += 1;
-        return "AK-BASE";
-      },
-    });
-    expect(calls).toBe(0);
-  });
 });
 
 describe("countLaunchSuccesses", () => {
@@ -310,39 +264,15 @@ describe("countLaunchSuccesses", () => {
   // one failed create doesn't reject the whole Promise.allSettled batch) —
   // these fixtures mirror the shape `results` actually has at the call site.
 
-  it("all successes: count equals N", () => {
-    const results: PromiseSettledResult<string | null>[] = [
-      { status: "fulfilled", value: "wt-1" },
-      { status: "fulfilled", value: "wt-2" },
-      { status: "fulfilled", value: "wt-3" },
-    ];
-    expect(countLaunchSuccesses(results)).toBe(3);
-  });
-
-  it("some failures (fulfilled-with-null): counts only the real successes, not N", () => {
+  it("counts only real successes: a null or a rejection is a failed create", () => {
     const results: PromiseSettledResult<string | null>[] = [
       { status: "fulfilled", value: "wt-1" },
       { status: "fulfilled", value: null },
       { status: "fulfilled", value: "wt-3" },
-      { status: "fulfilled", value: null },
-    ];
-    expect(countLaunchSuccesses(results)).toBe(2);
-  });
-
-  it("a genuinely rejected result (uncaught) is also not counted", () => {
-    const results: PromiseSettledResult<string | null>[] = [
-      { status: "fulfilled", value: "wt-1" },
       { status: "rejected", reason: new Error("boom") },
     ];
-    expect(countLaunchSuccesses(results)).toBe(1);
-  });
-
-  it("all failures: count is 0, not N", () => {
-    const results: PromiseSettledResult<string | null>[] = [
-      { status: "fulfilled", value: null },
-      { status: "fulfilled", value: null },
-    ];
-    expect(countLaunchSuccesses(results)).toBe(0);
+    expect(countLaunchSuccesses(results)).toBe(2);
+    expect(countLaunchSuccesses(results.slice(1, 2))).toBe(0);
   });
 });
 

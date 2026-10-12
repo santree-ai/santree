@@ -69,9 +69,12 @@ describe("WorkRepoGate", () => {
     state.link = { kind: "Connected" };
   });
 
-  it("answers a ticket only one project carries without asking", async () => {
-    const answers = mount(["acme/infra"]);
-    await waitFor(() => expect(answers).toEqual(["acme/infra"]));
+  it.each([
+    "acme/infra",
+    "acme/box", // a Daedalus project, while santree can reach the box
+  ])("answers a ticket only %s carries without asking", async (only) => {
+    const answers = mount([only]);
+    await waitFor(() => expect(answers).toEqual([only]));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
@@ -118,12 +121,6 @@ describe("WorkRepoGate", () => {
     const answers = mount(TWO);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(answers).toEqual([null]));
-  });
-
-  it("answers with a Daedalus project while santree can reach the box", async () => {
-    const answers = mount(["acme/box"]);
-    await waitFor(() => expect(answers).toEqual(["acme/box"]));
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("never answers with a Daedalus project out of reach, and offers it only disabled", () => {

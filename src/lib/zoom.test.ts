@@ -12,13 +12,10 @@ describe("zoom ladder", () => {
     expect(step(step(DEFAULT_ZOOM, 1), -1)).toBe(DEFAULT_ZOOM);
   });
 
-  it("steps up and down through neighbouring rungs", () => {
+  it("steps through neighbouring rungs and clamps at both ends", () => {
     expect(step(1, 1)).toBe(1.1);
     expect(step(1, -1)).toBe(0.9);
     expect(step(1.25, 1)).toBe(1.5);
-  });
-
-  it("clamps at both ends instead of running off the ladder", () => {
     const [min] = ZOOM_STEPS;
     const max = ZOOM_STEPS[ZOOM_STEPS.length - 1];
     expect(step(min, -1)).toBe(min);
@@ -33,16 +30,14 @@ describe("zoom ladder", () => {
     expect(step(1.04, 1)).toBe(1.1);
   });
 
-  it("falls back to normal size for anything unusable in storage", () => {
+  it("restores a stored level, and falls back to normal size for anything unusable", () => {
+    localStorage.setItem(ZOOM_KEY, JSON.stringify(1.25));
+    expect(loadZoom()).toBe(1.25);
+
     for (const bad of ["", "null", "not json", '"1.2"', "-3", "0"]) {
       localStorage.setItem(ZOOM_KEY, bad);
       // A corrupt level must never render the app at 0× or a negative scale.
       expect(loadZoom()).toBe(DEFAULT_ZOOM);
     }
-  });
-
-  it("restores a previously stored level", () => {
-    localStorage.setItem(ZOOM_KEY, JSON.stringify(1.25));
-    expect(loadZoom()).toBe(1.25);
   });
 });

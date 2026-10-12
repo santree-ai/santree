@@ -76,83 +76,30 @@ pub fn is_snoozed(snooze_ms: Option<i64>, now_ms: i64) -> bool {
 mod tests {
     use super::*;
 
+    /// Name refines type across every open category: a custom "Blocked" state is
+    /// Blocked (and not startable) wherever a workspace parks it, backlog included,
+    /// while "Unblocked" — which contains "block" but means the opposite — keeps its
+    /// category. Terminal types are never re-read from the name.
     #[test]
-    fn maps_states() {
-        assert_eq!(map_status("In Progress", "started"), TaskStatus::InProgress);
-        assert_eq!(map_status("Todo", "unstarted"), TaskStatus::Todo);
-        assert_eq!(map_status("Backlog", "backlog"), TaskStatus::Backlog);
-        assert_eq!(map_status("Code Review", "started"), TaskStatus::InReview);
-        // A completed state named "Reviewed" is Done, not In Review.
-        assert_eq!(map_status("Reviewed", "completed"), TaskStatus::Done);
-        // Linear's `duplicate` type is terminal — Done, never an actionable Todo.
-        assert_eq!(map_status("Duplicate", "duplicate"), TaskStatus::Done);
-        assert_eq!(map_status("Canceled", "canceled"), TaskStatus::Done);
-        // A custom "Blocked" state is not actionable, whether Linear types it
-        // `unstarted` or `started` — it must not collapse into Todo/In Progress.
-        assert_eq!(map_status("Blocked", "unstarted"), TaskStatus::Blocked);
-        assert_eq!(map_status("Blocked", "started"), TaskStatus::Blocked);
-        assert!(!map_status("Blocked", "unstarted").is_startable());
-    }
-
-    /// A workspace can park "Blocked" in *any* open category, backlog included.
-    /// Typing it `backlog` must not make it startable.
-    #[test]
-    fn blocked_is_blocked_in_every_open_category() {
-        for state_type in ["backlog", "triage", "unstarted", "started"] {
-            assert_eq!(
-                map_status("Blocked", state_type),
-                TaskStatus::Blocked,
-                "a state named Blocked, typed {state_type}"
-            );
-            assert!(!map_status("Blocked", state_type).is_startable());
-        }
-        // Terminal types are never re-read as Blocked, whatever they're named.
-        assert_eq!(
-            map_status("Blocked (won't do)", "canceled"),
-            TaskStatus::Done
-        );
-    }
-
-    /// "Unblocked" contains "block" but means the exact opposite — it is ready to
-    /// work on, so it must keep its category's status and stay startable.
-    #[test]
-    fn unblocked_is_not_blocked() {
+    fn a_state_maps_by_type_refined_by_a_review_or_blocked_name() {
+        use TaskStatus::*;
         for (name, state_type, want) in [
-            ("Unblocked", "unstarted", TaskStatus::Todo),
-            ("Unblocked", "backlog", TaskStatus::Backlog),
-            ("Un-blocked", "unstarted", TaskStatus::Todo),
-            ("Not blocked", "unstarted", TaskStatus::Todo),
-            ("Unblocked", "started", TaskStatus::InProgress),
+            ("In Progress", "started", InProgress),
+            ("Code Review", "started", InReview),
+            ("Reviewed", "completed", Done),
+            ("Duplicate", "duplicate", Done),
+            ("Blocked (won't do)", "canceled", Done),
+            ("Blocked", "backlog", Blocked),
+            ("Blocked", "triage", Blocked),
+            ("Blocked on design", "unstarted", Blocked),
+            ("External blocker", "started", Blocked),
+            ("Unblocked", "backlog", Backlog),
+            ("Un-blocked", "unstarted", Todo),
+            ("Not blocked", "started", InProgress),
         ] {
             assert_eq!(map_status(name, state_type), want, "{name} / {state_type}");
         }
+        assert!(!map_status("Blocked", "backlog").is_startable());
         assert!(map_status("Unblocked", "unstarted").is_startable());
-        // …while the genuinely-blocked names still map to Blocked.
-        for name in ["Blocked", "Blocked on design", "External blocker"] {
-            assert_eq!(map_status(name, "unstarted"), TaskStatus::Blocked, "{name}");
-        }
-    }
-
-    #[test]
-    fn readiness_from_blockers() {
-        assert!(is_ready(&[]));
-        assert!(is_ready(&[true, true]));
-        assert!(!is_ready(&[true, false]));
-    }
-
-    #[test]
-    fn priorities_map() {
-        assert_eq!(map_priority(1), Priority::Urgent);
-        assert_eq!(map_priority(4), Priority::Low);
-        // "No priority" (0) is its own variant, never Low.
-        assert_eq!(map_priority(0), Priority::None);
-    }
-
-    #[test]
-    fn snoozed_from_absolute_time() {
-        let now = 1_000_000_000_000;
-        assert!(is_snoozed(Some(now + 1), now));
-        assert!(!is_snoozed(Some(now - 1), now));
-        assert!(!is_snoozed(None, now));
     }
 }

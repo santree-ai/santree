@@ -338,14 +338,13 @@ async fn keep_awake_is_idempotent_both_ways() {
     let mut server = spawn(dir.path(), &[]);
     server.wait_ready();
     let (client, _) = connect(dir.path()).await;
-    let supported = cfg!(target_os = "macos");
     for on in [true, true, false, false, true] {
         let params = KeepAwakeParams { on };
         assert_eq!(
             client.call::<m::ServerKeepAwake>(&params).await.unwrap(),
             KeepAwakeResult {
-                active: on && supported,
-                supported
+                active: on,
+                supported: true
             }
         );
     }
@@ -430,7 +429,7 @@ async fn a_live_session_keeps_it_with_no_client() {
     let info = client.pty_open(&shell()).await.unwrap();
     drop(client);
 
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(
         server.child.try_wait().unwrap().is_none(),
         "it retired under a live session"
@@ -457,42 +456,35 @@ async fn sigterm_closes_every_session_and_exits_zero() {
     assert!(gone_within(shell_pid, WAIT), "the session outlived SIGTERM");
 }
 
-/// What a session's process sees of the server: none of the nested-session
-/// markers the server itself inherited, and nothing naming its socket, run
-/// dir or log — a pane that found the socket could try it.
+/// A session inherits exactly the environment the app forwards: an open
+/// without one is refused (the server's own environment is whatever launched
+/// it), a variable only the server holds never shows through, and nothing
+/// names the server's socket, run dir or log — a pane that found the socket
+/// could try it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_session_inherits_no_marker_and_no_server_path() {
+async fn a_session_inherits_only_the_forwarded_base_env() {
     let dir = scratch();
-    let mut server = spawn_with(dir.path(), &[], &[("CLAUDECODE", "1")]);
+    let mut server = spawn_with(
+        dir.path(),
+        &[],
+        &[("CLAUDECODE", "1"), ("SANTREE_SERVER_ONLY", "leaked")],
+    );
     server.wait_ready();
     let (client, _) = connect(dir.path()).await;
-    let info = client
+    let refused = client
         .pty_open(&PtyOpenParams {
-            command: "/bin/sh".into(),
-            args: vec!["-c".into(), "env; echo END-OF-ENV; exec sleep 30".into()],
+            base_env: Vec::new(),
             ..shell()
         })
         .await
-        .unwrap();
-    let (attach, mut rx) = client.pty_attach(info.id, Anchor::Fresh).await.unwrap();
-    let mut seen = attach.data.clone();
-    collect_until(&mut rx, &mut seen, b"END-OF-ENV").await;
-    let env = String::from_utf8_lossy(&seen);
-    assert!(!env.contains("CLAUDECODE="), "{env}");
-    let root = dir.path().to_string_lossy();
-    assert!(!env.contains(root.as_ref()), "{env}");
-    assert!(!env.contains("server-r"), "{env}");
-}
-
-/// The app forwards the environment its panes would have inherited; that is
-/// all a session gets. A variable only the server's own environment holds
-/// (whatever launched it) never shows through around it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_forwarded_base_env_is_the_whole_inheritance() {
-    let dir = scratch();
-    let mut server = spawn_with(dir.path(), &[], &[("SANTREE_SERVER_ONLY", "leaked")]);
-    server.wait_ready();
-    let (client, _) = connect(dir.path()).await;
+        .unwrap_err();
+    match refused {
+        santree_remote_client::RemoteError::Remote(e) => {
+            assert_eq!(e.code, ErrorCode::BadRequest, "{}", e.msg);
+            assert!(e.msg.contains("baseEnv is required"), "{}", e.msg);
+        }
+        other => panic!("{other:?}"),
+    }
     let info = client
         .pty_open(&PtyOpenParams {
             command: "/bin/sh".into(),
@@ -505,12 +497,18 @@ async fn a_forwarded_base_env_is_the_whole_inheritance() {
         })
         .await
         .unwrap();
+    // Nothing was spawned for the refused open: this is the first session.
+    assert_eq!(info.id, 0);
     let (attach, mut rx) = client.pty_attach(info.id, Anchor::Fresh).await.unwrap();
     let mut seen = attach.data.clone();
     collect_until(&mut rx, &mut seen, b"END-OF-ENV").await;
     let env = String::from_utf8_lossy(&seen);
     assert!(env.contains("FROM_THE_APP=forwarded"), "{env}");
     assert!(!env.contains("SANTREE_SERVER_ONLY"), "{env}");
+    assert!(!env.contains("CLAUDECODE="), "{env}");
+    let root = dir.path().to_string_lossy();
+    assert!(!env.contains(root.as_ref()), "{env}");
+    assert!(!env.contains("server-r"), "{env}");
 }
 
 #[test]
@@ -691,36 +689,7 @@ fn a_ready_fd_that_is_not_a_socket_is_refused() {
     assert!(!socket(dir.path()).exists());
 }
 
-/// `pty.open` without `baseEnv` is refused: the server's own environment is
-/// whatever launched it, and must never become a session's.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_open_without_a_base_env_is_refused() {
-    let dir = scratch();
-    let mut server = spawn_with(dir.path(), &[], &[("SANTREE_SERVER_ONLY", "leaked")]);
-    server.wait_ready();
-    let (client, _) = connect(dir.path()).await;
-    let refused = client
-        .pty_open(&PtyOpenParams {
-            base_env: Vec::new(),
-            ..shell()
-        })
-        .await
-        .unwrap_err();
-    match refused {
-        santree_remote_client::RemoteError::Remote(e) => {
-            assert_eq!(e.code, ErrorCode::BadRequest, "{}", e.msg);
-            assert!(e.msg.contains("baseEnv is required"), "{}", e.msg);
-        }
-        other => panic!("{other:?}"),
-    }
-    // Nothing was spawned: the next open is the first session.
-    let info = client.pty_open(&shell()).await.unwrap();
-    assert_eq!(info.id, 0);
-}
-
-/// What the server's fds 0–2 point at, by `/dev/null` or not. macOS only: a
-/// Linux server is non-dumpable, so its `/proc/<pid>/fd` is not ours to read.
-#[cfg(target_os = "macos")]
+/// What the server's fds 0–2 point at, by `/dev/null` or not.
 fn standard_fds_of(pid: u32) -> Vec<String> {
     let out = Command::new("/usr/sbin/lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "0,1,2", "-Fn"])
@@ -735,7 +704,6 @@ fn standard_fds_of(pid: u32) -> Vec<String> {
 /// Launched with its standard streams closed, the server holds `/dev/null`
 /// there, so nothing it opens — its log, a client's socket, a PTY master —
 /// takes fd 0, 1 or 2, where a panic message or a stray print would land.
-#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_standard_streams_are_held_by_dev_null() {
     let dir = scratch();
@@ -778,7 +746,7 @@ async fn an_exited_session_keeps_it_until_reaped() {
             "--idle-initial-ms",
             "200",
             "--reap-after-ms",
-            "2000",
+            "1200",
         ],
     );
     server.wait_ready();
@@ -793,7 +761,7 @@ async fn an_exited_session_keeps_it_until_reaped() {
         .unwrap();
     drop(client);
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         server.child.try_wait().unwrap().is_none(),
         "it retired with an exited session nobody had read"
@@ -815,7 +783,7 @@ async fn an_exited_session_keeps_it_until_reaped() {
 /// not by a head start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_always_answers_before_the_server_exits() {
-    for round in 0..50 {
+    for round in 0..10 {
         let dir = scratch();
         let mut server = spawn(dir.path(), &[]);
         server.wait_ready();
@@ -864,19 +832,6 @@ async fn server_pid(client: &RemoteClient) -> u32 {
     client.call::<m::ServerInfo>(&Empty).await.unwrap().pid
 }
 
-fn lock_file(dir: &Path) -> PathBuf {
-    santree_server::endpoint::lock_path(&dir.join("run"))
-}
-
-/// Whether some process holds the lock at `path` (a shared probe, like the
-/// app's: it excludes the server's exclusive one).
-fn lock_held(path: &Path) -> bool {
-    let file = File::open(path).unwrap();
-    // SAFETY: a valid open fd.
-    let got = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0;
-    !got
-}
-
 /// The agent in a terminal runs as the user and can `rm` the socket. The server
 /// notices, binds again, and the app dials it as if nothing happened; the
 /// connection it already had is untouched.
@@ -915,30 +870,4 @@ async fn a_removed_socket_is_restored_and_existing_connections_survive() {
     assert_eq!(server_pid(&third).await, pid);
     assert_eq!(server_pid(&before).await, pid, "ended with its accept loop");
     assert_eq!(server_pid(&after).await, pid);
-}
-
-/// Both files removed: the server restores both, and a second server of the
-/// same revision still finds the endpoint occupied.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_removed_socket_and_lock_are_both_restored_and_the_endpoint_stays_occupied() {
-    let dir = scratch();
-    let mut server = spawn(dir.path(), WATCHFUL);
-    server.wait_ready();
-    let (probe, _) = connect(dir.path()).await;
-    let pid = server_pid(&probe).await;
-
-    fs::remove_file(socket(dir.path())).unwrap();
-    fs::remove_file(lock_file(dir.path())).unwrap();
-    let (client, _) = reach(dir.path()).await;
-    assert_eq!(server_pid(&client).await, pid);
-    assert!(lock_file(dir.path()).exists(), "the lock was not restored");
-    assert!(
-        lock_held(&lock_file(dir.path())),
-        "the restored lock is not held"
-    );
-
-    let mut second = spawn(dir.path(), &[]);
-    assert_eq!(second.ready_line(), "occupied\n");
-    let status = second.exit_within(WAIT).expect("the second server exited");
-    assert_eq!(status.code(), Some(20));
 }

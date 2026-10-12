@@ -32,24 +32,23 @@ function mount() {
 const setupToggle = () => screen.getByRole("switch", { name: "Run the setup script" });
 
 describe("WorktreeGate", () => {
-  it("names the action that needs the checkout", () => {
-    mount();
-    expect(screen.getByRole("dialog")).toHaveTextContent(/Reviewing with Codex needs/);
-  });
-
   /** The whole reason the dialog exists: cutting a worktree writes a working tree
    *  to disk, and until now reviewing a PR did that without saying so. */
-  it("creates nothing until the user says so", async () => {
+  it("names the action, and creates nothing until the user says so", async () => {
     const answers = mount();
+    expect(screen.getByRole("dialog")).toHaveTextContent(/Reviewing with Codex needs/);
     expect(answers).toHaveLength(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Create worktree" }));
     await waitFor(() => expect(answers).toEqual([{ ok: true, runSetup: false }]));
   });
 
-  it("declines on cancel, so the caller simply does not proceed", async () => {
+  it.each([
+    ["cancel", () => fireEvent.click(screen.getByRole("button", { name: "Cancel" }))],
+    ["Escape", () => fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })],
+  ])("declines on %s, so the caller simply does not proceed", async (_, dismiss) => {
     const answers = mount();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    dismiss();
     await waitFor(() => expect(answers).toEqual([{ ok: false, runSetup: false }]));
     expect(screen.queryByRole("dialog")).toBeNull();
   });
@@ -77,12 +76,6 @@ describe("WorktreeGate", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "ask" }));
     expect(setupToggle()).toHaveAttribute("aria-checked", "false");
-  });
-
-  it("closes on Escape without creating anything", async () => {
-    const answers = mount();
-    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
-    await waitFor(() => expect(answers).toEqual([{ ok: false, runSetup: false }]));
   });
 
   /** Outside a provider nothing may be created. A surface that forgot to mount

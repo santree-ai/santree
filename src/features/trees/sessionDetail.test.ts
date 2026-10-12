@@ -32,29 +32,25 @@ function shape(nodes: SubagentNode[]): string {
 describe("buildSubagentTree", () => {
   /** The differentiator: the sidecars carry `parentAgentId` and `spawnDepth`,
    *  so a depth-2 agent belongs under the depth-1 agent that spawned it. */
-  it("nests a spawned agent under its parent", () => {
+  it("nests a spawned agent under its parent, keeping sibling order as listed", () => {
     const tree = buildSubagentTree([
       agent("a", null),
       agent("b", "a", 2),
       agent("c", "b", 3),
+      agent("z", "a", 2),
       agent("d", null),
     ]);
-    expect(shape(tree)).toBe("a(b(c)),d");
-    expect(countSubagentNodes(tree)).toBe(4);
+    expect(shape(tree)).toBe("a(b(c),z),d");
+    expect(countSubagentNodes(tree)).toBe(5);
   });
 
   /** A parent whose transcript was pruned (or is still being written) must not
    *  take its child down with it — the badge counts the files on disk, so a
    *  dropped row makes the count and the list disagree. */
-  it("renders an orphan at the top level rather than dropping it", () => {
-    const tree = buildSubagentTree([agent("b", "gone", 2), agent("c", null)]);
-    expect(shape(tree)).toBe("b,c");
-    expect(countSubagentNodes(tree)).toBe(2);
-  });
-
-  it("keeps a self-parenting sidecar at the top level", () => {
-    const tree = buildSubagentTree([agent("a", "a")]);
-    expect(shape(tree)).toBe("a");
+  it("renders an orphan or a self-parenting sidecar at the top level rather than dropping it", () => {
+    const tree = buildSubagentTree([agent("b", "gone", 2), agent("c", null), agent("s", "s")]);
+    expect(shape(tree)).toBe("b,c,s");
+    expect(countSubagentNodes(tree)).toBe(3);
   });
 
   /** Two sidecars naming each other leave neither one a root, so the walk would
@@ -65,28 +61,11 @@ describe("buildSubagentTree", () => {
     expect(shape(tree)).toBe("a(b)");
     expect(countSubagentNodes(tree)).toBe(2);
   });
-
-  it("keeps sibling order as listed", () => {
-    const tree = buildSubagentTree([
-      agent("root", null),
-      agent("z", "root", 2),
-      agent("a", "root", 2),
-    ]);
-    expect(shape(tree)).toBe("root(z,a)");
-  });
-
-  it("is empty for no subagents", () => {
-    expect(buildSubagentTree([])).toEqual([]);
-  });
 });
 
 describe("compactPath", () => {
-  it("keeps the last two segments", () => {
+  it("keeps the last two segments of a long path, and leaves a short one alone", () => {
     expect(compactPath("/Users/me/repo/.santree/worktrees/AK-1")).toBe("…/worktrees/AK-1");
-  });
-
-  it("leaves a path that is already short alone", () => {
     expect(compactPath("/tmp/x")).toBe("/tmp/x");
-    expect(compactPath("solo")).toBe("solo");
   });
 });

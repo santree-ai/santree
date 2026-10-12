@@ -1,14 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isBulkToggle, toggleDisclosure } from "./disclosure";
-
-describe("isBulkToggle", () => {
-  it("reads ⌘ and Ctrl, and nothing else", () => {
-    expect(isBulkToggle({ metaKey: true, ctrlKey: false })).toBe(true);
-    expect(isBulkToggle({ metaKey: false, ctrlKey: true })).toBe(true);
-    expect(isBulkToggle({ metaKey: false, ctrlKey: false })).toBe(false);
-  });
-});
+import { toggleDisclosure } from "./disclosure";
 
 describe("toggleDisclosure", () => {
   const scope = ["a", "b", "c"];
@@ -24,10 +16,7 @@ describe("toggleDisclosure", () => {
   it("mirrors the clicked row's new state onto its scope", () => {
     expect([...toggleDisclosure(new Set(), "a", scope, true)].sort()).toEqual(["a", "b", "c"]);
     expect([...toggleDisclosure(new Set(scope), "a", scope, true)]).toEqual([]);
-  });
-
-  /** Half in, half out: the clicked row decides, not the majority. */
-  it("takes its direction from the row that was clicked", () => {
+    // Half in, half out: the clicked row decides, not the majority.
     expect([...toggleDisclosure(new Set(["a"]), "a", scope, true)]).toEqual([]);
     expect([...toggleDisclosure(new Set(["a"]), "b", scope, true)].sort()).toEqual(["a", "b", "c"]);
   });

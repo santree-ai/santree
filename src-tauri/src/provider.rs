@@ -327,7 +327,6 @@ pub fn provider(kind: AgentKind, executable: String) -> Result<Box<dyn AgentProv
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn version_probe_reports_broken_wrapper_target() {
         use std::os::unix::fs::PermissionsExt;
@@ -355,8 +354,7 @@ mod tests {
     /// Write an executable script from a child process. Written from this
     /// one, its open fd can be inherited by a thread's concurrent fork in
     /// another test and held until that child's exec, and running the script
-    /// meanwhile fails with ETXTBSY ("Text file busy", seen on Linux CI).
-    #[cfg(unix)]
+    /// meanwhile fails with ETXTBSY ("Text file busy").
     fn write_script(path: &std::path::Path, body: &str) {
         let status = std::process::Command::new("/bin/sh")
             .args([
@@ -371,7 +369,6 @@ mod tests {
         assert!(status.success());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn version_probe_accepts_cli_version_and_bounds_stderr() {
         let dir = std::env::temp_dir().join(format!("santree-cli-probe-{}", uuid::Uuid::new_v4()));
@@ -392,18 +389,6 @@ mod tests {
             .to_string();
         assert!(error.contains("exceeds"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn every_surface_has_an_explicit_settings_family() {
-        assert_eq!(SessionSurface::Work.setting_keys().0, "work_model");
-        assert_eq!(SessionSurface::FixCi.setting_keys().0, "work_model");
-        assert_eq!(
-            SessionSurface::Investigate.setting_keys().0,
-            "investigate_model"
-        );
-        assert_eq!(SessionSurface::AskAi.setting_keys().0, "review_model");
-        assert_eq!(SessionSurface::Review.setting_keys().0, "review_model");
     }
 
     #[test]

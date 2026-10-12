@@ -87,16 +87,10 @@ mod tests {
         ] {
             assert_eq!(AgentKind::from_str(kind.as_str()), Ok(kind));
         }
-    }
-
-    /// The parse error names what it actually found, so a caller reading stale or
-    /// hand-edited data can log it instead of just "failed".
-    #[test]
-    fn unknown_agent_kind_reports_the_offending_input() {
-        let err = AgentKind::from_str("Aider").unwrap_err();
-        assert_eq!(err, UnknownAgentKind("Aider".into()));
-        assert!(err.to_string().contains("Aider"), "{err}");
-        // Case-sensitive: the persisted form is exactly `as_str`.
-        assert!(AgentKind::from_str("claude").is_err());
+        // Exact and case-sensitive: anything else is refused, never guessed.
+        assert_eq!(
+            AgentKind::from_str("claude"),
+            Err(UnknownAgentKind("claude".into()))
+        );
     }
 }

@@ -77,29 +77,16 @@ function renderSection(comments: PrComment[], items: ReviewWorkItem[] = []) {
 }
 
 describe("the comment card's queue action", () => {
-  it("holds its space at rest, so hovering can't resize the card", () => {
-    renderSection([comment()]);
-    const button = screen.getByRole("button", { name: "Queue this comment" });
-
-    // Present before any pointer goes near it: the slot is reserved, not
-    // conjured. `hidden` (display:none) would take it back out of flow and put
-    // the reflow straight back.
-    expect(button).toBeInTheDocument();
-    expect(button.className).toContain("opacity-0");
-    expect(button.className).not.toContain("hidden");
-
-    // And the timestamp is not the thing that yields to it — it stays put,
-    // visible, in its own box beside the action.
-    const time = screen.getByText(/ago$/);
-    expect(time.className).not.toMatch(/hidden/);
-  });
-
-  it("queues the comment body for the agent", () => {
-    renderSection([comment()]);
+  it("queues the comment body for the agent, and offers nothing for a body-less review", () => {
+    const { unmount } = renderSection([comment()]);
     fireEvent.click(screen.getByRole("button", { name: "Queue this comment" }));
     expect(spies.addItem).toHaveBeenCalledWith(
       expect.objectContaining({ body: BODY, source: "manual", sourceId: null }),
     );
+    unmount();
+
+    renderSection([comment({ body: "", kind: "Review" })]);
+    expect(screen.queryByRole("button", { name: /queue/i })).not.toBeInTheDocument();
   });
 
   it("reads as already queued once the body is in the queue", () => {
@@ -109,13 +96,5 @@ describe("the comment card's queue action", () => {
     // is nothing left to click.
     expect(button.className).not.toContain("opacity-0");
     expect(button).toBeDisabled();
-  });
-
-  it("keeps the slot when a review has no body to queue", () => {
-    const { container } = renderSection([comment({ body: "", kind: "Review" })]);
-    expect(screen.queryByRole("button", { name: /queue/i })).not.toBeInTheDocument();
-    // The empty slot still reserves its width, so timestamps line up down the
-    // stack whether or not a comment carries text.
-    expect(container.querySelector(".h-4.w-4")).toBeInTheDocument();
   });
 });

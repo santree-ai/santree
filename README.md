@@ -91,12 +91,9 @@ The area beside it is whatever you picked.
 
 ## Install
 
-**macOS**: [download the DMG](https://github.com/santree-ai/santree/releases/latest/download/santree-macos.dmg).
+santree runs on macOS: [download the DMG](https://github.com/santree-ai/santree/releases/latest/download/santree-macos.dmg).
 It's signed and notarized, and keeps itself up to date (pick the stable or
 beta channel in *Settings → General*).
-
-**Linux**: no packaged builds yet; [build from source](#building-from-source)
-in a few minutes.
 
 You'll also want:
 
@@ -114,9 +111,8 @@ You'll also want:
 ## Building from source
 
 You need [Rust](https://rustup.rs) (the pinned toolchain installs
-automatically), **Node 22+**, and **pnpm**. On Linux, install the WebKitGTK
-dev libraries first; copy-paste commands for Debian/Ubuntu, Fedora, and Arch
-are in [DEVELOPMENT.md](DEVELOPMENT.md#linux-system-dependencies).
+automatically), **Node 22+**, **pnpm**, and the Xcode Command Line Tools
+(`xcode-select --install`).
 
 ```sh
 pnpm install

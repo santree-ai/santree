@@ -326,31 +326,10 @@ fn envelope(line: &[u8]) -> Result<Value, ControlError> {
 mod tests {
     use super::*;
 
+    /// Answers and refusals are pinned against the fake socket below; this is
+    /// what is neither.
     #[test]
-    fn the_socket_is_the_agents_own() {
-        let path = control_socket_path();
-        assert!(path.ends_with("daedalus-agent/run/agent.sock"), "{path:?}");
-    }
-
-    #[test]
-    fn envelopes_read_as_answers_or_refusals() {
-        assert_eq!(
-            envelope(br#"{"id":1,"ok":{"sent":true}}"#),
-            Ok(serde_json::json!({ "sent": true }))
-        );
-        assert_eq!(
-            envelope(
-                br#"{"id":1,"err":{"code":"unknown_method","msg":"no method `settings.get`"}}"#
-            ),
-            Err(ControlError::Outdated)
-        );
-        assert_eq!(
-            envelope(br#"{"id":1,"err":{"code":"forbidden","msg":"uid 501 may not"}}"#),
-            Err(ControlError::Refused {
-                code: "forbidden".into(),
-                msg: "uid 501 may not".into()
-            })
-        );
+    fn a_malformed_envelope_is_a_failure() {
         for garbage in [
             &b"nope"[..],
             br#"{"id":1,"ok":1,"err":{"code":"x","msg":"y"}}"#,

@@ -96,7 +96,6 @@ impl Extension for ServerExt {
 /// app: an app that quits with agents still running must not let the machine
 /// sleep under them, and `-w` ends the assertion with the server however the
 /// server ends. Idempotent both ways.
-#[cfg(target_os = "macos")]
 fn keep_awake(awake: &Mutex<Option<Child>>, on: bool) -> KeepAwakeResult {
     use std::process::{Command, Stdio};
 
@@ -135,14 +134,6 @@ fn keep_awake(awake: &Mutex<Option<Child>>, on: bool) -> KeepAwakeResult {
     KeepAwakeResult {
         active: held.is_some(),
         supported: true,
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn keep_awake(_awake: &Mutex<Option<Child>>, _on: bool) -> KeepAwakeResult {
-    KeepAwakeResult {
-        active: false,
-        supported: false,
     }
 }
 

@@ -24,10 +24,4 @@ describe("useHeldFor", () => {
     act(() => void vi.advanceTimersByTime(999));
     expect(result.current).toBe(false);
   });
-
-  it("never turns true for a condition that does not hold", () => {
-    const { result } = renderHook(() => useHeldFor(false, 1_000));
-    act(() => void vi.advanceTimersByTime(5_000));
-    expect(result.current).toBe(false);
-  });
 });

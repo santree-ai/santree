@@ -132,11 +132,16 @@ beforeEach(() => {
 });
 
 describe("a lost Trees agent tab", () => {
-  test("one click resumes it once, in place, and the tab stays", async () => {
+  test("nothing happens until the click; one click resumes it once, in place, and the tab stays", async () => {
     check.mockResolvedValue(null);
     const closeTab = vi.fn();
     const { findByRole, getByTestId, again } = await mountLost(closeTab);
+    // Nothing happens without the click: no check, no relaunch, no prune.
+    await findByRole("alert");
+    await new Promise((r) => setTimeout(r, 50));
     expect(check).not.toHaveBeenCalled();
+    expect(relaunch).not.toHaveBeenCalled();
+    expect(closeTab).not.toHaveBeenCalled();
 
     fireEvent.click(await findByRole("button", { name: "Resume this session" }));
     await waitFor(() => expect(relaunch).toHaveBeenCalledTimes(1));
@@ -193,16 +198,5 @@ describe("a lost Trees agent tab", () => {
     fireEvent.click(getByRole("button", { name: "Close tab" }));
     expect(closeTab).toHaveBeenCalledWith("t1");
     await waitFor(() => expect(getByTestId("held")).toHaveTextContent("0"));
-  });
-
-  test("nothing happens without the click", async () => {
-    const closeTab = vi.fn();
-    const { findByRole } = await mountLost(closeTab);
-    await findByRole("alert");
-    await new Promise((r) => setTimeout(r, 100));
-    expect(check).not.toHaveBeenCalled();
-    expect(relaunch).not.toHaveBeenCalled();
-    expect(closeTab).not.toHaveBeenCalled();
-    expect(backend.open).toHaveBeenCalledTimes(1);
   });
 });

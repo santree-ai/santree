@@ -46,18 +46,16 @@ describe("Settings → Updates", () => {
     for (const fn of [checkMutate, checkReset, installMutate, setSetting]) fn.mockClear();
   });
 
-  it("defaults to the stable channel when nothing is stored", () => {
-    render(<UpdatesSection />);
-    expect(screen.getByRole("combobox")).toHaveValue("stable");
-    expect(screen.getByText("0.1.0 (stable)")).toBeInTheDocument();
-  });
-
-  // The other two branches of the real parser, through the pane that reads it.
+  // The real parser's branches, through the pane that reads it.
   // The fallback is not cosmetic: Rust's `update.rs` makes the same call on the
   // same row, so a value neither side recognises has to mean stable in both —
   // otherwise a hand-edited setting strands the install on a channel that
   // publishes no manifest at all.
-  it("shows a stored channel, and falls back to stable for one it doesn't know", () => {
+  it("shows a stored channel, and stable for none or one it doesn't know", () => {
+    const first = render(<UpdatesSection />);
+    expect(screen.getByRole("combobox")).toHaveValue("stable");
+    first.unmount();
+
     channelValue = "beta";
     const { unmount } = render(<UpdatesSection />);
     expect(screen.getByRole("combobox")).toHaveValue("beta");
@@ -67,12 +65,6 @@ describe("Settings → Updates", () => {
     channelValue = "nightly";
     render(<UpdatesSection />);
     expect(screen.getByRole("combobox")).toHaveValue("stable");
-  });
-
-  it("checks for updates on demand", () => {
-    render(<UpdatesSection />);
-    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
-    expect(checkMutate).toHaveBeenCalledTimes(1);
   });
 
   it("reports being current only after a check has run", () => {

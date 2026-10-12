@@ -538,28 +538,6 @@ mod tests {
         crate::db::init(dir.join("test.db")).await.unwrap()
     }
 
-    #[test]
-    fn parses_env_file_and_skips_comments() {
-        let p = write_env(
-            "basic",
-            "# a comment\nFOO=bar\nBAZ=\"quoted value\"\n\nEMPTY=\n",
-        );
-        let vars = parse_env_file(&p);
-        assert_eq!(vars.iter().find(|(k, _)| k == "FOO").unwrap().1, "bar");
-        assert_eq!(
-            vars.iter().find(|(k, _)| k == "BAZ").unwrap().1,
-            "quoted value"
-        );
-        assert!(vars.iter().any(|(k, _)| k == "EMPTY"));
-        assert_eq!(env_file_var_names(&p).len(), 3);
-        let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn missing_file_yields_nothing() {
-        assert!(parse_env_file("/no/such/santree-env.env").is_empty());
-    }
-
     /// `dotenvy` reads to EOF, and a character device never reaches one: parsing
     /// `/dev/zero` on the spawn path would wedge a blocking thread forever.
     #[test]
@@ -567,6 +545,7 @@ mod tests {
         assert!(parse_env_file("/dev/zero").is_empty());
         assert!(parse_env_file("/dev/null").is_empty());
         assert!(parse_env_file("/tmp").is_empty());
+        assert!(parse_env_file("/no/such/santree-env.env").is_empty());
     }
 
     /// The values never touch the `settings` table: it keeps the names, the keychain

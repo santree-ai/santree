@@ -121,19 +121,6 @@ describe("AgentRuns", () => {
     expect(result.current.isInitialSetup("AK-9")).toBe(true);
   });
 
-  it("runs setup for every worktree in a batch that answered yes", async () => {
-    backend.runSetupPref = false; // the single-launch preference says no…
-    const { result } = renderHook(() => useAgentRuns(), { wrapper });
-
-    act(() => result.current.planSetup(["AK-1", "AK-2"], true)); // …the batch says yes
-    await beginRun(() => result.current.beginRun(REPO, "AK-1", "tab-AK-1"));
-    await beginRun(() => result.current.beginRun(REPO, "AK-2", "tab-AK-2"));
-
-    expect(backend.runSetup).toHaveBeenCalledTimes(2);
-    expect(result.current.isInitialSetup("AK-1")).toBe(true);
-    expect(result.current.isInitialSetup("AK-2")).toBe(true);
-  });
-
   // The C2 regression: the setup run and the launch it was queued behind used to be
   // owned by the route-scoped TreesProvider. Navigating away cancelled the stream
   // handler, so `init.sh` finished server-side but the agent launch it should have

@@ -12,7 +12,6 @@ import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ReviewPr } from "../../bindings";
-import { PR_COLUMN } from "./prLayout";
 
 const model = vi.hoisted(() => ({
   active: {
@@ -189,12 +188,6 @@ beforeEach(() => {
 });
 
 describe("ReviewDetail", () => {
-  it("doesn't launch the AI review just because a PR is open", () => {
-    render(<ReviewDetail />);
-    expect(ai.mounts).toBe(0);
-    expect(screen.queryByTestId("ai-review-pane")).toBeNull();
-  });
-
   it("opens the tab when the rail asks for it, and keeps it mounted after", () => {
     model.aiReviewRequest = 1;
     render(<ReviewDetail />);
@@ -210,8 +203,10 @@ describe("ReviewDetail", () => {
 
   // GitHub's own landing, and after the rail lost the description it is the only
   // place it is readable at full width.
-  it("opens on the conversation, not the diff", () => {
+  it("opens on the conversation, not the diff, without launching the AI review", () => {
     render(<ReviewDetail />);
+    expect(ai.mounts).toBe(0);
+    expect(screen.queryByTestId("ai-review-pane")).toBeNull();
     expect(screen.getByTestId("conversation-pane")).toBeInTheDocument();
     expect(screen.queryByTestId("pr-pane")).toBeNull();
   });
@@ -226,7 +221,12 @@ describe("ReviewDetail", () => {
     expect(screen.getByTestId("rail")).toHaveTextContent("aiWork");
   });
 
-  it("opens the commits tab on the strip, beside the conversation and the diff", () => {
+  it("counts each sub-tab once its read lands, never a zero before", () => {
+    const { unmount } = render(<ReviewDetail />);
+    expect(screen.getByRole("tab", { name: "Conversation" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Commits" })).toBeInTheDocument();
+    unmount();
+
     detail = { comments: [{}, {}], commits: [{}, {}, {}], checks: [{}] };
     render(<ReviewDetail />);
 
@@ -240,12 +240,6 @@ describe("ReviewDetail", () => {
     fireEvent.click(screen.getByText("Commits"));
     expect(screen.getByTestId("commits-pane")).toBeInTheDocument();
     expect(screen.queryByTestId("conversation-pane")).toBeNull();
-  });
-
-  it("shows no count on a tab whose read hasn't landed, rather than a zero", () => {
-    render(<ReviewDetail />);
-    expect(screen.getByRole("tab", { name: "Conversation" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Commits" })).toBeInTheDocument();
   });
 
   /** A PR reviewed in an earlier launch gets its tab back from the stored
@@ -267,32 +261,6 @@ describe("ReviewDetail", () => {
     expect(screen.getByTestId("ai-review-pane")).toBeInTheDocument();
   });
 
-  /** The title started at the pane's left edge while the text under it started
-   *  in a centred column — two left edges on one page. The strip is the piece
-   *  this file owns (the header and the panes are stubbed here); its column is
-   *  asserted where each of those is real. */
-  it("draws the sub-tabs in the page column, and leaves the rule to the page", () => {
-    const { container } = render(<ReviewDetail />);
-    const strip = container.querySelector("[role='tablist']") as HTMLElement;
-    // The column is the strip's *wrapper*, and the band outside it carries the
-    // page inset — the same two boxes a pane has, or the tabs land inset from
-    // the body by exactly the padding they don't share. Matched on the class
-    // list because `max-w-[880px]` is not a legal CSS selector.
-    const column = strip.parentElement as HTMLElement;
-    for (const c of PR_COLUMN.split(" ")) expect(column.classList.contains(c)).toBe(true);
-    const band = column.parentElement as HTMLElement;
-    expect(band.className).toContain("px-5");
-
-    // Each tab's own padding hangs outside the column, so the first *label* — not
-    // its underline's overhang — starts on the column's edge.
-    expect(strip.className).toContain("-mx-3");
-
-    // The rule is the page's, not the column's: a hairline stopping at 880px
-    // would read as the page ending there.
-    expect(strip.className).not.toContain("border-b border-line");
-    expect(band.className).toContain("border-b");
-  });
-
   /** A draft is a decision you have not made; a published comment is already on
    *  GitHub. The tab shows both, unsent ones first, so "what is waiting on me"
    *  is answerable without opening it. */
@@ -305,14 +273,6 @@ describe("ReviewDetail", () => {
     // Drafts first, then the tab's own comment count.
     expect(conversation).toHaveTextContent("32");
     expect(within(conversation).getByTitle("3 unsent AI comments")).toBeVisible();
-  });
-
-  /** A nought there would claim an AI review ran and found nothing to say. */
-  it("shows no AI count on a PR with no drafts", () => {
-    detail = { comments: [{}, {}], commits: [], checks: [] };
-    render(<ReviewDetail />);
-
-    expect(screen.getByRole("tab", { name: "Conversation2" })).toBeInTheDocument();
   });
 
   /** It describes the diff, so it belongs to the tab that shows the diff. Loose

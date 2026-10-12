@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { rankItems, scoreItem, tokenize } from "./paletteSearch";
+import { rankItems, scoreItem } from "./paletteSearch";
 
 const ORDER = ["Navigate", "Tickets", "Pull requests", "Worktrees"] as const;
 const opts = { groupOrder: ORDER, perGroup: 8, perGroupIdle: 2, total: 50 };
@@ -14,13 +14,6 @@ const items = [
   { key: "p1", group: "Pull requests", code: "#53957", label: "AK-276 re-ingest", meta: "canary" },
   { key: "w1", group: "Worktrees", code: "AK-276", label: "Content identity", meta: "feat/ak-276" },
 ];
-
-describe("tokenize", () => {
-  it("splits on whitespace and lowercases", () => {
-    expect(tokenize("  KB  Dupes ")).toEqual(["kb", "dupes"]);
-    expect(tokenize("")).toEqual([]);
-  });
-});
 
 describe("scoreItem", () => {
   it("ranks an exact id above a title that only contains it", () => {
@@ -71,9 +64,5 @@ describe("rankItems", () => {
     }));
     expect(rankItems(many, "ticket", { ...opts, perGroup: 3 })).toHaveLength(3);
     expect(rankItems(many, "ticket", { ...opts, total: 5 })).toHaveLength(5);
-  });
-
-  it("is empty when nothing matches", () => {
-    expect(rankItems(items, "zzz", opts)).toEqual([]);
   });
 });

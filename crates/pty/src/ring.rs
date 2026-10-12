@@ -208,135 +208,76 @@ mod tests {
         ring
     }
 
+    fn at(seq: u64) -> Anchor {
+        Anchor::At {
+            epoch: "e1".into(),
+            seq,
+        }
+    }
+
+    /// Positions count what was produced, not what was kept: eviction moves
+    /// the start, never the stream, and the last chunk is never evicted (with
+    /// nothing to redraw from, every attach would reanchor).
     #[test]
-    fn seq_counts_what_was_produced_not_what_was_kept() {
+    fn eviction_keeps_stream_positions_and_the_last_chunk() {
         let ring = ring_of(4, &[b"aaaa", b"bbbb", b"cccc"]);
-        assert_eq!(ring.seq, 12);
-        // Only the last chunk survived the cap, so catching up from the start is
-        // impossible — but the stream position is still the truth.
-        assert_eq!(ring.start_seq, 8);
-    }
+        assert_eq!((ring.start_seq, ring.seq), (8, 12));
 
-    #[test]
-    fn an_anchor_inside_the_ring_replays_exactly_what_was_missed() {
-        let ring = ring_of(64, &[b"hello ", b"world"]);
-        let replay = ring.replay_for(
-            "e1",
-            &Anchor::At {
-                epoch: "e1".into(),
-                seq: 6,
-            },
-        );
-        assert_eq!(replay.mode, ReplayMode::Exact);
-        assert_eq!(replay.bytes, b"world");
-        assert_eq!(replay.seq, 11);
-    }
-
-    #[test]
-    fn a_caught_up_client_gets_no_bytes_but_still_exact() {
-        let ring = ring_of(64, &[b"hello"]);
-        let replay = ring.replay_for(
-            "e1",
-            &Anchor::At {
-                epoch: "e1".into(),
-                seq: 5,
-            },
-        );
-        assert_eq!(replay.mode, ReplayMode::Exact);
-        assert!(replay.bytes.is_empty());
-    }
-
-    #[test]
-    fn a_fresh_client_gets_the_whole_ring() {
-        let ring = ring_of(64, &[b"hello ", b"world"]);
-        let replay = ring.replay_for("e1", &Anchor::Fresh);
-        assert_eq!(replay.mode, ReplayMode::Tail);
-        assert_eq!(replay.bytes, b"hello world");
-    }
-
-    /// The rule the whole design rests on: when the client's position can't be
-    /// proven, its own screen is better than anything we could synthesize.
-    #[test]
-    fn an_unrecoverable_position_sends_nothing() {
-        let ring = ring_of(64, &[b"hello"]);
-
-        let stale_epoch = ring.replay_for(
-            "e2",
-            &Anchor::At {
-                epoch: "e1".into(),
-                seq: 3,
-            },
-        );
-        assert_eq!(stale_epoch.mode, ReplayMode::Reanchor);
-        assert!(stale_epoch.bytes.is_empty());
-        // It still learns where the stream actually is.
-        assert_eq!(stale_epoch.seq, 5);
-
-        let unknown = ring.replay_for("e1", &Anchor::Unknown);
-        assert_eq!(unknown.mode, ReplayMode::Reanchor);
-        assert!(unknown.bytes.is_empty());
-    }
-
-    #[test]
-    fn a_gap_older_than_the_ring_reanchors_rather_than_guessing() {
-        // Cap forces the first chunks out, so seq 0 is no longer reachable.
-        let ring = ring_of(8, &[b"aaaaaaaa", b"bbbbbbbb"]);
-        let replay = ring.replay_for(
-            "e1",
-            &Anchor::At {
-                epoch: "e1".into(),
-                seq: 0,
-            },
-        );
-        assert_eq!(replay.mode, ReplayMode::Reanchor);
-        assert!(replay.bytes.is_empty());
-    }
-
-    /// A client that claims to be ahead of the stream has a corrupt anchor.
-    /// Clamping it would hand back a plausible-looking empty Exact and let the
-    /// corruption persist; reanchoring repaints and resets it.
-    #[test]
-    fn an_anchor_past_the_head_reanchors() {
-        let ring = ring_of(64, &[b"hello"]);
-        let replay = ring.replay_for(
-            "e1",
-            &Anchor::At {
-                epoch: "e1".into(),
-                seq: 99,
-            },
-        );
-        assert_eq!(replay.mode, ReplayMode::Reanchor);
-    }
-
-    #[test]
-    fn the_last_chunk_is_never_evicted() {
-        // One write far over the cap: dropping it would leave nothing to redraw
-        // from and make every subsequent attach a reanchor.
-        let ring = ring_of(4, &[b"aaaaaaaaaaaaaaaa"]);
-        let replay = ring.replay_for("e1", &Anchor::Fresh);
-        assert_eq!(replay.bytes, b"aaaaaaaaaaaaaaaa");
-    }
-
-    #[test]
-    fn eviction_keeps_positions_consistent_across_many_writes() {
         let mut ring = Ring::with_cap(16);
         for i in 0..200u8 {
             ring.push(&[i; 5]);
         }
-        assert_eq!(ring.seq, 1000);
+        ring.push(b"");
+        assert_eq!(ring.seq, 1000, "an empty write does not move the stream");
         assert_eq!(ring.start_seq + ring.bytes as u64, ring.seq);
-        // Whatever survived must be readable from its own start, and the answer
-        // must be exactly as long as the retained span claims.
         let replay = ring.replay_for("e1", &Anchor::Fresh);
         assert_eq!(replay.bytes.len() as u64, ring.seq - ring.start_seq);
+
+        let ring = ring_of(4, &[b"aaaaaaaaaaaaaaaa"]);
+        assert_eq!(
+            ring.replay_for("e1", &Anchor::Fresh).bytes,
+            b"aaaaaaaaaaaaaaaa"
+        );
     }
 
+    /// A provable position gets exactly what it lacks: the gap, nothing when
+    /// caught up, the whole ring when fresh.
     #[test]
-    fn empty_writes_do_not_move_the_stream() {
-        let mut ring = Ring::with_cap(64);
-        ring.push(b"hi");
-        ring.push(b"");
-        assert_eq!(ring.seq, 2);
+    fn a_provable_anchor_gets_exactly_what_it_lacks() {
+        let ring = ring_of(64, &[b"hello ", b"world"]);
+        for (anchor, mode, bytes) in [
+            (at(6), ReplayMode::Exact, &b"world"[..]),
+            (at(11), ReplayMode::Exact, b""),
+            (Anchor::Fresh, ReplayMode::Tail, b"hello world"),
+        ] {
+            let replay = ring.replay_for("e1", &anchor);
+            assert_eq!(
+                (replay.mode, &replay.bytes[..]),
+                (mode, bytes),
+                "{anchor:?}"
+            );
+            assert_eq!(replay.seq, 11);
+        }
+    }
+
+    /// The rule the whole design rests on: when the client's position can't be
+    /// proven — another epoch, unknown, evicted, or past the head (a corrupt
+    /// anchor clamping would let persist) — its own screen is better than
+    /// anything we could synthesize. It still learns where the stream is.
+    #[test]
+    fn an_unprovable_anchor_reanchors_with_nothing() {
+        let ring = ring_of(8, &[b"aaaaaaaa", b"bbbbbbbb"]);
+        for (epoch, anchor) in [
+            ("e2", at(12)),
+            ("e1", Anchor::Unknown),
+            ("e1", at(0)),
+            ("e1", at(99)),
+        ] {
+            let replay = ring.replay_for(epoch, &anchor);
+            assert_eq!(replay.mode, ReplayMode::Reanchor, "{epoch} {anchor:?}");
+            assert!(replay.bytes.is_empty());
+            assert_eq!(replay.seq, 16);
+        }
     }
 
     // ── mode preamble on a fresh replay ─────────────────────────────────────
@@ -350,31 +291,6 @@ mod tests {
         assert_eq!(replay.bytes, b"\x1b[?2004habcdefghij");
         // Positions still count the stream, not the preamble.
         assert_eq!(replay.seq, 28);
-    }
-
-    #[test]
-    fn a_decset_still_in_the_tail_gets_no_preamble() {
-        let ring = ring_of(64, &[b"\x1b[?2004h", b"text"]);
-        let replay = ring.replay_for("e1", &Anchor::Fresh);
-        assert_eq!(replay.bytes, b"\x1b[?2004htext");
-    }
-
-    #[test]
-    fn a_reset_before_the_detach_is_not_resurrected_by_the_replay() {
-        let ring = ring_of(12, &[b"\x1b[?2004h", b"\x1b[?2004l", b"0123456789ab"]);
-        let replay = ring.replay_for("e1", &Anchor::Fresh);
-        assert_eq!(replay.bytes, b"0123456789ab");
-    }
-
-    #[test]
-    fn a_sequence_split_across_pushes_is_tracked_whole() {
-        let ring = ring_of(8, &[b"\x1b[?20", b"04h", b"0123456789"]);
-        let replay = ring.replay_for("e1", &Anchor::Fresh);
-        assert!(
-            replay.bytes.starts_with(b"\x1b[?2004h"),
-            "{:?}",
-            replay.bytes
-        );
     }
 
     /// The preamble of a ring whose first chunk (`gone`) was evicted by a

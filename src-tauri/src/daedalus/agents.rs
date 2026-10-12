@@ -307,6 +307,7 @@ pub async fn resolve_session(
                     let (at, home) = (at.clone(), home.clone());
                     blocking(move || transcript_on_box(&at, &home, &stored_cwd, &id))
                 },
+                || async { Vec::new() },
             )
             .await
         }

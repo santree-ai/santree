@@ -19,11 +19,6 @@
 //! * **Display-only.** What comes back is a number for a meter. Nothing derived
 //!   from it is ever written toward a session, same bound as the status line.
 use std::path::PathBuf;
-// macOS-only: the keychain read shells `security`. On Linux the credential
-// file is read directly (see the `cfg(not(target_os = "macos"))` branch below),
-// so importing this unconditionally is an unused import there — which CI's
-// Linux clippy job denies.
-#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
 
@@ -53,10 +48,8 @@ const USER_AGENT: &str = concat!("santree/", env!("CARGO_PKG_VERSION"));
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// A keychain prompt that nobody answers must not wedge the refresh.
-#[cfg(target_os = "macos")]
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// The generic-password service Claude Code stores its credentials under.
-#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
 // ── Credentials ─────────────────────────────────────────────────────────────
@@ -95,13 +88,12 @@ fn config_dir() -> Option<PathBuf> {
     crate::global_capture::claude_config_dir()
 }
 
-/// Read the login keychain's Claude Code credentials (macOS only).
+/// Read the login keychain's Claude Code credentials.
 ///
 /// `security` is invoked with a fixed argv — the service name is a constant and
 /// the account comes from the process's own user, never from IPC. A prompt or a
 /// hung keychain is bounded by [`KEYCHAIN_TIMEOUT`]; the failure is silent
 /// because "no credential" is an ordinary state, not an error to report.
-#[cfg(target_os = "macos")]
 fn keychain_credentials() -> Option<String> {
     let user = std::env::var("USER").ok();
     // With the account first (how Claude Code writes it), then without: an item
@@ -167,13 +159,8 @@ fn keychain_credentials() -> Option<String> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
-fn keychain_credentials() -> Option<String> {
-    None
-}
-
-/// `<config dir>/.credentials.json` — where Claude Code keeps credentials off
-/// macOS, and on macOS when the keychain isn't used.
+/// `<config dir>/.credentials.json` — where Claude Code keeps credentials when
+/// the keychain isn't used.
 fn file_credentials() -> Option<String> {
     let path = config_dir()?.join(".credentials.json");
     std::fs::read_to_string(path).ok()
@@ -543,6 +530,12 @@ mod tests {
         assert_eq!(w[2].used_pct, 55.0);
         // Every row is stamped with the caller's clock, not each window's.
         assert!(w.iter().all(|w| w.updated_at_ms == 5.0));
+
+        // An empty or unknown response is no windows, never a panic; a window
+        // with no readable percentage contributes nothing.
+        assert!(map_windows("{}", 0.0).unwrap().is_empty());
+        assert!(map_windows(r#"{"five_hour":{}}"#, 0.0).unwrap().is_empty());
+        assert!(map_windows("[]", 0.0).is_err());
     }
 
     #[test]
@@ -561,14 +554,6 @@ mod tests {
         let w = map_windows(body, 0.0).unwrap();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].window, "Opus");
-    }
-
-    #[test]
-    fn map_windows_survives_an_empty_or_unknown_response() {
-        assert!(map_windows("{}", 0.0).unwrap().is_empty());
-        // A window with no readable percentage contributes nothing.
-        assert!(map_windows(r#"{"five_hour":{}}"#, 0.0).unwrap().is_empty());
-        assert!(map_windows("[]", 0.0).is_err());
     }
 
     /// The host check is a parse, so a look-alike host can never match.

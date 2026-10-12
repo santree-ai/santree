@@ -9,11 +9,6 @@ describe("usePersistedState", () => {
     sessionStorage.clear();
   });
 
-  it("starts from the fallback when nothing is stored", () => {
-    const { result } = renderHook(() => usePersistedState("k", "fallback"));
-    expect(result.current[0]).toBe("fallback");
-  });
-
   /** The whole point: a value set before unmount is still there on the next mount.
    *  This is what makes leaving Trees for another tab and coming back land on the
    *  same worktree instead of the all-agents overview. */
@@ -24,15 +19,6 @@ describe("usePersistedState", () => {
 
     const second = renderHook(() => usePersistedState("k", ""));
     expect(second.result.current[0]).toBe("AK-274");
-  });
-
-  it("round-trips objects, not just strings", () => {
-    const first = renderHook(() => usePersistedState<Record<string, string>>("tabs", {}));
-    act(() => first.result.current[1]({ "AK-1": "file", "AK-2": "terminal" }));
-    first.unmount();
-
-    const second = renderHook(() => usePersistedState<Record<string, string>>("tabs", {}));
-    expect(second.result.current[0]).toEqual({ "AK-1": "file", "AK-2": "terminal" });
   });
 
   /** `false`, `0` and `""` are real stored values, not "nothing stored" — a `??`

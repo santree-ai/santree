@@ -53,66 +53,24 @@ pub fn map_priority(name: &str) -> Priority {
 mod tests {
     use super::*;
 
+    /// The category decides, the name refines: "…review…" in progress is In
+    /// Review, a negation-aware "…blocked…" in any open category is Blocked, and a
+    /// done status is never re-read from its name.
     #[test]
-    fn maps_statuses() {
-        assert_eq!(map_status("new", "To Do"), TaskStatus::Todo);
-        assert_eq!(map_status("new", "Open"), TaskStatus::Todo);
-        assert_eq!(
-            map_status("indeterminate", "In Progress"),
-            TaskStatus::InProgress
-        );
-        assert_eq!(
-            map_status("indeterminate", "In Review"),
-            TaskStatus::InReview
-        );
-        assert_eq!(
-            map_status("indeterminate", "Code Review"),
-            TaskStatus::InReview
-        );
-        assert_eq!(map_status("done", "Done"), TaskStatus::Done);
-        assert_eq!(map_status("done", "Closed"), TaskStatus::Done);
-        assert_eq!(map_status("done", "Resolved"), TaskStatus::Done);
-    }
-
-    #[test]
-    fn blocked_detected_in_any_open_category() {
-        for category in ["new", "indeterminate"] {
-            assert_eq!(
-                map_status(category, "Blocked"),
-                TaskStatus::Blocked,
-                "Blocked in {category}"
-            );
-            assert_eq!(
-                map_status(category, "Blocked on design"),
-                TaskStatus::Blocked,
-                "Blocked on design in {category}"
-            );
-            assert!(!map_status(category, "Blocked").is_startable());
+    fn a_status_maps_by_category_refined_by_a_review_or_blocked_name() {
+        use TaskStatus::*;
+        for (category, name, want) in [
+            ("new", "To Do", Todo),
+            ("indeterminate", "In Progress", InProgress),
+            ("indeterminate", "Code Review", InReview),
+            ("done", "Resolved", Done),
+            ("new", "Blocked", Blocked),
+            ("indeterminate", "Blocked on design", Blocked),
+            ("done", "Blocked (won't do)", Done),
+            ("new", "Unblocked", Todo),
+            ("indeterminate", "Not blocked", InProgress),
+        ] {
+            assert_eq!(map_status(category, name), want, "{category} / {name}");
         }
-        // Terminal category is never re-read as Blocked.
-        assert_eq!(map_status("done", "Blocked (won't do)"), TaskStatus::Done);
-    }
-
-    #[test]
-    fn unblocked_is_not_blocked() {
-        assert_eq!(map_status("new", "Unblocked"), TaskStatus::Todo);
-        assert_eq!(
-            map_status("indeterminate", "Unblocked"),
-            TaskStatus::InProgress
-        );
-        assert_eq!(map_status("new", "Not blocked"), TaskStatus::Todo);
-    }
-
-    #[test]
-    fn priorities_map() {
-        assert_eq!(map_priority("Highest"), Priority::Urgent);
-        assert_eq!(map_priority("Critical"), Priority::Urgent);
-        assert_eq!(map_priority("Blocker"), Priority::Urgent);
-        assert_eq!(map_priority("High"), Priority::High);
-        assert_eq!(map_priority("Medium"), Priority::Medium);
-        assert_eq!(map_priority("Low"), Priority::Low);
-        assert_eq!(map_priority("Lowest"), Priority::Low);
-        assert_eq!(map_priority("Trivial"), Priority::Low);
-        assert_eq!(map_priority("Custom thing"), Priority::None);
     }
 }

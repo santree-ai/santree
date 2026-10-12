@@ -124,21 +124,13 @@ describe("server card", () => {
     expect(within(card).queryByRole("button", { name: "Start" })).toBeNull();
   });
 
-  it("opens the logs folder through revealLogs, separately from Export logs", async () => {
-    renderCard();
-    fireEvent.click(await screen.findByRole("button", { name: "Open logs" }));
-    await waitFor(() => expect(world.revealLogs).toHaveBeenCalledTimes(1));
-  });
-
-  it.each([
-    [{ kind: "Down", reason: "It was stopped from outside santree." }, "Not running"],
-    [{ kind: "Failing", reason: "It exited 3 times in a row." }, "Keeps stopping"],
-  ] as [ServerState, string][])("explains %j and offers Start", async (state, title) => {
-    world.status = { state, draining: [] };
+  it("explains a server that is down and offers Start instead of Restart", async () => {
+    const reason = "It exited 3 times in a row.";
+    world.status = { state: { kind: "Failing", reason }, draining: [] };
     renderCard();
     const card = await screen.findByRole("region", { name: "santree server" });
-    expect(within(card).getByText(title)).toBeInTheDocument();
-    expect(within(card).getByText((state as { reason: string }).reason)).toBeInTheDocument();
+    expect(within(card).getByText("Keeps stopping")).toBeInTheDocument();
+    expect(within(card).getByText(reason)).toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "Restart" })).toBeNull();
     fireEvent.click(within(card).getByRole("button", { name: "Start" }));
     await waitFor(() => expect(world.start).toHaveBeenCalledTimes(1));

@@ -27,14 +27,10 @@ describe("useNativeContextMenu", () => {
     expect(nativeMenuOpens(mount(document.createElement("div")))).toBe(false);
   });
 
-  it("leaves it to a text field, which needs cut and paste", () => {
+  it("leaves it to a text field and a terminal, which need cut and paste", () => {
     renderHook(() => useNativeContextMenu());
     expect(nativeMenuOpens(mount(document.createElement("input")))).toBe(true);
     expect(nativeMenuOpens(mount(document.createElement("textarea")))).toBe(true);
-  });
-
-  it("leaves it to a terminal, which needs paste", () => {
-    renderHook(() => useNativeContextMenu());
     const term = mount(document.createElement("div"));
     term.className = "xterm";
     const row = term.appendChild(document.createElement("span"));

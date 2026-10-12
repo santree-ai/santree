@@ -976,6 +976,21 @@ pub enum AgentSession {
         /// See [`AgentSession::launch_flags`].
         launch_flags: String,
     },
+    /// The stored Claude session is running as one of Claude's own background
+    /// sessions (`claude --bg`, hosted by Claude's daemon, so it outlived the
+    /// pane that held it): the tab runs `claude attach` on it. A `--resume`
+    /// would be refused by the CLI, and a copy would fork the conversation.
+    Attach {
+        /// Always Claude: only its daemon runs background sessions.
+        agent_kind: AgentKind,
+        executable: String,
+        /// The conversation's own id — the one the tab is bound to — which
+        /// readers like the usage bar key on.
+        session_id: String,
+        /// The short id `claude agents` lists and `claude attach` takes —
+        /// validated hex before it gets here, because it becomes argv.
+        background_id: String,
+    },
     /// No agent session — just a login shell.
     Shell,
 }
@@ -995,7 +1010,7 @@ impl AgentSession {
     pub fn launch_flags(&self) -> &str {
         match self {
             Self::Resume { launch_flags, .. } | Self::Fresh { launch_flags, .. } => launch_flags,
-            Self::Shell => "",
+            Self::Attach { .. } | Self::Shell => "",
         }
     }
 
@@ -1008,7 +1023,7 @@ impl AgentSession {
             Self::Resume { launch_flags, .. } | Self::Fresh { launch_flags, .. } => {
                 *launch_flags = flags;
             }
-            Self::Shell => {}
+            Self::Attach { .. } | Self::Shell => {}
         }
         self
     }
@@ -3251,121 +3266,6 @@ mod tests {
                 source
             );
         }
-    }
-
-    #[test]
-    fn server_state_serializes_tagged_and_camel_cased() {
-        use serde_json::json;
-        let cases = [
-            (ServerState::Off, json!({"kind": "Off"})),
-            (ServerState::Starting, json!({"kind": "Starting"})),
-            (ServerState::Stopping, json!({"kind": "Stopping"})),
-            (
-                ServerState::Running {
-                    revision: 3,
-                    version: "0.2.0".into(),
-                    pid: 4242,
-                    started_at_ms: 1_700_000_000_123.0,
-                    live_sessions: 5,
-                },
-                json!({
-                    "kind": "Running",
-                    "revision": 3,
-                    "version": "0.2.0",
-                    "pid": 4242,
-                    "startedAtMs": 1_700_000_000_123.0,
-                    "liveSessions": 5,
-                }),
-            ),
-            (
-                ServerState::Down {
-                    reason: "stopped".into(),
-                },
-                json!({"kind": "Down", "reason": "stopped"}),
-            ),
-            (
-                ServerState::Failing {
-                    reason: "crashed 5 times".into(),
-                },
-                json!({"kind": "Failing", "reason": "crashed 5 times"}),
-            ),
-        ];
-        for (state, want) in cases {
-            assert_eq!(serde_json::to_value(&state).unwrap(), want, "{state:?}");
-        }
-    }
-
-    #[test]
-    fn terminal_inventory_serializes_camel_cased() {
-        use serde_json::json;
-        let inventory = TerminalInventory {
-            sessions: vec![TerminalSession {
-                id: 7,
-                label: "tree:AK-1:tab:t".into(),
-                cwd: None,
-                command: "/bin/zsh".into(),
-                pid: Some(42),
-                cols: 80,
-                rows: 24,
-                attached: false,
-                alive: true,
-                server_revision: Some(3),
-            }],
-            complete: false,
-            orphans: vec![7],
-        };
-        assert_eq!(
-            serde_json::to_value(inventory).unwrap(),
-            json!({
-                "sessions": [{
-                    "id": 7, "label": "tree:AK-1:tab:t", "cwd": null,
-                    "command": "/bin/zsh", "pid": 42, "cols": 80, "rows": 24,
-                    "attached": false, "alive": true,
-                    "serverRevision": 3,
-                }],
-                "complete": false,
-                "orphans": [7],
-            })
-        );
-    }
-
-    #[test]
-    fn server_status_and_quit_summary_serialize_camel_cased() {
-        use serde_json::json;
-        let status = ServerStatus {
-            state: ServerState::Starting,
-            draining: vec![
-                DrainingServer {
-                    revision: 2,
-                    sessions: SessionCount::Known { count: 7 },
-                    pid: Some(99),
-                    version: Some("0.1.18".into()),
-                },
-                DrainingServer {
-                    revision: 1,
-                    sessions: SessionCount::Unknown,
-                    pid: None,
-                    version: None,
-                },
-            ],
-        };
-        assert_eq!(
-            serde_json::to_value(&status).unwrap(),
-            json!({
-                "state": {"kind": "Starting"},
-                "draining": [
-                    {"revision": 2, "sessions": {"kind": "Known", "count": 7},
-                     "pid": 99, "version": "0.1.18"},
-                    {"revision": 1, "sessions": {"kind": "Unknown"},
-                     "pid": null, "version": null},
-                ],
-            })
-        );
-        let quit = QuitSummary { terminals_end: 3 };
-        assert_eq!(
-            serde_json::to_value(quit).unwrap(),
-            json!({"terminalsEnd": 3})
-        );
     }
 }
 

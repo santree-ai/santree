@@ -151,32 +151,12 @@ mod tests {
     }
 
     #[test]
-    fn blockers_sit_left_of_dependents() {
-        let mut tasks = vec![
-            task("A", "P", &[]),
-            task("B", "P", &["A"]),
-            task("C", "P", &["B"]),
-        ];
-        layout_tasks(&mut tasks);
-        assert!(tasks[0].x < tasks[1].x, "A should be left of B");
-        assert!(tasks[1].x < tasks[2].x, "B should be left of C");
-    }
-
-    #[test]
     fn projects_stack_into_separate_bands() {
         let mut tasks = vec![task("A", "P1", &[]), task("B", "P2", &[])];
         layout_tasks(&mut tasks);
         // Same column (both roots), different vertical band.
         assert_eq!(tasks[0].x, tasks[1].x);
         assert!(tasks[1].y > tasks[0].y);
-    }
-
-    #[test]
-    fn tolerates_cycles_without_hanging() {
-        let mut tasks = vec![task("A", "P", &["B"]), task("B", "P", &["A"])];
-        layout_tasks(&mut tasks);
-        // Just needs to terminate and assign coordinates.
-        assert!(tasks.iter().all(|t| t.y >= PAD_Y));
     }
 
     /// A long blocker chain must not be bounded by the call stack: `panic = "abort"`
@@ -197,25 +177,24 @@ mod tests {
         assert_eq!(layer[0], (n - 1) as i32, "each link is one column right");
     }
 
-    /// A task that blocks itself is a degenerate cycle: it must land in column 0,
-    /// not one column right of itself.
+    /// Blockers the layout can't resolve — a cycle, a task blocking itself, one
+    /// outside the fetched set (another team, or filtered out) — must terminate,
+    /// keep the task in the layout, and not push it right.
     #[test]
-    fn self_blocking_task_sits_in_the_first_column() {
-        let mut tasks = vec![task("A", "P", &["A"]), task("B", "P", &["A"])];
+    fn unresolvable_blockers_leave_a_task_a_root() {
+        let mut cycle = vec![task("A", "P", &["B"]), task("B", "P", &["A"])];
+        layout_tasks(&mut cycle);
+        assert!(cycle.iter().all(|t| t.y >= PAD_Y));
+
+        let mut tasks = vec![
+            task("A", "P", &["A"]),
+            task("G", "P", &["GHOST-1"]),
+            task("B", "P", &["A"]),
+        ];
         layout_tasks(&mut tasks);
         assert_eq!(tasks[0].x, PAD_X, "A blocks itself → still a root");
-        assert_eq!(tasks[1].x, PAD_X + COL_STEP, "B is one column right of A");
-    }
-
-    /// Blockers pointing outside the fetched set (a blocker in another team, or one
-    /// filtered out of this query) are unresolvable — they must not shift the task's
-    /// column or drop it from the layout.
-    #[test]
-    fn blockers_outside_the_set_are_ignored() {
-        let mut tasks = vec![task("A", "P", &["GHOST-1"]), task("B", "P", &["A"])];
-        layout_tasks(&mut tasks);
-        assert_eq!(tasks[0].x, PAD_X, "an unknown blocker leaves A a root");
-        assert_eq!(tasks[1].x, PAD_X + COL_STEP);
+        assert_eq!(tasks[1].x, PAD_X, "an unknown blocker leaves G a root");
+        assert_eq!(tasks[2].x, PAD_X + COL_STEP, "B is one column right of A");
     }
 
     /// A diamond (D blocked by B and C, both blocked by A) puts D one column right

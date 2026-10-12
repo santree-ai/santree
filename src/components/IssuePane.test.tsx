@@ -35,16 +35,15 @@ const ticket = {
 
 describe("IssuePane", () => {
   // Nothing carried an id — a PR whose title and branch name no ticket.
-  it("says there is no ticket when nothing named one", () => {
-    detail.data = undefined;
-    render(<IssuePane repo="acme/app" ticketId={null} />);
-    expect(screen.getByText("No linked ticket")).toBeInTheDocument();
-    expect(screen.queryByTestId("discussion")).toBeNull();
-  });
-
   // …and the other way to have none: an id Linear has no issue for. Same message,
   // because neither is a failure to report.
-  it("says the same when Linear has no issue by that id", () => {
+  it("says there is no ticket when nothing named one, or Linear has none by that id", () => {
+    detail.data = undefined;
+    const none = render(<IssuePane repo="acme/app" ticketId={null} />);
+    expect(screen.getByText("No linked ticket")).toBeInTheDocument();
+    expect(screen.queryByTestId("discussion")).toBeNull();
+    none.unmount();
+
     detail.data = null;
     render(<IssuePane repo="acme/app" ticketId="AK-9" />);
     expect(screen.getByText("No linked ticket")).toBeInTheDocument();
@@ -53,12 +52,16 @@ describe("IssuePane", () => {
 
   // Both signals, because they answer different questions: the state says how far
   // the ticket has got, the priority dot how much it matters.
-  it("shows the ticket's workflow state beside its title", () => {
+  // The worktree host self-heals its cached title off `onResolvedTitle`; the
+  // write is the caller's, so all the pane owes it is the live title.
+  it("shows the ticket's state and title, and reports the live title to its host", () => {
     detail.data = ticket;
-    render(<IssuePane repo="acme/app" ticketId="AK-1" />);
+    const onResolvedTitle = vi.fn();
+    render(<IssuePane repo="acme/app" ticketId="AK-1" onResolvedTitle={onResolvedTitle} />);
     expect(screen.getByText("In Review")).toBeInTheDocument();
     expect(screen.getByText("Throttle the login endpoint")).toBeInTheDocument();
     expect(screen.getByTestId("discussion")).toBeInTheDocument();
+    expect(onResolvedTitle).toHaveBeenCalledWith("Throttle the login endpoint");
   });
 
   // Waiting on a fetch is not the same as having nothing: the skeleton keeps the
@@ -68,16 +71,6 @@ describe("IssuePane", () => {
     render(<IssuePane repo="acme/app" ticketId="AK-1" />);
     expect(screen.queryByText("No linked ticket")).toBeNull();
     expect(screen.getByTestId("discussion-skeleton")).toBeInTheDocument();
-  });
-
-  // The worktree host self-heals its cached title off this. The write is the
-  // caller's — a ticket-rendering pane has no business knowing about worktrees —
-  // so all this owes it is the live title, once.
-  it("reports the live title to a host that asked for it", () => {
-    detail.data = ticket;
-    const onResolvedTitle = vi.fn();
-    render(<IssuePane repo="acme/app" ticketId="AK-1" onResolvedTitle={onResolvedTitle} />);
-    expect(onResolvedTitle).toHaveBeenCalledWith("Throttle the login endpoint");
   });
 
   // The rail is a place to glance at a ticket; reading a long one wants the main

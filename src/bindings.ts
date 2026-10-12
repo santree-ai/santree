@@ -1622,6 +1622,25 @@ launchFlags: string } |
 sessionId: string | null; 
 /**  See [`AgentSession::launch_flags`]. */
 launchFlags: string } | 
+/**
+ *  The stored Claude session is running as one of Claude's own background
+ *  sessions (`claude --bg`, hosted by Claude's daemon, so it outlived the
+ *  pane that held it): the tab runs `claude attach` on it. A `--resume`
+ *  would be refused by the CLI, and a copy would fork the conversation.
+ */
+{ type: "attach"; 
+/**  Always Claude: only its daemon runs background sessions. */
+agentKind: AgentKind; executable: string; 
+/**
+ *  The conversation's own id — the one the tab is bound to — which
+ *  readers like the usage bar key on.
+ */
+sessionId: string; 
+/**
+ *  The short id `claude agents` lists and `claude attach` takes —
+ *  validated hex before it gets here, because it becomes argv.
+ */
+backgroundId: string } | 
 /**  No agent session — just a login shell. */
 { type: "shell" };
 

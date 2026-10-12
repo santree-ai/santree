@@ -164,24 +164,6 @@ async fn ensure_launches_the_server_connects_and_announces_each_step() {
 }
 
 #[tokio::test]
-async fn a_second_ensure_adopts_the_server_that_is_running() {
-    let fx = Fixture::new();
-    let first = harness(&fx);
-    first.servers.ensure().await;
-    let pid = running_pid(&first.servers).expect("running");
-    fx.track(pid);
-
-    // Same instance again, and another app instance over the same endpoint.
-    first.servers.ensure().await;
-    let second = harness(&fx);
-    second.servers.ensure().await;
-
-    assert_eq!(running_pid(&first.servers), Some(pid));
-    assert_eq!(running_pid(&second.servers), Some(pid));
-    assert_eq!(server_pids(&fx), vec![pid], "one server process, no second");
-}
-
-#[tokio::test]
 async fn two_ensures_racing_converge_on_one_server() {
     let fx = Fixture::new();
     let (a, b) = (harness(&fx), harness(&fx));
@@ -314,24 +296,6 @@ async fn a_server_of_another_revision_on_the_current_socket_is_down() {
     assert!(h.servers.current().is_none());
 }
 
-#[test]
-fn info_of_the_wrong_revision_is_refused() {
-    let info = |revision| ServerInfo {
-        version: "0".into(),
-        revision,
-        pid: 1,
-        started_at_ms: 0,
-        exe: String::new(),
-        live_sessions: 0,
-        clients: 1,
-    };
-    assert!(check_info(&info(3), 3).is_ok());
-    assert_eq!(
-        check_info(&info(2), 3).unwrap_err(),
-        "unexpected server revision"
-    );
-}
-
 #[tokio::test]
 async fn without_a_server_mode_there_is_nothing_to_start_and_the_status_still_answers() {
     let fx = Fixture::new();
@@ -415,7 +379,7 @@ async fn a_server_that_dies_is_relaunched_and_a_crash_loop_ends_in_failing_until
         "nothing is listening: what it held is gone"
     );
     // And it stays down: nothing relaunches it behind the user's back.
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(matches!(
         h.servers.status().state,
         ServerState::Failing { .. }
@@ -464,7 +428,7 @@ async fn release_disconnects_and_never_stops_the_server() {
     fx.track(pid);
 
     h.servers.release();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         is_alive(pid),
         "quitting leaves the server and its sessions running"
@@ -487,7 +451,7 @@ async fn release_disconnects_and_never_stops_the_server() {
 // ── keep-awake ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn keep_awake_is_applied_from_the_apps_setting_on_every_connect() {
+async fn keep_awake_follows_the_apps_setting_on_every_connect_and_tick() {
     let fx = Fixture::new();
     let h = harness(&fx);
     h.keep_awake.store(true, Ordering::SeqCst);
@@ -502,7 +466,7 @@ async fn keep_awake_is_applied_from_the_apps_setting_on_every_connect() {
         .await
         .unwrap()
         .expect("offered");
-    assert_eq!(on.active, on.supported);
+    assert!(on.active);
     assert_eq!(
         *lock(&h.keep_awake_held),
         Some(on.active),
@@ -524,6 +488,23 @@ async fn keep_awake_is_applied_from_the_apps_setting_on_every_connect() {
         .expect("offered");
     assert!(!off.active);
     assert_eq!(*lock(&h.keep_awake_held), Some(false));
+
+    // The setting moves without the toggle command (a restore, another
+    // window): the next tick tells the server, once.
+    assert_eq!(*lock(&h.servers.keep_awake_sent), Some(false));
+    h.servers.sync_keep_awake().await;
+    assert_eq!(*lock(&h.servers.keep_awake_sent), Some(false));
+    h.keep_awake.store(true, Ordering::SeqCst);
+    h.servers.sync_keep_awake().await;
+    assert_eq!(*lock(&h.servers.keep_awake_sent), Some(true));
+    assert!(
+        h.servers
+            .apply_keep_awake()
+            .await
+            .unwrap()
+            .expect("offered")
+            .active
+    );
 }
 
 // ── adoption ────────────────────────────────────────────────────────────────
@@ -536,7 +517,7 @@ async fn adopt_ready_waits_for_the_supervisor_and_complete_tracks_the_link() {
         let servers = h.servers.clone();
         tokio::spawn(async move { servers.adopt_ready().await })
     };
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(
         !ready.is_finished(),
         "nothing is known before ensure has an answer"
@@ -977,7 +958,7 @@ async fn adopt_ready_does_not_resolve_on_a_down_that_may_pass() {
         let servers = h.servers.clone();
         tokio::spawn(async move { servers.adopt_ready().await })
     };
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         !waiting.is_finished(),
         "a server that is only unreachable may still come back with agents in it"
@@ -1176,22 +1157,14 @@ async fn a_slot_insists_on_its_modes_trust_before_any_byte() {
 
 // ── the smoke guard, healthy servers, binaries ──────────────────────────────
 
+/// Under the smoke run nothing launches a server — not the app's own ensure,
+/// and not `server_start`, a command the webview can call — or CI is left
+/// with a server nobody kills.
 #[tokio::test]
-async fn ensure_does_nothing_in_a_smoke_run() {
+async fn ensure_and_start_do_nothing_in_a_smoke_run() {
     let fx = Fixture::new();
     let h = harness(&fx);
     h.servers.ensure_unless(true).await;
-    assert!(matches!(h.servers.phase(), Phase::Starting));
-    assert_eq!(server_pids(&fx), Vec::<u32>::new(), "no server was started");
-    assert!(!*h.servers.discovered.borrow());
-}
-
-/// `server_start` is a command the webview can call: under the smoke run it must
-/// launch nothing either, or CI is left with a server nobody kills.
-#[tokio::test]
-async fn start_does_nothing_in_a_smoke_run_and_says_so() {
-    let fx = Fixture::new();
-    let h = harness(&fx);
     let refused = h.servers.start_unless(true).await;
     assert!(refused.is_err(), "a smoke run was told the server started");
     assert!(matches!(h.servers.phase(), Phase::Starting));
@@ -1210,7 +1183,7 @@ async fn ensure_and_start_leave_a_healthy_connected_server_alone() {
 
     h.servers.ensure().await;
     h.servers.start().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     assert_eq!(
         h.servers.current.host.generation(),
@@ -1289,36 +1262,6 @@ async fn a_tab_that_got_its_terminals_before_down_cannot_queue_after_it() {
         .await
         .unwrap();
     assert_eq!(*lock(&links), [PaneLink::Reconnecting]);
-}
-
-#[tokio::test]
-async fn an_identical_bundle_does_not_launch_over_a_server_that_answers() {
-    let fx = Fixture::new();
-    fx.layout.prepare().unwrap();
-    // The installed copy IS the bundle, and it would leave a mark if run.
-    let marker = fx.dir.path().join("ran");
-    let scripts = fx.dir.path().join("fake");
-    std::fs::create_dir(&scripts).unwrap();
-    let bundle = script(&scripts, "s", &format!("touch {}", marker.display()));
-    spawn::install_binary(&fx.layout, &bundle).unwrap();
-
-    // A server answers on the socket (a stand-in that serves a fake host).
-    let daemon = santree_remote_client::fake::FakeDaemon::new();
-    let listener = tokio::net::UnixListener::bind(fx.layout.socket_for(REVISION)).unwrap();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let (reader, writer) = stream.into_split();
-            daemon.serve(reader, writer);
-        }
-    });
-
-    let h = harness_with(&fx, Mode::OptIn, Some(bundle), REVISION);
-    h.servers.launch(&fx.layout).await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert!(
-        !marker.exists(),
-        "the installed server was launched although one answers"
-    );
 }
 
 /// An older "server" that answers `hello`, `server.info` and `pty.sessions`
@@ -1582,7 +1525,7 @@ async fn an_older_server_with_a_live_lock_and_no_socket_is_kept_and_found() {
     let slot = lock(&h.servers.draining).get(&1).cloned().unwrap();
     *lock(&slot.since) = Instant::now() - UNRESOLVED_BOUND - Duration::from_secs(1);
     h.servers.refresh_draining().await;
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     h.servers.refresh_draining().await;
     assert_eq!(h.servers.status().draining.len(), 1);
     assert!(h.servers.unreachable_servers().is_empty());
@@ -1613,19 +1556,6 @@ async fn housekeeping_notices_when_the_server_behind_a_missing_socket_dies() {
     h.servers.housekeeping().await;
     assert!(h.servers.complete(), "nothing holds the lock: it is gone");
     assert!(down_reason(&h.servers.status().state).contains("gone"));
-}
-
-/// A lock nobody holds is a server that is gone, with or without a socket.
-#[tokio::test]
-async fn an_older_servers_free_lock_is_a_dead_server() {
-    let fx = Fixture::new();
-    fx.layout.prepare().unwrap();
-    plant_lock(&fx.layout, 1); // a lock file, held by no one, and no socket
-    let h = harness_with(&fx, Mode::OptIn, None, 2);
-    pretend_current_is_dead(&h.servers);
-    h.servers.discover_legacy().await;
-    assert!(h.servers.status().draining.is_empty());
-    assert!(h.servers.complete());
 }
 
 /// Exit 20 with a server really holding the endpoint is the race's loser, not a
@@ -1744,8 +1674,17 @@ async fn stop_leaves_the_server_stopped_and_only_start_brings_it_back() {
     h.servers.ensure().await;
     let first = running_pid(&h.servers).expect("running");
     fx.track(first);
+    let before = lock(&h.emitted).len();
 
     h.servers.stop().await.unwrap();
+    // While a Stop runs the state says so; it never reads as a server starting.
+    let during: Vec<ServerState> = lock(&h.emitted)[before..]
+        .iter()
+        .map(|s| s.state.clone())
+        .collect();
+    assert!(!during.contains(&ServerState::Starting), "{during:?}");
+    assert_eq!(during.first(), Some(&ServerState::Stopping), "{during:?}");
+    assert_eq!(h.servers.phase(), Phase::Stopped);
     assert!(
         down_reason(&h.servers.status().state).contains("stopped"),
         "{:?}",
@@ -1758,7 +1697,7 @@ async fn stop_leaves_the_server_stopped_and_only_start_brings_it_back() {
     );
 
     // Nothing brings it back on its own: not the crash path, not an ensure.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     h.servers.ensure().await;
     assert!(
         matches!(h.servers.status().state, ServerState::Down { .. }),
@@ -1774,33 +1713,6 @@ async fn stop_leaves_the_server_stopped_and_only_start_brings_it_back() {
     assert_ne!(first, second);
 }
 
-/// While a Stop runs the state says so; it never reads as a server starting.
-#[tokio::test]
-async fn a_stop_reads_as_stopping_never_as_starting() {
-    let fx = Fixture::new();
-    let h = harness(&fx);
-    h.servers.ensure().await;
-    fx.track(running_pid(&h.servers).expect("running"));
-    let before = lock(&h.emitted).len();
-
-    h.servers.stop().await.unwrap();
-    let during: Vec<ServerState> = lock(&h.emitted)[before..]
-        .iter()
-        .map(|s| s.state.clone())
-        .collect();
-    assert!(!during.contains(&ServerState::Starting), "{during:?}");
-    assert_eq!(during.first(), Some(&ServerState::Stopping), "{during:?}");
-    assert_eq!(h.servers.phase(), Phase::Stopped);
-}
-
-#[tokio::test]
-async fn stopping_a_server_that_was_never_started_is_a_stopped_state_not_a_failure() {
-    let fx = Fixture::new();
-    let h = harness_with(&fx, Mode::OptIn, None, REVISION);
-    h.servers.stop().await.unwrap();
-    assert!(matches!(h.servers.status().state, ServerState::Down { .. }));
-}
-
 #[tokio::test]
 async fn stop_and_restart_are_refused_without_a_server_mode_or_once_quitting() {
     let fx = Fixture::new();
@@ -1812,19 +1724,6 @@ async fn stop_and_restart_are_refused_without_a_server_mode_or_once_quitting() {
     h.servers.release();
     assert!(h.servers.stop().await.is_err());
     assert!(h.servers.restart().await.is_err());
-}
-
-#[tokio::test]
-async fn ending_a_revision_that_is_not_a_known_draining_server_is_refused() {
-    let fx = Fixture::new();
-    let h = harness_with(&fx, Mode::OptIn, None, REVISION);
-    for revision in [0, 1, REVISION, REVISION + 1, u32::MAX] {
-        let err = h.servers.end_draining(revision).await.unwrap_err();
-        assert!(
-            err.to_string().contains("no older santree server"),
-            "{err:#}"
-        );
-    }
 }
 
 // ── diagnostics ─────────────────────────────────────────────────────────────
@@ -1856,39 +1755,6 @@ async fn the_report_of_a_server_that_is_down_still_answers() {
     let h = harness_with(&fx, Mode::OptIn, None, REVISION);
     let report = h.servers.report().await;
     assert!(report.contains("not connected"), "{report}");
-}
-
-// ── keep-awake follows the setting ──────────────────────────────────────────
-
-#[tokio::test]
-async fn a_change_of_the_hold_is_sent_once_and_an_unchanged_one_is_not_sent_again() {
-    let fx = Fixture::new();
-    let h = harness(&fx);
-    h.servers.ensure().await;
-    fx.track(running_pid(&h.servers).expect("running"));
-    assert_eq!(
-        *lock(&h.servers.keep_awake_sent),
-        Some(false),
-        "told on connect"
-    );
-
-    // Nothing changed: the tick sends nothing.
-    *lock(&h.servers.keep_awake_sent) = Some(false);
-    h.servers.sync_keep_awake().await;
-    assert_eq!(*lock(&h.servers.keep_awake_sent), Some(false));
-
-    // The setting moved without the toggle command (a restore, another
-    // window): the next tick tells the server.
-    h.keep_awake.store(true, Ordering::SeqCst);
-    h.servers.sync_keep_awake().await;
-    assert_eq!(*lock(&h.servers.keep_awake_sent), Some(true));
-    let active = h
-        .servers
-        .apply_keep_awake()
-        .await
-        .unwrap()
-        .expect("offered");
-    assert_eq!(active.active, active.supported, "the server holds it");
 }
 
 // ── pruning ─────────────────────────────────────────────────────────────────

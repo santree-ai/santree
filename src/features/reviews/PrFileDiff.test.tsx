@@ -299,30 +299,6 @@ describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode
   });
 
   if (mode === "split") {
-    /** Reported: multi-line works in Reviews (unified) and not in Trees (split).
-     *  The `+` you actually press in split is the one drawn *in the code cell* —
-     *  the gutter copy is behind the pointer by then — and a drag that starts
-     *  there has to grow like any other. */
-    it("drags a range from the + in the code cell", async () => {
-      const { container } = render(
-        <PrFileDiff
-          path="a.ts"
-          status="modified"
-          patch={RANGE}
-          threads={NO_THREADS}
-          drafts={NO_DRAFTS}
-          target={TARGET}
-          mode={mode}
-        />,
-      );
-
-      fireEvent.mouseDown(gutter(container, mode, 41).contentPlus);
-      fireEvent.mouseOver(content(container, mode, 43));
-      fireEvent.mouseUp(document);
-
-      await waitFor(() => expect(container.textContent).toContain("Add a comment on lines 41–43"));
-    });
-
     it("works from either column, on a row whose two sides disagree", async () => {
       // Split lays a deletion and its replacement on one row, and that row's two
       // number cells disagree the moment the file has shifted. Each column's
@@ -365,6 +341,8 @@ describe.each(["unified", "split"] as const)("commenting on a range (%s)", (mode
       );
     });
 
+    /** Reported: multi-line works in Reviews (unified) and not in Trees (split).
+     *  The `+` you actually press in split is the one drawn *in the code cell*. */
     it("drags from the copy of the + that sits in the code cell", async () => {
       // Split renders the button twice per row, once either side of the gutter
       // boundary, and only the gutter copy sits next to a line number. The library

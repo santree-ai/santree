@@ -1511,19 +1511,6 @@ mod tests {
     }
 
     #[test]
-    fn settled_states_are_never_reconciled() {
-        let p = transcript("settled", &[conv("assistant", T + 5000)]);
-        assert_eq!(
-            reconcile_live_state(AgentState::Idle, Some(&p), None, T, T + 5000),
-            None
-        );
-        assert_eq!(
-            reconcile_live_state(AgentState::Exited, Some(&p), None, T, T + 5000),
-            None
-        );
-    }
-
-    #[test]
     fn unknown_stored_state_drops_the_row() {
         // A stale santree-hook on disk writing a state this build doesn't know must
         // not surface as a wrong badge.
@@ -1654,12 +1641,18 @@ mod tests {
         );
     }
 
+    /// A pending prompt (permission / waiting) resolves only when the transcript
+    /// moves past the instant it was recorded — never from its own hook clock,
+    /// which would resolve every prompt against itself and clear it instantly.
+    /// Once resolved it reads as running while the agent is busy and as idle once
+    /// quiet (even when the last line is a bare tool_result, as under remote
+    /// control). Settled states are never reconciled at all.
     #[test]
-    fn pending_when_transcript_is_frozen_before_the_prompt() {
-        // The real failing case: a permission is showing, but its tool_use is
+    fn a_pending_prompt_resolves_only_once_the_transcript_moves_past_it() {
+        // The real failing case: a permission is showing but its tool_use is
         // withheld from the transcript — the newest entry predates the prompt, and
         // a trailing metadata line must not be mistaken for progress.
-        let p = transcript(
+        let frozen = transcript(
             "frozen",
             &[
                 conv("assistant", T - 60_000),
@@ -1667,57 +1660,42 @@ mod tests {
                 META.to_string(),
             ],
         );
-        let now = T + 5_000;
-        assert_eq!(
-            reconcile_live_state(AgentState::Permission, Some(&p), None, T, now),
-            None
-        );
-        assert_eq!(
-            reconcile_live_state(AgentState::Waiting, Some(&p), None, T, now),
-            None
-        );
-    }
+        for state in [AgentState::Permission, AgentState::Waiting] {
+            assert_eq!(
+                reconcile_live_state(state, Some(&frozen), None, T, T + 5_000),
+                None,
+                "{state:?}"
+            );
+        }
 
-    #[test]
-    fn resolved_prompt_is_running_while_still_active() {
-        // Reject/accept fed back; the agent is still busy (recent activity).
-        let p = transcript(
-            "mid",
+        let answered = transcript(
+            "answered",
             &[conv("assistant", T - 60_000), conv("user", T + 3_000)],
         );
-        let now = T + 5_000; // only 2s since the last entry → not quiet
         assert_eq!(
-            reconcile_live_state(AgentState::Permission, Some(&p), None, T, now),
-            Some(AgentState::Active)
+            reconcile_live_state(AgentState::Permission, Some(&answered), None, T, T + 5_000),
+            Some(AgentState::Active),
+            "answered 2s ago: still busy"
         );
-    }
+        assert_eq!(
+            reconcile_live_state(
+                AgentState::Permission,
+                Some(&answered),
+                None,
+                T,
+                T + 3_000 + IDLE_QUIET_MS + 1
+            ),
+            Some(AgentState::Idle),
+            "answered, then quiet past the threshold"
+        );
 
-    #[test]
-    fn resolved_prompt_goes_idle_once_quiet() {
-        // The user's ask: after a reject, once the agent stops doing anything the
-        // badge flips to idle — even under remote control where the last transcript
-        // line is a bare tool_result, not an `end_turn`.
-        let p = transcript("reject-idle", &[conv("user", T + 5_000)]);
-        let now = T + 5_000 + IDLE_QUIET_MS + 1; // quiet past the threshold
-        assert_eq!(
-            reconcile_live_state(AgentState::Permission, Some(&p), None, T, now),
-            Some(AgentState::Idle)
-        );
-    }
-
-    #[test]
-    fn active_goes_idle_when_quiet_but_stays_running_when_recent() {
-        let p = transcript("active", &[conv("assistant", T)]);
-        // Quiet long enough → idle even though no `Stop` fired.
-        assert_eq!(
-            reconcile_live_state(AgentState::Active, Some(&p), None, T, T + IDLE_QUIET_MS + 1),
-            Some(AgentState::Idle)
-        );
-        // Recent main-loop activity (mid-turn / thinking pause) → running.
-        assert_eq!(
-            reconcile_live_state(AgentState::Active, Some(&p), None, T, T + 2_000),
-            Some(AgentState::Active)
-        );
+        for settled in [AgentState::Idle, AgentState::Exited] {
+            assert_eq!(
+                reconcile_live_state(settled, Some(&answered), None, T, T + 5_000),
+                None,
+                "{settled:?}"
+            );
+        }
     }
 
     #[test]
@@ -1805,20 +1783,6 @@ mod tests {
             reconcile_live_state(AgentState::Active, Some(&p), None, now - 2_000, now),
             Some(AgentState::Active),
             "a fresh tool heartbeat is activity even when the transcript is silent"
-        );
-    }
-
-    /// A pending prompt must not treat its own recording as activity — that is
-    /// what the transcript comparison is for, and folding the hook clock in would
-    /// resolve every prompt against itself and clear it instantly.
-    #[test]
-    fn the_hook_clock_is_not_activity_for_a_pending_prompt() {
-        let now = now_ms();
-        let p = transcript("pending-clock", &[conv("assistant", now - 60_000)]);
-        // Prompt recorded after the last transcript entry: still genuinely pending.
-        assert_eq!(
-            reconcile_live_state(AgentState::Permission, Some(&p), None, now - 1_000, now),
-            None
         );
     }
 
@@ -2214,16 +2178,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Both heartbeat events must actually be injected, or the mid-turn signal
-    /// they carry never fires. Guarded because the settings map is built from this
-    /// list and nothing else would notice one going missing.
+    /// The heartbeat is injected for both providers, or the mid-turn signal it
+    /// carries never fires and a working agent decays to "idle" mid-turn (it
+    /// did, once, for Codex). `PreToolUse` races its own permission prompt, and
+    /// Codex's subagent/compaction events carry neither a state nor liveness —
+    /// registering them would run the hook binary on every tool call for nothing.
     #[test]
-    fn the_injected_claude_events_include_the_mid_turn_heartbeats() {
-        for event in ["PostToolUse", "PostToolUseFailure"] {
-            assert!(EVENTS.contains(&event), "{event} is not injected");
+    fn both_providers_inject_the_heartbeat_and_none_of_the_noise() {
+        for (provider, events) in [("Claude", EVENTS), ("Codex", CODEX_EVENTS)] {
+            assert!(events.contains(&"PostToolUse"), "{provider}");
+            assert!(!events.contains(&"PreToolUse"), "{provider}");
         }
-        // `PreToolUse` races its own permission prompt — deliberately absent.
-        assert!(!EVENTS.contains(&"PreToolUse"));
+        assert!(EVENTS.contains(&"PostToolUseFailure"));
+        for noisy in ["SubagentStart", "SubagentStop", "PreCompact"] {
+            assert!(!CODEX_EVENTS.contains(&noisy), "{noisy}");
+        }
     }
 
     /// Split a command line into argv the way a POSIX shell would, for the
@@ -2325,35 +2294,5 @@ mod tests {
             vec![bin, "--db", db, "--agent-kind", "Codex", "SessionStart"],
             "the hook command re-tokenised wrong: {command}"
         );
-    }
-
-    /// Only the events santree can act on are registered. Codex fires eleven;
-    /// registering the rest would run the hook binary on every tool call to
-    /// report nothing.
-    #[test]
-    fn only_state_bearing_codex_events_are_registered() {
-        assert_eq!(
-            CODEX_EVENTS,
-            &[
-                "SessionStart",
-                "UserPromptSubmit",
-                "PostToolUse",
-                "PermissionRequest",
-                "Stop",
-                "SessionEnd"
-            ]
-        );
-        // `PostToolUse` earns its place despite carrying no state *change*: it is
-        // the mid-turn heartbeat, and the only proof a long tool call is still
-        // running when the rollout isn't advancing. Dropping it is what let a
-        // working agent decay to "idle" mid-turn.
-        assert!(CODEX_EVENTS.contains(&"PostToolUse"));
-        for noisy in ["PreToolUse", "SubagentStart", "SubagentStop", "PreCompact"] {
-            assert!(
-                !CODEX_EVENTS.contains(&noisy),
-                "{noisy} carries neither a state change nor liveness, \
-                 and must not spawn the hook"
-            );
-        }
     }
 }

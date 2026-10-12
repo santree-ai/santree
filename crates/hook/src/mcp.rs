@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_echoes_a_version_it_speaks() {
+    fn initialize_echoes_a_version_it_speaks_and_falls_back_otherwise() {
         let mut s = Session::new(Stub::ok());
         let out = line(
             &mut s,
@@ -321,11 +321,7 @@ mod tests {
         // `MCP_SERVER_NAME` and grants `mcp__santree-review`, so renaming it on
         // one side alone leaves every permission rule matching nothing.
         assert_eq!(out["result"]["serverInfo"]["name"], "santree-review");
-    }
 
-    #[test]
-    fn initialize_falls_back_for_a_version_it_does_not_speak() {
-        let mut s = Session::new(Stub::ok());
         let out = line(
             &mut s,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
@@ -334,8 +330,13 @@ mod tests {
         assert_eq!(out["result"]["protocolVersion"], LATEST);
     }
 
+    /// Every reply is a JSON-RPC 2.0 envelope matched to its request, with the
+    /// spec's own code for each failure; a notification is never answered.
+    /// (Every `jsonrpc` elsewhere in this module is inside a request string we
+    /// wrote, so dropping the field from replies once left everything green while
+    /// a spec-conformant client rejected the lot.)
     #[test]
-    fn a_notification_is_never_answered() {
+    fn each_method_answers_in_the_envelope_with_its_own_code() {
         let mut s = Session::new(Stub::ok());
         assert!(line(
             &mut s,
@@ -343,28 +344,53 @@ mod tests {
         )
         .is_none());
         assert!(line(&mut s, "").is_none());
-    }
 
-    #[test]
-    fn ping_and_tools_list_answer() {
-        let mut s = Session::new(Stub::ok());
-        let pong = line(&mut s, r#"{"jsonrpc":"2.0","id":"p","method":"ping"}"#).unwrap();
-        assert_eq!(pong["id"], "p");
-        assert_eq!(pong["result"], json!({}));
-        let list = line(&mut s, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
-        assert_eq!(list["result"]["tools"][0]["name"], "add_review_comment");
-    }
-
-    #[test]
-    fn a_tool_call_carries_its_arguments_through() {
-        let mut s = Session::new(Stub::ok());
-        let out = line(
+        let reply = |s: &mut Session<Stub>, req: &str| {
+            let out = line(s, req).unwrap();
+            assert_eq!(out["jsonrpc"], "2.0", "{out}");
+            assert_eq!(out["id"], "a", "a reply is matched to its request: {out}");
+            out
+        };
+        assert_eq!(
+            reply(&mut s, r#"{"jsonrpc":"2.0","id":"a","method":"ping"}"#)["result"],
+            json!({})
+        );
+        let list = reply(
             &mut s,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add_review_comment","arguments":{"line":4}}}"#,
-        )
-        .unwrap();
-        assert_eq!(out["result"]["isError"], false);
-        assert_eq!(out["result"]["content"][0]["text"], "done");
+            r#"{"jsonrpc":"2.0","id":"a","method":"tools/list"}"#,
+        );
+        assert_eq!(list["result"]["tools"][0]["name"], "add_review_comment");
+        let call = reply(
+            &mut s,
+            r#"{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"add_review_comment","arguments":{"line":4}}}"#,
+        );
+        assert_eq!(call["result"]["isError"], false);
+        assert_eq!(call["result"]["content"][0]["text"], "done");
+        let unknown = reply(
+            &mut s,
+            r#"{"jsonrpc":"2.0","id":"a","method":"resources/list"}"#,
+        );
+        assert_eq!(unknown["error"]["code"], -32601);
+
+        // A message we couldn't even parse still answers in the envelope, with the
+        // null id the spec requires when there is no id to echo.
+        let parse = line(&mut s, "not json {{{").unwrap();
+        assert_eq!(parse["jsonrpc"], "2.0", "{parse}");
+        assert_eq!(
+            (parse["error"]["code"].clone(), parse["id"].clone()),
+            (json!(-32700), Value::Null)
+        );
+        assert_eq!(line(&mut s, "[1,2]").unwrap()["error"]["code"], -32600);
+
+        let mut s = Session::new(Stub {
+            last: None,
+            answer: Err(ToolError::UnknownTool),
+        });
+        let out = reply(
+            &mut s,
+            r#"{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"nope"}}"#,
+        );
+        assert_eq!(out["error"]["code"], -32602);
     }
 
     #[test]
@@ -386,37 +412,6 @@ mod tests {
             out["result"]["content"][0]["text"],
             "line 9 isn't in the diff"
         );
-    }
-
-    #[test]
-    fn an_unknown_tool_is_a_protocol_error() {
-        let mut s = Session::new(Stub {
-            last: None,
-            answer: Err(ToolError::UnknownTool),
-        });
-        let out = line(
-            &mut s,
-            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope"}}"#,
-        )
-        .unwrap();
-        assert_eq!(out["error"]["code"], -32602);
-    }
-
-    #[test]
-    fn unknown_methods_bad_json_and_batches_each_get_their_own_code() {
-        let mut s = Session::new(Stub::ok());
-        assert_eq!(
-            line(
-                &mut s,
-                r#"{"jsonrpc":"2.0","id":6,"method":"resources/list"}"#
-            )
-            .unwrap()["error"]["code"],
-            -32601
-        );
-        let parse = line(&mut s, "not json {{{").unwrap();
-        assert_eq!(parse["error"]["code"], -32700);
-        assert_eq!(parse["id"], Value::Null);
-        assert_eq!(line(&mut s, "[1,2]").unwrap()["error"]["code"], -32600);
     }
 
     #[test]
@@ -446,35 +441,6 @@ mod tests {
             serde_json::from_str::<Value>(wire.trim_end()).unwrap()["result"]["content"][0]["text"],
             "first\nsecond"
         );
-    }
-
-    /// Every frame is JSON-RPC 2.0 or it is not a protocol message at all. Nothing
-    /// else asserts this: every `jsonrpc` elsewhere in this module is inside a
-    /// *request* string we wrote, so dropping the field from [`result`]/[`error`]
-    /// left all ten tests green while a spec-conformant client rejected the lot.
-    #[test]
-    fn every_reply_carries_the_json_rpc_envelope() {
-        let mut s = Session::new(Stub::ok());
-        for (request, key) in [
-            (
-                r#"{"jsonrpc":"2.0","id":"a","method":"ping"}"#,
-                "result", // the success envelope
-            ),
-            (
-                r#"{"jsonrpc":"2.0","id":"a","method":"resources/list"}"#,
-                "error", // …and the failure one
-            ),
-        ] {
-            let out = line(&mut s, request).unwrap();
-            assert_eq!(out["jsonrpc"], "2.0", "{out}");
-            assert_eq!(out["id"], "a", "a reply is matched to its request: {out}");
-            assert!(out.get(key).is_some(), "{out}");
-        }
-        // A message we couldn't even parse still answers in the envelope, with the
-        // null id the spec requires when there is no id to echo.
-        let parse = line(&mut s, "not json {{{").unwrap();
-        assert_eq!(parse["jsonrpc"], "2.0", "{parse}");
-        assert_eq!(parse["id"], Value::Null);
     }
 
     #[test]

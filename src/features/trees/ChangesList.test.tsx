@@ -63,9 +63,12 @@ const file = (path: string, staged: boolean, over: Partial<ChangedFile> = {}): C
 });
 
 describe("ChangesList loading state", () => {
-  it("shows a skeleton, not an empty state, while the status is unknown", () => {
+  /** The staged counter reads off real data too: "0/0 staged" next to a
+   *  skeleton is the same false claim. */
+  it("shows a skeleton, not an empty state or a counter, while the status is unknown", () => {
     render(<List files={undefined} />);
     expect(screen.queryByText("No changes.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/staged/)).not.toBeInTheDocument();
     expect(document.querySelector(".animate-pulse")).toBeInTheDocument();
   });
 
@@ -73,13 +76,6 @@ describe("ChangesList loading state", () => {
     render(<List files={[]} committed={[]} />);
     expect(screen.getByText("No changes.")).toBeInTheDocument();
     expect(document.querySelector(".animate-pulse")).not.toBeInTheDocument();
-  });
-
-  /** The staged counter reads off real data, so it must stay hidden until there
-   *  is some — "0/0 staged" next to a skeleton is the same false claim. */
-  it("hides the staged counter while the status is unknown", () => {
-    render(<List files={undefined} />);
-    expect(screen.queryByText(/staged/)).not.toBeInTheDocument();
   });
 
   /** The branch list loads on its own; an empty working tree must not claim "No
@@ -90,26 +86,24 @@ describe("ChangesList loading state", () => {
     expect(document.querySelector(".animate-pulse")).toBeInTheDocument();
   });
 
-  it("renders the rows and the counter once files arrive", () => {
-    render(<List files={[file("a.ts", true), file("b.ts", false)]} committed={[]} />);
-    expect(screen.getByText("a.ts")).toBeInTheDocument();
-    expect(screen.getByText("b.ts")).toBeInTheDocument();
-    expect(screen.getByText("1/2 staged")).toBeInTheDocument();
-    expect(document.querySelector(".animate-pulse")).not.toBeInTheDocument();
-  });
-
   /** A new file is not a change to an existing one: it gets its own section, and
-   *  the destructive action on it deletes rather than discards. The split is on
-   *  `status`, which the fixture pinned to `Modified` until now. */
-  it("puts new files in their own section rather than among the changes", () => {
+   *  the destructive action on it deletes rather than discards. */
+  it("renders the rows, the counter, and new files in their own section once files arrive", () => {
     render(
       <List
-        files={[file("a.ts", true), file("new.ts", false, { status: "Untracked" })]}
+        files={[
+          file("a.ts", true),
+          file("b.ts", false),
+          file("new.ts", false, { status: "Untracked" }),
+        ]}
         committed={[]}
       />,
     );
+    expect(screen.getByText("a.ts")).toBeInTheDocument();
+    expect(screen.getByText("1/3 staged")).toBeInTheDocument();
     expect(screen.getByText("Changes")).toBeInTheDocument();
     expect(screen.getByText("Untracked files")).toBeInTheDocument();
+    expect(document.querySelector(".animate-pulse")).not.toBeInTheDocument();
   });
 });
 
@@ -127,12 +121,6 @@ describe("ChangesList windowing", () => {
   const fileRows = () => document.querySelectorAll(".selection-row").length;
   const showMore = () => screen.queryByText("Show more");
 
-  it("draws every row of a normal-sized list, with no affordance", () => {
-    render(<List files={many(40, (i) => `src/f${i}.ts`)} committed={[]} />);
-    expect(fileRows()).toBe(40);
-    expect(showMore()).not.toBeInTheDocument();
-  });
-
   it("caps a huge list and offers the rest behind one control", () => {
     render(<List files={many(2500, (i) => `src/f${i}.ts`)} committed={[]} />);
     expect(fileRows()).toBe(100);
@@ -140,16 +128,13 @@ describe("ChangesList windowing", () => {
     expect(screen.getByText("2,400 hidden")).toBeInTheDocument();
   });
 
-  it("keeps the section header at the true total, not the drawn count", () => {
+  it("keeps the section header at the true total, and reveals the rest on click", () => {
     render(<List files={many(150, (i) => `src/f${i}.ts`)} committed={[]} />);
     // The only bare "150" on screen is the "Changes" header's count; the staged
     // counter renders as one "0/150 staged" string.
     expect(screen.getByText("150")).toBeInTheDocument();
     expect(fileRows()).toBe(100);
-  });
 
-  it("reveals more rows on click and drops the control at the end of the list", () => {
-    render(<List files={many(150, (i) => `src/f${i}.ts`)} committed={[]} />);
     fireEvent.click(screen.getByText("Show more"));
     expect(fileRows()).toBe(150);
     expect(showMore()).not.toBeInTheDocument();
@@ -188,13 +173,9 @@ describe("ChangesList windowing", () => {
  * act on the checkout, so they hold in both rails.
  */
 describe("ChangesList without a place to open a diff", () => {
-  it("renders the file name as text rather than a button that leads nowhere", () => {
+  it("renders the file name as text rather than a dead button, but keeps staging", () => {
     render(<List files={[file("a.ts", false)]} committed={[]} onOpen={undefined} />);
     expect(screen.getByText("a.ts").closest("button")).toBeNull();
-  });
-
-  it("keeps staging, which acts on the checkout and not on the host", () => {
-    render(<List files={[file("a.ts", false)]} committed={[]} onOpen={undefined} />);
     expect(screen.getByRole("button", { name: "Stage a.ts" })).toBeInTheDocument();
   });
 

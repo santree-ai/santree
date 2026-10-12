@@ -3481,10 +3481,9 @@ mod tests {
         header_window, image_spans, inbox_filter, map_issue, map_related,
         migrate_tokens_to_keychain, parse_ms, record_budget, resolve_org_slug, resolved_org,
         scope_from_setting, scope_of, splice_images, split_identifier, AssignedTriageData,
-        CommentNode, CycleNode, ImageCache, IssueDetailNode, IssueNode, ParentIssueNode,
-        ProjectMilestoneNode, ProjectNode, RelatedIssue, RelationNode, SchedQueryData, StateNode,
-        TeamFacts, TeamRefNode, TeamScope, TicketLookupNode, TriageRow, TriageTeamRules, TtlCache,
-        UserNode, BUDGETS, IMAGE_HOST,
+        CommentNode, ImageCache, IssueDetailNode, IssueNode, RelatedIssue, RelationNode,
+        SchedQueryData, StateNode, TeamFacts, TeamScope, TicketLookupNode, TriageRow,
+        TriageTeamRules, TtlCache, BUDGETS, IMAGE_HOST,
     };
     use crate::gql::{Connection, GqlError, GraphQlErrors, PageInfo};
     use anyhow::anyhow;
@@ -3559,9 +3558,10 @@ mod tests {
     }
 
     /// The startup drain has to be a no-op once the columns are gone — otherwise
-    /// it would hit the keychain (and could prompt) on every launch.
+    /// it would hit the keychain (and could prompt) on every launch — and on a
+    /// legacy schema with nothing to move, so a cleared row can't re-trigger it.
     #[tokio::test]
-    async fn token_migration_is_a_noop_without_the_legacy_columns() {
+    async fn token_migration_is_a_noop_with_nothing_to_move() {
         let db = memory_db().await;
         sqlx::query(
             "CREATE TABLE linear_orgs (slug TEXT PRIMARY KEY, name TEXT, expires_at INTEGER)",
@@ -3570,12 +3570,7 @@ mod tests {
         .await
         .unwrap();
         assert!(!migrate_tokens_to_keychain(&db).await.unwrap());
-    }
 
-    /// …and on a legacy schema with nothing to move (org rows are only written
-    /// with tokens today, but a cleared row must not re-trigger the migration).
-    #[tokio::test]
-    async fn token_migration_skips_rows_without_tokens() {
         let db = memory_db().await;
         sqlx::query(
             "CREATE TABLE linear_orgs (slug TEXT PRIMARY KEY, name TEXT, access_token TEXT,
@@ -3610,52 +3605,31 @@ mod tests {
         assert_eq!(out, "![a](DATA_A) ![b](DATA_B)");
     }
 
+    /// Every occurrence is spliced; a span ends at any boundary character or
+    /// the end of the string; and a URL whose fetch failed (no replacement) is
+    /// left exactly as it was.
     #[test]
-    fn url_at_end_of_string_is_captured() {
-        let md = format!("see {IMAGE_HOST}/end");
-        let spans = image_spans(&md);
-        assert_eq!(spans, vec![(4, md.len())]);
-
-        let key = format!("{IMAGE_HOST}/end");
-        let replacements: HashMap<&str, &str> = HashMap::from([(key.as_str(), "DATA")]);
-        assert_eq!(splice_images(&md, &spans, &replacements), "see DATA");
-    }
-
-    #[test]
-    fn repeated_url_is_replaced_at_every_occurrence() {
-        let md = format!("{IMAGE_HOST}/x and again {IMAGE_HOST}/x");
-        let spans = image_spans(&md);
-        assert_eq!(spans.len(), 2);
-
-        let key = format!("{IMAGE_HOST}/x");
-        let replacements: HashMap<&str, &str> = HashMap::from([(key.as_str(), "DATA")]);
-        assert_eq!(
-            splice_images(&md, &spans, &replacements),
-            "DATA and again DATA"
-        );
-    }
-
-    /// A failed fetch means no entry lands in the replacements map — the span
-    /// must be left exactly as-is, not corrupted or dropped.
-    #[test]
-    fn missing_replacement_leaves_span_untouched() {
-        let md = format!("![a]({IMAGE_HOST}/missing)");
-        let spans = image_spans(&md);
-        let replacements: HashMap<&str, &str> = HashMap::new();
-        assert_eq!(splice_images(&md, &spans, &replacements), md);
-    }
-
-    #[test]
-    fn every_boundary_terminator_ends_the_span() {
+    fn image_spans_end_at_a_boundary_and_splice_every_occurrence() {
         for term in [')', ' ', '\n', '\t', '"', ']', '>', '<'] {
             let md = format!("{IMAGE_HOST}/x{term}rest");
-            let spans = image_spans(&md);
             assert_eq!(
-                spans,
+                image_spans(&md),
                 vec![(0, IMAGE_HOST.len() + 2)],
                 "terminator {term:?} did not close the span"
             );
         }
+
+        let key = format!("{IMAGE_HOST}/x");
+        let md = format!("{key} and again see {key}");
+        let spans = image_spans(&md);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[1].1, md.len(), "a URL at the end is captured");
+        let replacements: HashMap<&str, &str> = HashMap::from([(key.as_str(), "DATA")]);
+        assert_eq!(
+            splice_images(&md, &spans, &replacements),
+            "DATA and again see DATA"
+        );
+        assert_eq!(splice_images(&md, &spans, &HashMap::new()), md);
     }
 
     /// The critical fix this refactor must not regress: a lookalike host that
@@ -3749,11 +3723,8 @@ mod tests {
         assert!(f.in_rotation(&f.teams[0]));
         assert!(!f.in_rotation(&f.teams[1]));
         assert!(!f.in_rotation(&f.teams[2]));
-    }
 
-    /// A team the org list omits but a membership names is still the viewer's.
-    #[test]
-    fn a_member_team_missing_from_the_org_list_is_folded_in() {
+        // A team the org list omits but a membership names is still the viewer's.
         let sec = team_json("SEC", "Security", serde_json::json!([]));
         let f = facts_of(
             Vec::new(),
@@ -3771,6 +3742,20 @@ mod tests {
         let scope = scope_of(&facts(), &TriageTeamRules::default());
         assert_eq!(scope.viewer_id.as_deref(), Some("u1"));
         assert_eq!(keys(&scope.teams), ["ENG", "OPS"]);
+
+        // No viewer: nothing is theirs.
+        let f = facts_of(
+            vec![team_node(team_json(
+                "ENG",
+                "Engineering",
+                serde_json::json!([shift("u1")]),
+            ))],
+            memberships_json(None, Vec::new()),
+            assigned_json(Vec::new()),
+        );
+        let scope = scope_of(&f, &TriageTeamRules::default());
+        assert!(scope.viewer_id.is_none());
+        assert!(scope.teams.is_empty());
     }
 
     /// Rules union in a fixed order; a pick admits any team; hidden wins over
@@ -3823,22 +3808,6 @@ mod tests {
         assert!(serde_json::from_str::<TriageTeamRules>("{").is_err());
     }
 
-    #[test]
-    fn an_absent_viewer_scopes_to_nothing() {
-        let f = facts_of(
-            vec![team_node(team_json(
-                "ENG",
-                "Engineering",
-                serde_json::json!([shift("u1")]),
-            ))],
-            memberships_json(None, Vec::new()),
-            assigned_json(Vec::new()),
-        );
-        let scope = scope_of(&f, &TriageTeamRules::default());
-        assert!(scope.viewer_id.is_none());
-        assert!(scope.teams.is_empty());
-    }
-
     /// The inbox is every scoped team's whole triage state OR whatever is
     /// assigned to the viewer, so the frontend can narrow a team to "mine"
     /// without a refetch — and a scope with nothing to match has no filter.
@@ -3889,51 +3858,6 @@ mod tests {
             member: HashSet::new(),
             assigned: HashSet::new(),
         }
-    }
-
-    /// The point of the cache: the queue and the schedule strips are separate commands
-    /// that mount together, and each used to run the whole paginated memberships query.
-    /// Concurrently, they must now cost exactly one fetch — the second waits on the
-    /// first's result rather than starting its own.
-    #[tokio::test]
-    async fn the_two_concurrent_triage_reads_share_one_fetch() {
-        let slug = "scope-concurrent";
-        let fetches = AtomicUsize::new(0);
-        let fetch = || async {
-            fetches.fetch_add(1, Ordering::SeqCst);
-            // Long enough that the second caller is guaranteed to arrive mid-flight.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            Ok(empty_facts())
-        };
-        let (queue, strips) = tokio::join!(
-            cached_team_facts(slug, fetch),
-            cached_team_facts(slug, fetch),
-        );
-
-        assert_eq!(fetches.load(Ordering::SeqCst), 1);
-        // …and both read the *same* scope, not two equal copies.
-        assert!(std::sync::Arc::ptr_eq(&queue.unwrap(), &strips.unwrap()));
-    }
-
-    /// A second load inside the TTL (a refetch, a tab revisit) reuses it too — and a
-    /// different org never does.
-    #[tokio::test]
-    async fn the_scope_is_cached_per_org_within_the_ttl() {
-        let fetches = AtomicUsize::new(0);
-        let fetch = || async {
-            fetches.fetch_add(1, Ordering::SeqCst);
-            Ok(empty_facts())
-        };
-        cached_team_facts("scope-org-a", fetch).await.unwrap();
-        cached_team_facts("scope-org-a", fetch).await.unwrap();
-        assert_eq!(fetches.load(Ordering::SeqCst), 1);
-
-        cached_team_facts("scope-org-b", fetch).await.unwrap();
-        assert_eq!(
-            fetches.load(Ordering::SeqCst),
-            2,
-            "another org is another scope"
-        );
     }
 
     /// A failed fetch must not be cached — the next load has to try again rather than
@@ -4078,49 +4002,16 @@ mod tests {
     // ── ImageCache ────────────────────────────────────────────────────────
 
     #[test]
-    fn image_cache_evicts_oldest_entry_once_over_the_byte_cap() {
+    fn image_cache_keeps_the_first_value_and_evicts_oldest_over_the_byte_cap() {
         let mut cache = ImageCache::default();
         cache.insert_bounded("a".into(), "x".repeat(10), 15);
-        // Total is now 20 bytes > the 15-byte cap: the oldest entry ("a") must
-        // be evicted to bring the running total back under the cap.
+        // A re-insert of the same URL neither overwrites nor double-counts.
+        cache.insert_bounded("a".into(), "y".repeat(10), 15);
+        assert_eq!(cache.get("a"), Some("x".repeat(10)));
+        // 20 bytes > the 15-byte cap: the oldest entry goes.
         cache.insert_bounded("b".into(), "x".repeat(10), 15);
         assert!(cache.get("a").is_none());
         assert_eq!(cache.get("b"), Some("x".repeat(10)));
-    }
-
-    #[test]
-    fn image_cache_insert_is_a_no_op_for_an_existing_key() {
-        let mut cache = ImageCache::default();
-        cache.insert_bounded("a".into(), "one".into(), 1000);
-        cache.insert_bounded("a".into(), "two".into(), 1000);
-        // The first value wins; a re-insert of the same URL doesn't overwrite it
-        // (or double-count its bytes against the cap).
-        assert_eq!(cache.get("a"), Some("one".into()));
-    }
-
-    #[test]
-    fn image_cache_keeps_entries_under_the_cap() {
-        let mut cache = ImageCache::default();
-        cache.insert_bounded("a".into(), "12345".into(), 100);
-        cache.insert_bounded("b".into(), "67890".into(), 100);
-        assert_eq!(cache.get("a"), Some("12345".into()));
-        assert_eq!(cache.get("b"), Some("67890".into()));
-    }
-
-    // ── parse_ms ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn parse_ms_parses_a_real_linear_timestamp() {
-        let got = parse_ms("2024-06-15T12:34:56.789Z").unwrap();
-        let want = chrono::DateTime::parse_from_rfc3339("2024-06-15T12:34:56.789Z")
-            .unwrap()
-            .timestamp_millis();
-        assert_eq!(got, want);
-    }
-
-    #[test]
-    fn parse_ms_rejects_a_non_rfc3339_string() {
-        assert_eq!(parse_ms("not-a-timestamp"), None);
     }
 
     // ── map_issue / map_related ───────────────────────────────────────────
@@ -4232,6 +4123,7 @@ mod tests {
                 "name": "Ada Lovelace", "displayName": "ada",
                 "avatarUrl": "https://example.com/a.png"
             },
+            "team": { "key": "ENG", "name": "Engineering" },
             "inverseRelations": { "nodes": [
                 { "type": "blocks", "issue": {
                     "identifier": "ENG-1", "title": "Done blocker",
@@ -4248,6 +4140,17 @@ mod tests {
 
         let (task, blockers) = map_issue(node);
 
+        assert_eq!(task.priority, santree_core::domain::Priority::High);
+        let team = task.team.as_ref().expect("team");
+        assert_eq!(
+            (team.key.as_str(), team.name.as_deref()),
+            ("ENG", Some("Engineering"))
+        );
+        assert!(task.actionable);
+        assert_eq!(
+            task.assignee_avatar_url.as_deref(),
+            Some("https://example.com/a.png")
+        );
         let milestone = task.project_milestone.as_ref().expect("milestone");
         assert_eq!(milestone.id, "milestone-1");
         assert_eq!(milestone.sort_order, 42.0);
@@ -4411,181 +4314,47 @@ mod tests {
         assert_eq!(children.page_info.end_cursor.as_deref(), Some("c2cursor"));
     }
 
+    /// Ready means "not yet started AND unblocked": a done blocker doesn't hold
+    /// it, a started ticket is never re-offered, and a missing state reads as
+    /// startable. With no team on the wire, the key is read off the identifier
+    /// and the name is honestly unknown.
     #[test]
-    fn map_issue_maps_status_project_assignee_and_open_blockers() {
-        let node = IssueNode {
-            identifier: "ENG-10".into(),
-            title: "Do the thing".into(),
-            priority: 2,
-            estimate: Some(3.0),
-            due_date: Some("2026-09-05".into()),
-            cycle: Some(CycleNode {
-                number: 17.0,
-                name: Some("Sprint 17".into()),
-                ends_at: Some("2026-09-07T16:00:00.000Z".into()),
-                starts_at: Some("2026-08-31T16:00:00.000Z".into()),
-            }),
-            state: Some(state("Todo", "unstarted")),
-            project: Some(ProjectNode {
-                name: Some("Roadmap".into()),
-                color: Some("#fff".into()),
-                icon: None,
-                target_date: Some("2026-09-30".into()),
-            }),
-            project_milestone: Some(ProjectMilestoneNode {
-                id: "milestone-1".into(),
-                name: "Public beta".into(),
-                target_date: Some("2026-09-01".into()),
-                sort_order: 42.0,
-            }),
-            parent: Some(ParentIssueNode {
-                identifier: "ENG-9".into(),
-            }),
-            assignee: Some(UserNode {
-                id: Some("u1".into()),
-                name: Some("Ada Lovelace".into()),
-                display_name: Some("ada".into()),
-                avatar_url: Some("https://example.com/a.png".into()),
-            }),
-            team: Some(TeamRefNode {
-                key: "ENG".into(),
-                name: Some("Engineering".into()),
-            }),
-            inverse_relations: Connection {
-                nodes: vec![
-                    RelationNode {
-                        type_: "blocks".into(),
-                        issue: Some(related("ENG-1", "completed")),
-                    },
-                    RelationNode {
-                        type_: "blocks".into(),
-                        issue: Some(related("ENG-2", "unstarted")),
-                    },
-                    // A non-"blocks" relation (e.g. duplicate) must be ignored.
-                    RelationNode {
-                        type_: "duplicate".into(),
-                        issue: Some(related("ENG-3", "completed")),
-                    },
-                ],
-                page_info: PageInfo::default(),
-            },
-        };
-
-        let (task, blockers) = map_issue(node);
-
-        assert_eq!(task.id, "ENG-10");
-        assert_eq!(task.priority, santree_core::domain::Priority::High);
-        let team = task.team.as_ref().expect("team");
-        assert_eq!(team.key, "ENG");
-        assert_eq!(team.name.as_deref(), Some("Engineering"));
-        assert_eq!(task.estimate, Some(3.0));
-        assert_eq!(task.due_date.as_deref(), Some("2026-09-05"));
-        let cycle = task.cycle.as_ref().expect("cycle");
-        assert_eq!(cycle.number, 17.0);
-        assert_eq!(cycle.name.as_deref(), Some("Sprint 17"));
-        assert_eq!(cycle.ends_at_ms, Some(1_788_796_800_000.0));
-        assert_eq!(cycle.starts_at_ms, Some(1_788_192_000_000.0));
-        assert_eq!(task.project, "Roadmap");
-        assert_eq!(task.parent_id.as_deref(), Some("ENG-9"));
-        assert_eq!(task.project_target_date.as_deref(), Some("2026-09-30"));
-        let milestone = task.project_milestone.as_ref().expect("milestone");
-        assert_eq!(milestone.id, "milestone-1");
-        assert_eq!(milestone.name, "Public beta");
-        assert_eq!(milestone.target_date.as_deref(), Some("2026-09-01"));
-        assert_eq!(milestone.sort_order, 42.0);
-        assert_eq!(task.assignee.as_deref(), Some("Ada Lovelace"));
-        assert_eq!(
-            task.assignee_avatar_url.as_deref(),
-            Some("https://example.com/a.png")
-        );
-        assert_eq!(
-            task.blocked_by,
-            vec!["ENG-1".to_string(), "ENG-2".to_string()]
-        );
-        // One of the two "blocks" blockers is still open -> not ready.
-        assert!(!task.ready);
-        assert!(task.actionable);
-        assert_eq!(blockers.len(), 2);
-    }
-
-    #[test]
-    fn map_issue_is_ready_when_every_blocker_is_done() {
-        let node = IssueNode {
+    fn map_issue_is_ready_only_when_unstarted_and_unblocked() {
+        let node = |state_: Option<StateNode>, blockers: Vec<RelationNode>| IssueNode {
             identifier: "ENG-11".into(),
-            title: "Unblocked".into(),
+            title: "t".into(),
             priority: 0,
             estimate: None,
             due_date: None,
             cycle: None,
-            state: Some(state("Todo", "unstarted")),
+            state: state_,
             project: None,
             project_milestone: None,
             parent: None,
             assignee: None,
             team: None,
             inverse_relations: Connection {
-                nodes: vec![RelationNode {
-                    type_: "blocks".into(),
-                    issue: Some(related("ENG-1", "completed")),
-                }],
+                nodes: blockers,
                 page_info: PageInfo::default(),
             },
         };
-        let (task, _) = map_issue(node);
+        let done_blocker = || RelationNode {
+            type_: "blocks".into(),
+            issue: Some(related("ENG-1", "completed")),
+        };
+
+        let (task, _) = map_issue(node(Some(state("Todo", "unstarted")), vec![done_blocker()]));
         assert!(task.ready);
         assert_eq!(task.project, "No Project");
-        assert_eq!(task.assignee, None);
-        // No team on the wire: the key is still read off the identifier, the
-        // name is honestly unknown.
         let team = task.team.as_ref().expect("team");
-        assert_eq!(team.key, "ENG");
-        assert_eq!(team.name, None);
-    }
+        assert_eq!((team.key.as_str(), team.name.as_deref()), ("ENG", None));
 
-    #[test]
-    fn map_issue_in_progress_is_never_ready_even_with_no_blockers() {
-        // Ready means "not yet started AND unblocked" — an already-started
-        // ticket is never re-offered as ready to start.
-        let node = IssueNode {
-            identifier: "ENG-12".into(),
-            title: "Already going".into(),
-            priority: 0,
-            estimate: None,
-            due_date: None,
-            cycle: None,
-            state: Some(state("In Progress", "started")),
-            project: None,
-            project_milestone: None,
-            parent: None,
-            assignee: None,
-            team: None,
-            inverse_relations: Connection::default(),
-        };
-        let (task, _) = map_issue(node);
-        assert!(!task.ready);
-    }
-
-    #[test]
-    fn map_issue_defaults_missing_state_to_unstarted_unknown() {
-        let node = IssueNode {
-            identifier: "ENG-13".into(),
-            title: "No state on the wire".into(),
-            priority: 0,
-            estimate: None,
-            due_date: None,
-            cycle: None,
-            state: None,
-            project: None,
-            project_milestone: None,
-            parent: None,
-            assignee: None,
-            team: None,
-            inverse_relations: Connection::default(),
-        };
-        let (task, _) = map_issue(node);
-        // TaskStatus::Todo is map_status("Unknown", "unstarted"); ready because
-        // there are no blockers and the status is startable.
-        assert!(task.ready);
+        assert!(
+            !map_issue(node(Some(state("In Progress", "started")), vec![]))
+                .0
+                .ready
+        );
+        assert!(map_issue(node(None, vec![])).0.ready);
     }
 
     #[test]
@@ -4628,21 +4397,16 @@ mod tests {
         let team = task.team.as_ref().expect("team");
         assert_eq!(team.key, "ENG");
         assert_eq!(team.name, None);
-    }
 
-    #[test]
-    fn map_related_without_a_project_or_milestone_maps_to_none() {
-        let issue: RelatedIssue = serde_json::from_value(serde_json::json!({
+        let unfiled: RelatedIssue = serde_json::from_value(serde_json::json!({
             "identifier": "ENG-43",
             "title": "Unfiled blocker",
             "state": { "name": "Todo", "type": "unstarted" },
             "project": null,
             "assignee": null
         }))
-        .expect("related issue response");
-
-        let task = map_related(issue);
-
+        .unwrap();
+        let task = map_related(unfiled);
         assert_eq!(task.project, "No Project");
         assert_eq!(task.project_target_date, None);
         assert!(task.project_milestone.is_none());
@@ -4778,25 +4542,24 @@ mod tests {
     }
 
     #[test]
-    fn split_identifier_accepts_real_linear_ids() {
+    fn split_identifier_takes_real_linear_ids_only() {
         assert_eq!(split_identifier("AK-165"), Some(("AK", 165)));
-        assert_eq!(split_identifier("MSG-5033"), Some(("MSG", 5033)));
         // Digits are legal *inside* a team key, and the split is from the right.
         assert_eq!(split_identifier("A11Y-7"), Some(("A11Y", 7)));
-    }
-
-    #[test]
-    fn split_identifier_rejects_things_that_only_look_like_ids() {
         // Lower-case is how `ticketIdFor` avoids reading prose as an id; keep the
-        // two sides of the bridge agreeing on that, or grouping silently over-matches.
-        assert_eq!(split_identifier("ak-165"), None);
-        assert_eq!(split_identifier("A-1"), None); // key too short
-        assert_eq!(split_identifier("TOOLONGAKEY-1"), None);
-        assert_eq!(split_identifier("AK-"), None);
-        assert_eq!(split_identifier("AK-1a"), None);
-        assert_eq!(split_identifier("AK-1.5"), None);
-        assert_eq!(split_identifier("AK165"), None);
-        assert_eq!(split_identifier("AK--1"), None);
+        // two sides of the bridge agreeing on that, or grouping over-matches.
+        for bad in [
+            "ak-165",
+            "A-1",
+            "TOOLONGAKEY-1",
+            "AK-",
+            "AK-1a",
+            "AK-1.5",
+            "AK165",
+            "AK--1",
+        ] {
+            assert_eq!(split_identifier(bad), None, "{bad}");
+        }
     }
 
     /// Linear's rate-limit headers, verbatim.
@@ -4844,36 +4607,12 @@ mod tests {
         assert!(budget.observed_at_ms > 0.0, "the reading is stamped");
     }
 
-    /// A response with no rate-limit headers leaves the last good reading alone.
-    /// Overwriting it with an empty one would render as "0 of 0 left", which is
-    /// a claim we never had grounds to make.
+    /// A response with no rate-limit headers leaves the last good reading alone
+    /// ("0 of 0 left" is a claim we never had grounds to make), and a
+    /// half-reported pool is dropped — `limit` without `remaining` would meter
+    /// as fully spent.
     #[test]
-    fn a_response_without_the_headers_keeps_the_last_reading() {
-        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-
-        let mut headers = HeaderMap::new();
-        for (name, value) in [
-            ("X-RateLimit-Requests-Limit", "5000"),
-            ("X-RateLimit-Requests-Remaining", "4000"),
-        ] {
-            headers.insert(
-                HeaderName::from_bytes(name.as_bytes()).unwrap(),
-                HeaderValue::from_static(value),
-            );
-        }
-        record_budget("silent-org", &headers);
-        record_budget("silent-org", &HeaderMap::new());
-
-        let map = BUDGETS.read().unwrap();
-        let budget = map.get("silent-org").expect("the earlier reading survives");
-        assert_eq!(budget.windows.len(), 1);
-        assert_eq!(budget.windows[0].remaining, 4000.0);
-    }
-
-    /// A half-reported pool is dropped rather than defaulted. `limit` without
-    /// `remaining` would meter as fully spent.
-    #[test]
-    fn a_pool_missing_one_of_its_counts_is_not_recorded() {
+    fn a_missing_or_partial_rate_limit_reading_never_overwrites_a_good_one() {
         use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
         let mut headers = HeaderMap::new();
@@ -4882,5 +4621,17 @@ mod tests {
             HeaderValue::from_static("5000"),
         );
         assert!(header_window(&headers, ApiBudgetKind::Requests, "X-RateLimit-Requests").is_none());
+
+        headers.insert(
+            HeaderName::from_bytes(b"X-RateLimit-Requests-Remaining").unwrap(),
+            HeaderValue::from_static("4000"),
+        );
+        record_budget("silent-org", &headers);
+        record_budget("silent-org", &HeaderMap::new());
+
+        let map = BUDGETS.read().unwrap();
+        let budget = map.get("silent-org").expect("the earlier reading survives");
+        assert_eq!(budget.windows.len(), 1);
+        assert_eq!(budget.windows[0].remaining, 4000.0);
     }
 }

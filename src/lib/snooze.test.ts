@@ -11,11 +11,9 @@ describe("snoozeUntil", () => {
 
     const week = new Date(snoozeUntil(now, 7));
     expect([week.getMonth(), week.getDate(), week.getHours()]).toEqual([8, 9, WAKE_HOUR]);
-  });
 
-  it("rolls over a month boundary", () => {
-    const now = new Date(2026, 8, 30, 8, 0).getTime();
-    const d = new Date(snoozeUntil(now, 1));
+    // Across a month boundary.
+    const d = new Date(snoozeUntil(new Date(2026, 8, 30, 8, 0).getTime(), 1));
     expect([d.getMonth(), d.getDate()]).toEqual([9, 1]);
   });
 });

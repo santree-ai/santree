@@ -250,32 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_mode_or_a_symlink_at_the_target_is_replaced_not_followed() {
-        let dir = scratch();
-        let bundled = dir.path().join("bundled");
-        write_exec(&bundled, b"hook");
-        let data = dir.path().join("data");
-        fs::create_dir(&data).unwrap();
-        install(&data, &bundled).unwrap();
-        let stable = stable_path(&data);
-
-        fs::set_permissions(&stable, fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(install(&data, &bundled).unwrap(), Installed::Replaced);
-        assert_eq!(mode(&stable), 0o755);
-
-        let victim = dir.path().join("victim");
-        fs::write(&victim, b"hook").unwrap();
-        fs::remove_file(&stable).unwrap();
-        std::os::unix::fs::symlink(&victim, &stable).unwrap();
-        assert_eq!(install(&data, &bundled).unwrap(), Installed::Replaced);
-        assert!(!fs::symlink_metadata(&stable)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(fs::read(&victim).unwrap(), b"hook", "written through");
-    }
-
-    #[test]
     fn a_directory_other_users_could_enter_or_a_symlinked_one_is_refused() {
         let dir = scratch();
         let bundled = dir.path().join("bundled");
@@ -357,15 +331,24 @@ mod tests {
         assert_eq!(fs::read(&stable).unwrap(), b"the real hook");
         assert_eq!(mode(&stable), 0o755);
 
-        // Deleted, replaced by a symlink: healed the same.
+        // A wrong mode: healed.
+        fs::set_permissions(&stable, fs::Permissions::from_mode(0o777)).unwrap();
+        ensure(&data, &bundled).unwrap();
+        assert_eq!(mode(&stable), 0o755);
+
+        // Deleted, replaced by a symlink: replaced, never written through.
+        let victim = data.join("victim");
+        fs::write(&victim, b"the real hook").unwrap();
         fs::remove_file(&stable).unwrap();
-        std::os::unix::fs::symlink("/bin/sh", &stable).unwrap();
+        std::os::unix::fs::symlink(&victim, &stable).unwrap();
         ensure(&data, &bundled).unwrap();
         assert!(!fs::symlink_metadata(&stable)
             .unwrap()
             .file_type()
             .is_symlink());
         assert_eq!(fs::read(&stable).unwrap(), b"the real hook");
+        let victim_mode = fs::metadata(&victim).unwrap().permissions().mode() & 0o7777;
+        assert_ne!(victim_mode, 0o755, "the symlink's target was chmodded");
     }
 
     /// A release never takes the hook from beside its executable.
@@ -414,13 +397,5 @@ mod tests {
         assert!(fresh.exists(), "a copy in flight was removed");
         assert!(other.exists(), "an unrelated file was removed");
         assert!(stable_path(&data).exists());
-    }
-
-    #[test]
-    fn the_stable_path_is_under_the_data_dir() {
-        assert_eq!(
-            stable_path(Path::new("/d")),
-            PathBuf::from("/d/bin/santree-hook")
-        );
     }
 }

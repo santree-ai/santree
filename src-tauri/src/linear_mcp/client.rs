@@ -356,13 +356,23 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_json_response_yields_its_result() {
+    fn a_plain_json_response_yields_its_result_or_its_error() {
         let result = rpc_result(
             &reply(false, r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#),
             1,
         )
         .unwrap();
         assert_eq!(result, json!({ "ok": true }));
+
+        let err = rpc_result(
+            &reply(
+                false,
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Unknown tool"}}"#,
+            ),
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unknown tool"), "{err}");
     }
 
     #[test]
@@ -381,19 +391,6 @@ mod tests {
             json!({ "n": 2 })
         );
         assert!(rpc_result(&reply(true, body), 7).is_err());
-    }
-
-    #[test]
-    fn a_json_rpc_error_is_a_failure_with_its_message() {
-        let err = rpc_result(
-            &reply(
-                false,
-                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Unknown tool"}}"#,
-            ),
-            1,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("Unknown tool"), "{err}");
     }
 
     #[test]
@@ -434,13 +431,6 @@ mod tests {
         assert!(err.to_string().contains("list_teams"), "{err}");
     }
 
-    #[test]
-    fn an_empty_write_answer_confirms_nothing() {
-        assert!(confirmed("save_comment", "Comment created.").is_ok());
-        assert!(confirmed("save_comment", "  \n").is_err());
-        assert!(confirmed("save_issue", "").is_err());
-    }
-
     /// A write's confirmation is whatever the tool says: prose is as good as JSON,
     /// and only the tool's own error flag makes it a failure.
     #[test]
@@ -453,6 +443,9 @@ mod tests {
             .unwrap(),
             "Comment created."
         );
+        // An empty answer confirms nothing.
+        assert!(confirmed("save_comment", "Comment created.").is_ok());
+        assert!(confirmed("save_comment", "  \n").is_err());
         assert!(tool_text(
             "save_issue",
             json!({ "content": [{ "type": "text", "text": "State not found" }], "isError": true }),

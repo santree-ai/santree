@@ -19,7 +19,7 @@ describe("serverStatus words", () => {
     expect(endDrainingConfirm(2, { kind: "Unknown" })).not.toContain("0 sessions");
   });
 
-  it("names the count and says agents can be resumed", () => {
+  it("names the count, says agents can be resumed, and that nothing ends at a known zero", () => {
     for (const text of [
       restartConfirm({ kind: "Known", count: 3 }),
       stopConfirm({ kind: "Known", count: 3 }),
@@ -29,9 +29,6 @@ describe("serverStatus words", () => {
       expect(text).toContain("resumed from their tabs");
     }
     expect(stopConfirm({ kind: "Known", count: 1 })).toContain("Nothing starts it again");
-  });
-
-  it("says nothing ends when it is a known zero", () => {
     expect(restartConfirm({ kind: "Known", count: 0 })).toContain("nothing else will end");
   });
 

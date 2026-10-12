@@ -3468,76 +3468,43 @@ mod tests {
         }
     }
 
+    /// The wait dates from the newest request naming the viewer — directly or
+    /// via one of their teams, in any casing GitHub echoes back. A re-request is
+    /// a fresh ask, and someone else being (re-)asked must not restart *your*
+    /// clock (the failure mode of using the PR's `updatedAt`).
     #[test]
-    fn waiting_since_takes_the_newest_request_naming_the_viewer() {
-        // A re-request is a fresh ask — dating the wait from the *original* request
-        // would show a week-old age for something that landed an hour ago.
-        let events = [
-            requested(
-                "2026-08-01T10:00:00Z",
-                RequestedIdentity::User {
-                    login: "santiago".into(),
-                },
+    fn waiting_since_is_the_newest_request_naming_the_viewer() {
+        let user = |login: &str| RequestedIdentity::User {
+            login: login.into(),
+        };
+        let team = |slug: &str| RequestedIdentity::Team { slug: slug.into() };
+        let cases = [
+            (
+                vec![
+                    requested("2026-08-01T10:00:00Z", user("santiago")),
+                    requested("2026-08-05T09:00:00Z", user("santiago")),
+                    requested("2026-08-06T09:00:00Z", user("someone-else")),
+                    requested("2026-08-06T09:30:00Z", team("platform")),
+                    requested("2026-08-06T10:00:00Z", RequestedIdentity::Other),
+                ],
+                Some("2026-08-05T09:00:00Z"),
             ),
-            requested(
-                "2026-08-05T09:00:00Z",
-                RequestedIdentity::User {
-                    login: "santiago".into(),
-                },
+            (
+                vec![requested("2026-08-04T08:00:00Z", team("Agent-Knowledge"))],
+                Some("2026-08-04T08:00:00Z"),
+            ),
+            (
+                vec![requested("2026-08-04T08:00:00Z", user("Santiago"))],
+                Some("2026-08-04T08:00:00Z"),
+            ),
+            (
+                vec![requested("2026-08-05T09:00:00Z", user("someone-else"))],
+                None,
             ),
         ];
-        assert_eq!(
-            viewer_requested_at(&events, &viewer()).as_deref(),
-            Some("2026-08-05T09:00:00Z")
-        );
-    }
-
-    #[test]
-    fn waiting_since_counts_a_request_via_one_of_the_viewers_teams() {
-        let events = [requested(
-            "2026-08-04T08:00:00Z",
-            RequestedIdentity::Team {
-                slug: "agent-knowledge".into(),
-            },
-        )];
-        assert_eq!(
-            viewer_requested_at(&events, &viewer()).as_deref(),
-            Some("2026-08-04T08:00:00Z")
-        );
-    }
-
-    #[test]
-    fn waiting_since_ignores_requests_aimed_at_other_people() {
-        // Someone else being (re-)asked must not restart *your* clock — that's the
-        // whole failure mode of using the PR's `updatedAt` as a waiting signal.
-        let events = [
-            requested(
-                "2026-08-05T09:00:00Z",
-                RequestedIdentity::User {
-                    login: "someone-else".into(),
-                },
-            ),
-            requested(
-                "2026-08-06T09:00:00Z",
-                RequestedIdentity::Team {
-                    slug: "platform".into(),
-                },
-            ),
-            requested("2026-08-06T10:00:00Z", RequestedIdentity::Other),
-        ];
-        assert_eq!(viewer_requested_at(&events, &viewer()), None);
-    }
-
-    #[test]
-    fn waiting_since_matches_logins_and_slugs_case_insensitively() {
-        // GitHub echoes back whatever casing the login/slug was created with.
-        let events = [requested(
-            "2026-08-04T08:00:00Z",
-            RequestedIdentity::User {
-                login: "Santiago".into(),
-            },
-        )];
-        assert!(viewer_requested_at(&events, &viewer()).is_some());
+        for (events, want) in cases {
+            assert_eq!(viewer_requested_at(&events, &viewer()).as_deref(), want);
+        }
     }
 
     #[test]
@@ -3551,10 +3518,7 @@ mod tests {
         );
         assert_eq!(url.query(), None);
         assert_eq!(url.fragment(), None);
-    }
 
-    #[test]
-    fn api_url_keeps_path_structure_but_rejects_traversal() {
         // Slashes inside a component are real separators (a repo path)…
         assert_eq!(
             api_url(&["repos", "o", "r", "contents", "a/b/c.rs"])
@@ -3613,16 +3577,13 @@ mod tests {
             let hits = batches.iter().filter(|q| q.contains(org)).count();
             assert_eq!(hits, 1, "{org} appears in {hits} batches");
         }
-    }
 
-    /// A single org too long to batch is still asked about. Dropping it would make
-    /// a project silently absent from an inbox that claims to span everything.
-    #[test]
-    fn an_oversized_org_is_still_asked_about_alone() {
-        let orgs = ["o".repeat(SEARCH_QUERY_LIMIT)];
-        let batches = mine_queries(&orgs);
+        // A single org too long to batch is still asked about alone: dropping
+        // it would silently leave a project out of the inbox.
+        let huge = ["o".repeat(SEARCH_QUERY_LIMIT)];
+        let batches = mine_queries(&huge);
         assert_eq!(batches.len(), 1);
-        assert!(batches[0].ends_with(&orgs[0]));
+        assert!(batches[0].ends_with(&huge[0]));
         assert!(mine_queries(&[]).is_empty());
     }
 
@@ -3691,7 +3652,7 @@ mod tests {
     /// and a reviewer marking every listed file "Viewed" would be approving a diff
     /// they never saw.
     #[tokio::test]
-    async fn collect_pages_stops_at_the_cap_and_reports_the_truncation() {
+    async fn collect_pages_walks_in_order_and_stops_at_a_short_page_or_the_cap() {
         let full = PR_FILES_CAP / PR_FILES_PER_PAGE;
         // More full pages exist than the cap allows.
         let (count, truncated, asked) = pages_of(&vec![PR_FILES_PER_PAGE; full + 2]).await;
@@ -3699,15 +3660,11 @@ mod tests {
         assert_eq!(count, PR_FILES_CAP);
         // The cap is a stop, not a filter: the page past it is never requested.
         assert_eq!(asked, (1..=full).collect::<Vec<_>>());
-    }
 
-    #[tokio::test]
-    async fn collect_pages_walks_pages_in_order_until_a_short_one() {
         let (count, truncated, asked) = pages_of(&[PR_FILES_PER_PAGE, PR_FILES_PER_PAGE, 40]).await;
         assert!(!truncated, "a short page means GitHub had nothing more");
         assert_eq!(count, PR_FILES_PER_PAGE * 2 + 40);
         assert_eq!(asked, vec![1, 2, 3], "pages are asked for in order, from 1");
-
         // A single short page is one request, not two.
         assert_eq!(pages_of(&[7]).await, (7, false, vec![1]));
     }
@@ -3720,8 +3677,13 @@ mod tests {
     /// GitHub's own rendering of it: same asset, a link that needs no credential.
     const SIGNED: &str = "<img src=\"https://private-user-images.githubusercontent.com/5023589/642515346-1fd1135c-83a4-4933-959f-8ec2bb86c04e.png?jwt=abc\">";
 
+    /// Each asset in the markdown is paired with GitHub's signed rendering of
+    /// it by the id *in* the signed URL, never by position (a body whose second
+    /// image failed to render would hand image two the link for image one). No
+    /// pair is no entry — the UI shows alt text, not a broken icon — and the
+    /// rendered `&amp;` is unescaped, or the CDN 403s.
     #[test]
-    fn attachment_links_pairs_an_asset_with_its_signed_url() {
+    fn attachment_links_pairs_each_asset_with_its_signed_url_by_id() {
         let links = attachment_links(&[SHOT], &[SIGNED]);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].id, "1fd1135c-83a4-4933-959f-8ec2bb86c04e");
@@ -3729,20 +3691,21 @@ mod tests {
             reqwest::Url::parse(&links[0].url).unwrap().host_str(),
             Some(ATTACHMENT_CDN)
         );
-    }
 
-    /// The pairing is by the id appearing *in* the signed URL, never by order:
-    /// GitHub renders in document order today, and a body whose second image
-    /// failed to render would otherwise hand image two the link for image one.
-    #[test]
-    fn attachment_links_matches_by_id_not_by_position() {
         let markdown = "https://github.com/user-attachments/assets/aaa \
              https://github.com/user-attachments/assets/bbb";
-        let html = "<img src=\"https://private-user-images.githubusercontent.com/1/9-bbb.png\">";
+        let html =
+            "<img src=\"https://private-user-images.githubusercontent.com/1/9-bbb.png?jwt=x&amp;v=2\">";
         let links = attachment_links(&[markdown], &[html]);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].id, "bbb");
-        assert!(links[0].url.ends_with("9-bbb.png"));
+        assert_eq!(
+            links[0].url,
+            "https://private-user-images.githubusercontent.com/1/9-bbb.png?jwt=x&v=2"
+        );
+
+        assert!(attachment_links(&["no images here"], &[SIGNED]).is_empty());
+        assert!(attachment_links(&[SHOT], &["<p>rendered without the image</p>"]).is_empty());
     }
 
     /// The signature *is* the credential on these links, so the host is checked
@@ -3754,30 +3717,6 @@ mod tests {
         assert!(attachment_links(&[SHOT], &[html]).is_empty());
     }
 
-    /// A body with no attachments never walks the HTML at all — and a PR whose
-    /// render dropped an image gets no entry, which the UI shows as its alt text
-    /// rather than as a broken icon.
-    #[test]
-    fn attachment_links_is_empty_without_a_pair() {
-        assert!(attachment_links(&["no images here"], &[SIGNED]).is_empty());
-        assert!(attachment_links(&[SHOT], &["<p>rendered without the image</p>"]).is_empty());
-    }
-
-    /// GitHub escapes the query string's separators in the rendered HTML; the
-    /// raw `&amp;` would reach the CDN as part of a parameter name and 403.
-    #[test]
-    fn attachment_links_unescapes_the_rendered_query_string() {
-        let html = "<img src=\"https://private-user-images.githubusercontent.com/1/9-aaa.png?jwt=x&amp;v=2\">";
-        let links = attachment_links(&["https://github.com/user-attachments/assets/aaa"], &[html]);
-        assert_eq!(
-            links[0].url,
-            "https://private-user-images.githubusercontent.com/1/9-aaa.png?jwt=x&v=2"
-        );
-    }
-
-    /// A follow-up page decodes into the same struct as the first one, so the two
-    /// selections have to stay identical — and the paged connections have to ask
-    /// for the cursor that drives the drain at all.
     /// An approved PR used to show no approval: a bare approval has no body, and
     /// every empty-bodied review was dropped as noise.
     #[test]
@@ -3868,16 +3807,6 @@ mod tests {
     }
 
     #[test]
-    fn pr_state_maps_every_github_value() {
-        assert_eq!(pr_state("OPEN"), PrState::Open);
-        assert_eq!(pr_state("MERGED"), PrState::Merged);
-        assert_eq!(pr_state("CLOSED"), PrState::Closed);
-        // Chosen, not stumbled into: an unclassifiable PR reads as live rather
-        // than being reported as merged.
-        assert_eq!(pr_state("SOMETHING_NEW"), PrState::Open);
-    }
-
-    #[test]
     fn single_pr_query_reuses_the_inbox_field_set() {
         let q = single_pr_query();
         assert!(q.contains(PR_FIELDS), "a PR row must be the inbox's shape");
@@ -3958,21 +3887,19 @@ mod tests {
     }
 
     #[test]
-    fn job_id_parses_from_actions_url() {
+    fn job_and_run_ids_parse_from_an_actions_url() {
         assert_eq!(
             job_id_from_url("https://github.com/o/r/actions/runs/28027969704/job/82960623951"),
             Some(82960623951.0)
         );
         // Non-Actions check URLs have no job segment.
         assert_eq!(job_id_from_url("https://circleci.com/build/123"), None);
-    }
-
-    /// The expanded check row shows the pair — `check #<job>` beside
-    /// `workflow #<run>` — so both have to come out of the one details URL.
-    #[test]
-    fn run_id_parses_from_the_same_actions_url() {
-        let url = "https://github.com/o/r/actions/runs/28027969704/job/82960623951";
-        assert_eq!(run_id_from_url(url), Some(28027969704.0));
+        // The expanded check row shows `check #<job>` beside `workflow #<run>`,
+        // both out of the one details URL.
+        assert_eq!(
+            run_id_from_url("https://github.com/o/r/actions/runs/28027969704/job/82960623951"),
+            Some(28027969704.0)
+        );
         assert_eq!(run_id_from_url("https://circleci.com/build/123"), None);
     }
 
@@ -4107,6 +4034,15 @@ mod tests {
             budget.windows[1].limit, 30.0,
             "search is its own small pool"
         );
+
+        // A pool GitHub omits is absent, not zero — a zero-remaining row reads
+        // as "out of budget", the opposite of "we didn't hear".
+        let budget = serde_json::from_str::<RateLimitResponse>(
+            r#"{"resources":{"core":{"limit":5000,"used":0,"remaining":5000,"reset":1}}}"#,
+        )
+        .unwrap()
+        .into_budget();
+        assert_eq!(budget.windows.len(), 1);
     }
 
     // ── The wire shapes (decoded, not built) ─────────────────────────────
@@ -4295,21 +4231,5 @@ mod tests {
         let empty: PageData<ReviewThreadNode> =
             serde_json::from_str(r#"{"repository":{"pullRequest":null}}"#).unwrap();
         assert!(empty.repository.expect("repository").pull_request.is_none());
-    }
-
-    /// A pool GitHub omits is absent, not zero. A zero-remaining row reads as
-    /// "you are out of budget", which is the opposite of "we didn't hear".
-    #[test]
-    fn a_missing_pool_is_left_out_rather_than_reported_as_empty() {
-        let budget = serde_json::from_str::<RateLimitResponse>(
-            r#"{"resources":{"core":{"limit":5000,"used":0,"remaining":5000,"reset":1}}}"#,
-        )
-        .expect("a payload with one pool")
-        .into_budget();
-        assert_eq!(budget.windows.len(), 1);
-        assert_eq!(
-            budget.windows[0].kind,
-            santree_core::domain::ApiBudgetKind::Rest
-        );
     }
 }

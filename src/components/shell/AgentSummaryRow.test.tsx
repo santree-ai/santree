@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AgentKind } from "../../bindings";
@@ -31,18 +31,6 @@ function chipStates(container: HTMLElement): (string | null)[] {
 }
 
 describe("AgentSummaryRow", () => {
-  /** The dots and logomarks say nothing out loud, so the button's name has to
-   *  carry what they show — otherwise the collapsed state is opaque to a screen
-   *  reader in exactly the case it matters (something is waiting on you). */
-  it("names what the chips show", () => {
-    renderRow([agent("needs-you", "Codex"), agent("idle", "Claude"), agent("idle", "Claude")]);
-    expect(
-      screen.getByRole("button", {
-        name: "Expand agents. 3 agents: 1 Codex needs you, 2 Claude idle",
-      }),
-    ).toBeTruthy();
-  });
-
   it("draws one chip per provider, the one that needs you first", () => {
     const { container } = renderRow([agent("idle", "Claude"), agent("needs-you", "Codex")]);
     expect(chipStates(container)).toEqual(["Needs you", "Idle"]);
@@ -50,30 +38,21 @@ describe("AgentSummaryRow", () => {
     expect(container.querySelectorAll("svg").length).toBe(3);
   });
 
-  /** The colour is the busiest agent's, not the newest one's or the group's
-   *  first — the same `highest` the worktree's own dot is drawn from. */
-  it("colours a provider's chip by its busiest agent", () => {
-    const { container } = renderRow([agent("idle", "Claude"), agent("needs-you", "Claude")]);
-    expect(chipStates(container)).toEqual(["Needs you"]);
-  });
-
   /** Five sessions of one provider is one mark and its count. The alternative —
    *  five identical marks — spends the whole row saying nothing. */
-  it("counts repeats of one provider on that provider's chip", () => {
+  it("counts repeats of one provider on its chip, and leaves a single agent uncounted", () => {
     const { container } = renderRow([
       agent("idle", "Claude"),
       agent("idle", "Claude"),
       agent("idle", "Claude"),
     ]);
     expect(chipStates(container)).toEqual(["Idle"]);
-    expect(container.textContent).toContain("3");
-  });
+    expect(container.textContent).toBe("3");
+    cleanup();
 
-  /** One is what the mark already says; a "1" beside every chip would be noise
-   *  on the common row. */
-  it("leaves a single agent's chip uncounted", () => {
-    const { container } = renderRow([agent("working", "Claude"), agent("working", "Codex")]);
-    expect(container.textContent).toBe("");
+    // One is what the mark already says; a "1" beside every chip would be noise.
+    const single = renderRow([agent("working", "Claude"), agent("working", "Codex")]);
+    expect(single.container.textContent).toBe("");
   });
 
   /** More providers than the row has room for fold into a count of agents, so

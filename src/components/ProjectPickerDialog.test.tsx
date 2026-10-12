@@ -60,20 +60,12 @@ describe("ProjectPickerDialog", () => {
     ]);
   });
 
-  it("marks and focuses the project the ticket already runs on", () => {
+  it("marks and focuses the project the ticket already runs on; Enter picks it", () => {
     open("acme/web");
     expect(row(/web/)).toHaveAttribute("aria-selected", "true");
     expect(row(/web/)).toHaveFocus();
     expect(row(/app/)).toHaveAttribute("aria-selected", "false");
-  });
 
-  it("focuses the first row when nothing is current", () => {
-    open();
-    expect(row(/app/)).toHaveFocus();
-  });
-
-  it("Enter picks the focused row, without the default", () => {
-    open("acme/web");
     fireEvent.keyDown(row(/web/), { key: "Enter" });
     expect(onPick).toHaveBeenCalledWith("acme/web", false);
     expect(onPick).toHaveBeenCalledTimes(1);

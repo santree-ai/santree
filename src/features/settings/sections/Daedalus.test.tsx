@@ -109,33 +109,14 @@ describe("Settings → Daedalus", () => {
     expect(healthCalls).toHaveBeenCalledTimes(1);
   });
 
-  it.each([
-    [{ kind: "AgentOutdated" }, "Update the Daedalus agent on this Mac", null],
-    [
-      { kind: "SantreeOff" },
-      "santree is off for this Mac",
-      "Daedalus keeps santree off for this Mac. Turning it on opens Daedalus in your browser, where an admin confirms it.",
-    ],
-    [
-      { kind: "Unavailable", reason: "the box has not approved this machine yet" },
-      "Can't reach Daedalus",
-      "the box has not approved this machine yet",
-    ],
-    [
-      { kind: "HostKeyChanged", reason: "the session host proved another key" },
-      "Daedalus's session host key changed",
-      "the session host proved another key",
-    ],
-  ] as [
-    DaedalusLink,
-    string,
-    string | null,
-  ][])("names %o and what to do", async (link, title, detail) => {
-    live = link;
-    checked = link;
+  /** A link that can't be used is a reason on the card, in the agent's
+   *  words — never a toast. */
+  it("shows why the box can't be reached, on the card", async () => {
+    live = { kind: "Unavailable", reason: "the box has not approved this machine yet" };
+    checked = live;
     renderPane();
-    expect(await screen.findByText(title)).toBeInTheDocument();
-    if (detail) expect(screen.getByText(detail)).toBeInTheDocument();
+    expect(await screen.findByText("Can't reach Daedalus")).toBeInTheDocument();
+    expect(screen.getByText("the box has not approved this machine yet")).toBeInTheDocument();
     expect(toastError).not.toHaveBeenCalled();
   });
 

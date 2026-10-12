@@ -35,10 +35,12 @@ function shape(nodes: ChangeTreeNode[]): unknown {
 }
 
 describe("buildChangeTree", () => {
-  it("collapses a single-child directory chain into one a/b/c row", () => {
-    const tree = buildChangeTree([file("src/features/trees/deep/Foo.tsx")]);
-    expect(shape(tree)).toEqual([
+  it("collapses a single-child directory chain into one a/b/c row, but never a file into it", () => {
+    expect(shape(buildChangeTree([file("src/features/trees/deep/Foo.tsx")]))).toEqual([
       { "src/features/trees/deep (src/features/trees/deep, 1)": ["Foo.tsx"] },
+    ]);
+    expect(shape(buildChangeTree([file("src/Foo.tsx")]))).toEqual([
+      { "src (src, 1)": ["Foo.tsx"] },
     ]);
   });
 
@@ -50,11 +52,6 @@ describe("buildChangeTree", () => {
         "src (src, 2)": [{ "a (src/a, 1)": ["one.ts"] }, { "b (src/b, 1)": ["two.ts"] }],
       },
     ]);
-  });
-
-  it("does not absorb a directory whose only child is a file", () => {
-    const tree = buildChangeTree([file("src/Foo.tsx")]);
-    expect(shape(tree)).toEqual([{ "src (src, 1)": ["Foo.tsx"] }]);
   });
 
   it("sorts directories before files, each alphabetically", () => {
@@ -74,19 +71,9 @@ describe("buildChangeTree", () => {
 describe("filesUnder", () => {
   const files = [file("src/a.ts"), file("src/deep/b.ts"), file("src2/c.ts"), file("README.md")];
 
-  it("matches files at any depth under the directory", () => {
+  it("matches files at any depth under a (collapsed-chain) directory, within its path boundary", () => {
     expect(filesUnder(files, "src").map((f) => f.path)).toEqual(["src/a.ts", "src/deep/b.ts"]);
-  });
-
-  it("respects the path boundary — `src` never captures `src2/`", () => {
-    expect(filesUnder(files, "src").some((f) => f.path.startsWith("src2"))).toBe(false);
-  });
-
-  it("works with a collapsed-chain path (the tree's full dir path)", () => {
     expect(filesUnder(files, "src/deep").map((f) => f.path)).toEqual(["src/deep/b.ts"]);
-  });
-
-  it("returns nothing for a directory with no changed files", () => {
     expect(filesUnder(files, "docs")).toEqual([]);
   });
 });
@@ -98,26 +85,15 @@ describe("filesUnder", () => {
 describe("dirFlagsOf", () => {
   const flagsFor = (files: ChangedFile[]) => dirFlagsOf(buildChangeTree(files));
 
-  it("marks a folder untracked only when every file under it is", () => {
+  it("marks a folder untracked / fully staged only when every file under it is", () => {
     const flags = flagsFor([
-      file("new/a.ts", { status: "Untracked" }),
-      file("new/b.ts", { status: "Untracked" }),
-      file("mixed/a.ts", { status: "Untracked" }),
+      file("new/a.ts", { status: "Untracked", staged: true }),
+      file("new/b.ts", { status: "Untracked", staged: true }),
+      file("mixed/a.ts", { status: "Untracked", staged: true }),
       file("mixed/b.ts"),
     ]);
-    expect(flags.get("new")?.untracked).toBe(true);
-    expect(flags.get("mixed")?.untracked).toBe(false);
-  });
-
-  it("marks a folder fully staged only when every file under it is", () => {
-    const flags = flagsFor([
-      file("all/a.ts", { staged: true }),
-      file("all/b.ts", { staged: true }),
-      file("some/a.ts", { staged: true }),
-      file("some/b.ts"),
-    ]);
-    expect(flags.get("all")?.allStaged).toBe(true);
-    expect(flags.get("some")?.allStaged).toBe(false);
+    expect(flags.get("new")).toEqual({ untracked: true, allStaged: true });
+    expect(flags.get("mixed")).toEqual({ untracked: false, allStaged: false });
   });
 
   it("folds nested subtrees into the ancestor's flags", () => {
@@ -143,35 +119,19 @@ describe("dirFlagsOf", () => {
 describe("windowRows", () => {
   const rows = (n: number) => Array.from({ length: n }, (_, i) => i);
 
-  it("leaves a list under the limit untouched, down to its identity", () => {
-    const input = rows(40);
+  it("leaves a list up to the limit untouched, down to its identity", () => {
+    const input = rows(CHANGE_ROW_WINDOW);
     const { shown, hidden } = windowRows(input, CHANGE_ROW_WINDOW);
     // Same array, not a copy: it is what the memoized rows are keyed on.
     expect(shown).toBe(input);
     expect(hidden).toBe(0);
   });
 
-  it("does not window a list that exactly fills the limit", () => {
-    expect(windowRows(rows(CHANGE_ROW_WINDOW), CHANGE_ROW_WINDOW).hidden).toBe(0);
-  });
-
   it("keeps the leading rows in order and reports the true remainder", () => {
     const { shown, hidden } = windowRows(rows(3000), CHANGE_ROW_WINDOW);
-    expect(shown).toHaveLength(CHANGE_ROW_WINDOW);
-    expect(shown[0]).toBe(0);
-    expect(shown.at(-1)).toBe(CHANGE_ROW_WINDOW - 1);
+    expect(shown).toEqual(rows(CHANGE_ROW_WINDOW));
     // The count behind "Show more" is the whole remainder, never a page of it.
     expect(hidden).toBe(3000 - CHANGE_ROW_WINDOW);
-  });
-
-  it("reaches the end of a huge list in a handful of doublings", () => {
-    let limit = CHANGE_ROW_WINDOW;
-    let clicks = 0;
-    while (windowRows(rows(3000), limit).hidden > 0) {
-      limit *= 2;
-      clicks += 1;
-    }
-    expect(clicks).toBeLessThanOrEqual(5);
   });
 });
 

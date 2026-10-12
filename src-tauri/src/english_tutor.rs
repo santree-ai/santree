@@ -456,32 +456,34 @@ mod tests {
         assert_eq!(days[0].entries[0].reason, "first");
     }
 
-    /// Reasons routinely contain quotes, semicolons and their own parentheses —
-    /// splitting on the *first* `(` would cut them in half.
+    /// The *first* ` -> ` separates (a correction may contain an arrow) and the
+    /// reason is the outermost trailing parenthesis (reasons routinely carry their
+    /// own quotes, semicolons and parentheses); a reason is optional.
     #[test]
-    fn reason_split_survives_nested_parentheses() {
-        let e = parse_entry(r#"- allow to select -> allow selecting ("allow" needs an object (a noun); use a gerund)"#).unwrap();
-        assert_eq!(e.original, "allow to select");
-        assert_eq!(e.correction, "allow selecting");
-        assert_eq!(
-            e.reason,
-            r#""allow" needs an object (a noun); use a gerund"#
-        );
-    }
-
-    /// A correction can itself contain an arrow, so the *first* ` -> ` is the
-    /// separator — taking the last one would swallow the correction.
-    #[test]
-    fn arrow_split_takes_the_first_arrow() {
-        let e = parse_entry("- a -> b -> c (reason)").unwrap();
-        assert_eq!(e.original, "a");
-        assert_eq!(e.correction, "b -> c");
-    }
-
-    #[test]
-    fn entry_without_a_reason_still_parses() {
-        let e = parse_entry("- teh -> the").unwrap();
-        assert_eq!((e.correction.as_str(), e.reason.as_str()), ("the", ""));
+    fn an_entry_splits_on_the_first_arrow_and_the_outer_reason() {
+        for (line, want) in [
+            (
+                r#"- allow to select -> allow selecting ("allow" needs an object (a noun); use a gerund)"#,
+                (
+                    "allow to select",
+                    "allow selecting",
+                    r#""allow" needs an object (a noun); use a gerund"#,
+                ),
+            ),
+            ("- a -> b -> c (reason)", ("a", "b -> c", "reason")),
+            ("- teh -> the", ("teh", "the", "")),
+        ] {
+            let e = parse_entry(line).unwrap();
+            assert_eq!(
+                (
+                    e.original.as_str(),
+                    e.correction.as_str(),
+                    e.reason.as_str()
+                ),
+                want,
+                "{line}"
+            );
+        }
     }
 
     /// Nothing may vanish: a bullet the parser can't split, or one sitting under a
@@ -567,21 +569,13 @@ mod tests {
             "must keep the newest: {cut:?}"
         );
         assert!(!cut.contains("first"), "must drop the oldest: {cut:?}");
-    }
+        assert_eq!(tail_within(log, 400), log, "under budget it is a no-op");
 
-    #[test]
-    fn tail_is_a_noop_under_budget() {
-        let log = "- only -> one (r)\n";
-        assert_eq!(tail_within(log, 400), log);
-    }
-
-    /// The slice must never split a UTF-8 sequence — the log is full of `->` and
-    /// curly quotes, and a byte-indexed cut through one panics.
-    #[test]
-    fn tail_never_splits_a_multibyte_char() {
+        // The slice must never split a UTF-8 sequence — the log is full of curly
+        // quotes, and a byte-indexed cut through one panics.
         let log = "- á -> b (reason)\n- é -> f (reason)\n";
         for budget in 1..log.len() {
-            let _ = tail_within(log, budget); // must not panic
+            let _ = tail_within(log, budget);
         }
     }
 }

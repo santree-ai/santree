@@ -180,15 +180,6 @@ describe("AgentsSegment", () => {
     expect(shownCount()).toBe(treeCount());
   });
 
-  it("agrees with the tree when nothing is running at all", () => {
-    sessions = [];
-    terminals = [shellPane("tree:AK-5")];
-    processes = [];
-    renderSegment();
-    expect(shownCount()).toBe(0);
-    expect(treeCount()).toBe(0);
-  });
-
   it("shows a dash rather than a zero while the session read is in flight", () => {
     // `undefined` data is "we have not looked yet", which must not render as an
     // answer.

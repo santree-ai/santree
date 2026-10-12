@@ -803,106 +803,55 @@ mod tests {
         );
     }
 
+    /// The head ref is the join (santree's own create-PR dialog titles a PR by
+    /// its first commit, with no `[…]` tag — that read as "no PR" once); the
+    /// title tag is the fallback for a renamed branch; the match is exact, so
+    /// "AK-1" never swallows "AK-10"; and a PR of no worktree matches nothing.
     #[test]
-    fn match_issue_uses_the_head_ref_when_the_title_has_no_tag() {
-        // The bug this join replaced: santree's own create-PR dialog defaults the
-        // title to the first commit's subject, which carries no `[…]` tag — so a
-        // real PR read as "no PR" and the worktree re-offered Create PR.
-        let (by_branch, ids) = links(&[("AK-373", "santree/ak-373-kb-conflict-judge")]);
-        let pr = pr(
-            "AK-373 Add KB conflict and duplicate judge",
-            "santree/ak-373-kb-conflict-judge",
-        );
-        assert_eq!(
-            match_issue(&pr, &by_branch, &ids).as_deref(),
-            Some("AK-373")
-        );
-    }
-
-    #[test]
-    fn match_issue_falls_back_to_the_title_tag_when_the_branch_is_unknown() {
-        // A PR opened from a branch that has since been renamed still resolves.
-        let (by_branch, ids) = links(&[("AK-373", "santree/ak-373-renamed")]);
-        let pr = pr("[AK-373] Add the judge", "santree/ak-373-original");
-        assert_eq!(
-            match_issue(&pr, &by_branch, &ids).as_deref(),
-            Some("AK-373")
-        );
-    }
-
-    #[test]
-    fn match_issue_prefers_the_head_ref_over_the_title_tag() {
-        // A retitled/copy-pasted tag must not outrank the branch GitHub itself
-        // keys "a pull request already exists for …" on.
-        let (by_branch, ids) = links(&[("AK-1", "santree/ak-1"), ("AK-2", "santree/ak-2")]);
-        let pr = pr("[AK-1] Actually opened from AK-2's branch", "santree/ak-2");
-        assert_eq!(match_issue(&pr, &by_branch, &ids).as_deref(), Some("AK-2"));
-    }
-
-    #[test]
-    fn match_issue_ignores_a_pr_belonging_to_no_worktree() {
-        let (by_branch, ids) = links(&[("AK-373", "santree/ak-373")]);
-        assert_eq!(
-            match_issue(&pr("Bump deps", "renovate/deps"), &by_branch, &ids),
-            None
-        );
-        // A tag for an issue this repo has no worktree for is not a match either.
-        assert_eq!(
-            match_issue(&pr("[AK-999] Other", "other"), &by_branch, &ids),
-            None
-        );
-    }
-
-    #[test]
-    fn match_issue_does_not_conflate_prefixed_ids() {
-        // The exactness `issue_tag` protects, checked through the join that uses
-        // it: "AK-1" must not swallow "AK-10" or vice versa.
-        let (by_branch, ids) = links(&[("AK-1", "santree/ak-1")]);
-        assert_eq!(
-            match_issue(
-                &pr("[AK-10] Fix another thing", "santree/ak-10"),
-                &by_branch,
-                &ids
+    fn match_issue_joins_on_the_head_ref_then_the_title_tag() {
+        let ak1 = [("AK-1", "santree/ak-1")];
+        let ak10 = [("AK-10", "santree/ak-10")];
+        let both = [("AK-1", "santree/ak-1"), ("AK-2", "santree/ak-2")];
+        type Case<'a> = (&'a [(&'a str, &'a str)], &'a str, &'a str, Option<&'a str>);
+        let cases: &[Case] = &[
+            (&ak1, "AK-1 Add the judge", "santree/ak-1", Some("AK-1")),
+            (
+                &ak1,
+                "[AK-1] Add the judge",
+                "santree/ak-1-original",
+                Some("AK-1"),
             ),
-            None
-        );
-        let (by_branch, ids) = links(&[("AK-10", "santree/ak-10")]);
-        assert_eq!(
-            match_issue(
-                &pr("[AK-1] Fix the thing", "santree/ak-1"),
-                &by_branch,
-                &ids
+            (
+                &both,
+                "[AK-1] Opened from AK-2's branch",
+                "santree/ak-2",
+                Some("AK-2"),
             ),
-            None
-        );
+            (&ak1, "Bump deps", "renovate/deps", None),
+            (&ak1, "[AK-999] Other", "other", None),
+            (&ak1, "[AK-10] Fix another thing", "santree/ak-10", None),
+            (&ak10, "[AK-1] Fix the thing", "santree/ak-1", None),
+        ];
+        for (pairs, title, head, want) in cases {
+            let (by_branch, ids) = links(pairs);
+            assert_eq!(
+                match_issue(&pr(title, head), &by_branch, &ids).as_deref(),
+                *want,
+                "{title} @ {head}"
+            );
+        }
     }
 
     #[test]
-    fn issue_tag_extracts_bracketed_prefix() {
-        assert_eq!(issue_tag("[AK-1] Fix the thing"), Some("AK-1"));
-    }
-
-    #[test]
-    fn issue_tag_does_not_conflate_prefixed_ids() {
-        // A repo-wide search returns every PR in one shot, so the client-side match
-        // must be exact — "AK-1" must not swallow "AK-10" or vice versa.
-        assert_eq!(issue_tag("[AK-10] Fix another thing"), Some("AK-10"));
-        assert_ne!(issue_tag("[AK-10] Fix another thing"), Some("AK-1"));
-        assert_ne!(issue_tag("[AK-1] Fix the thing"), Some("AK-10"));
-    }
-
-    #[test]
-    fn issue_tag_none_without_leading_bracket() {
-        assert_eq!(issue_tag("Fix AK-1"), None);
-    }
-
-    #[test]
-    fn issue_tag_none_for_empty_brackets() {
-        assert_eq!(issue_tag("[] Fix the thing"), None);
-    }
-
-    #[test]
-    fn issue_tag_trims_whitespace_inside_brackets() {
-        assert_eq!(issue_tag("[ AK-1 ] Fix the thing"), Some("AK-1"));
+    fn issue_tag_reads_only_a_leading_bracketed_id() {
+        for (title, want) in [
+            ("[AK-1] Fix the thing", Some("AK-1")),
+            ("[AK-10] Fix another thing", Some("AK-10")),
+            ("[ AK-1 ] Fix the thing", Some("AK-1")),
+            ("Fix AK-1", None),
+            ("[] Fix the thing", None),
+        ] {
+            assert_eq!(issue_tag(title), want, "{title}");
+        }
     }
 }

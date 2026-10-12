@@ -32,22 +32,12 @@ vi.mock("../../components/MermaidDiagram", () => ({ MermaidDiagram: () => <div /
 import { FileViewer, isMarkdownPath } from "./FileViewer";
 
 describe("isMarkdownPath", () => {
-  it("recognizes markdown by extension, case-insensitively", () => {
+  /** `.mdx` is JSX in markdown clothing: rendering only the markdown half would
+   *  silently drop the components that carry the content. */
+  it("recognizes markdown by extension, case-insensitively, and nothing else", () => {
     expect(isMarkdownPath("README.md")).toBe(true);
     expect(isMarkdownPath("docs/Terminals.MARKDOWN")).toBe(true);
-  });
-
-  it("does not claim files that merely contain 'md'", () => {
-    expect(isMarkdownPath("src/cmd.ts")).toBe(false);
-    expect(isMarkdownPath("md")).toBe(false);
-    expect(isMarkdownPath("Makefile")).toBe(false);
-  });
-
-  /** `.mdx` is JSX in markdown clothing: rendering only the markdown half would
-   *  silently drop the components that carry the content, which is worse than
-   *  showing the source. */
-  it("leaves .mdx to the source view", () => {
-    expect(isMarkdownPath("page.mdx")).toBe(false);
+    for (const p of ["src/cmd.ts", "md", "page.mdx"]) expect(isMarkdownPath(p), p).toBe(false);
   });
 });
 

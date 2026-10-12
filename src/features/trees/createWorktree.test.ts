@@ -36,21 +36,15 @@ describe("branchPickerRows", () => {
     expect(taken.map((b) => b.name)).toEqual(["feature/search"]);
   });
 
-  it("offers a create-new-branch row when the query matches nothing", () => {
-    const rows = branchPickerRows(BRANCHES, "feature/create-worktree");
-    expect(rows.available).toEqual([]);
-    expect(rows.taken).toEqual([]);
-    expect(rows.create).toEqual({ name: "feature/create-worktree", reason: null });
-  });
-
-  it("does not offer to create a branch that already exists", () => {
+  // Not even for an existing branch that is unavailable: the answer there is
+  // "taken", not "make a second one with the same name".
+  it("offers a create row only for a non-empty name no branch has", () => {
+    expect(branchPickerRows(BRANCHES, "feature/create-worktree").create).toEqual({
+      name: "feature/create-worktree",
+      reason: null,
+    });
     expect(branchPickerRows(BRANCHES, "feature/sidebar").create).toBeNull();
-    // Not even when the existing one is unavailable: the answer there is
-    // "taken", not "make a second one with the same name".
     expect(branchPickerRows(BRANCHES, "main").create).toBeNull();
-  });
-
-  it("offers no create row for an empty query", () => {
     expect(branchPickerRows(BRANCHES, "   ").create).toBeNull();
   });
 
@@ -166,9 +160,5 @@ describe("createArgsFor", () => {
     ] as const) {
       expect(createArgsFor(choice, "santree/ak-1-first").base).toBe("santree/ak-1-first");
     }
-  });
-
-  it("uses the repo default (no base) when there is no parent", () => {
-    expect(createArgsFor({ kind: "new", branch: "solo" }, null).base).toBeNull();
   });
 });

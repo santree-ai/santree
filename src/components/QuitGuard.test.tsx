@@ -75,6 +75,8 @@ describe("QuitGuard", () => {
 
     await waitFor(() => expect(windowMock.destroy).toHaveBeenCalled());
     expect(bindingsMock.quitApp).not.toHaveBeenCalled();
+    // Don't-ask-again wasn't checked, so nothing is persisted.
+    expect(queriesMock.mutateAsync).not.toHaveBeenCalled();
   });
 
   it("⌘Q (quit-requested): shows the confirm dialog and calls quitApp on confirm, not destroy", async () => {
@@ -100,6 +102,7 @@ describe("QuitGuard", () => {
 
     expect(preventDefault).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(bindingsMock.quitSummary).not.toHaveBeenCalled();
   });
 
   it("persists don't-ask-again before quitting, in that order", async () => {
@@ -142,18 +145,6 @@ describe("QuitGuard", () => {
 
     await waitFor(() => expect(windowMock.destroy).toHaveBeenCalled());
   });
-
-  it("does not persist a setting when don't-ask-again isn't checked", async () => {
-    render(<QuitGuard />);
-    const { close } = handlers();
-    act(() => close({ preventDefault: vi.fn() }));
-    await screen.findByRole("dialog", { name: "Quit santree?" });
-
-    fireEvent.click(screen.getByRole("button", { name: "Quit" }));
-
-    await waitFor(() => expect(windowMock.destroy).toHaveBeenCalled());
-    expect(queriesMock.mutateAsync).not.toHaveBeenCalled();
-  });
 });
 
 describe("QuitGuard: it asks only about what quitting ends", () => {
@@ -169,12 +160,6 @@ describe("QuitGuard: it asks only about what quitting ends", () => {
     closeWindow();
     const dialog = await screen.findByRole("dialog", { name: "Quit santree?" });
     expect(dialog).toHaveTextContent("3 running terminals in this window will be stopped.");
-  });
-
-  it("says 'terminal' for one", async () => {
-    bindingsMock.quitSummary.mockResolvedValue({ terminalsEnd: 1 });
-    closeWindow();
-    expect(await screen.findByRole("dialog")).toHaveTextContent("1 running terminal in this");
   });
 
   it("quits without a prompt when nothing ends (a server holds them): window close", async () => {
@@ -204,11 +189,5 @@ describe("QuitGuard: it asks only about what quitting ends", () => {
     const dialog = await screen.findByRole("dialog", { name: "Quit santree?" });
     expect(dialog).toHaveTextContent("Any running agent terminals in this window will be stopped.");
     expect(windowMock.destroy).not.toHaveBeenCalled();
-  });
-
-  it("never reads the summary when confirm-on-quit is off", () => {
-    queriesMock.data = "false";
-    closeWindow();
-    expect(bindingsMock.quitSummary).not.toHaveBeenCalled();
   });
 });

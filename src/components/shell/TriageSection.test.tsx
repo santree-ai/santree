@@ -146,6 +146,7 @@ beforeEach(() => {
   data.schedules = [];
   data.agentsByTicket = new Map();
   data.readOnly = false;
+  data.features = { ...data.features, snoozeUnavailable: null };
   data.trackerConnected = true;
   queue({});
 });
@@ -174,23 +175,20 @@ describe("TriageSection without Linear", () => {
     expect(screen.getByRole("button", { name: "Collapse triage" })).toBeInTheDocument();
   });
 
-  /** Disabled is for "can't", not "don't want": triage turned off stays hidden. */
-  it("still draws nothing while triage is turned off", () => {
-    data.trackerConnected = false;
+  /** Disabled is for "can't", not "don't want": triage turned off stays hidden,
+   *  connected or not. */
+  it("draws nothing while triage is turned off", () => {
     app.triageEnabled = false;
-    const { container } = render(<TriageSection />);
+    queue({ active: [ticket("AK-1")] });
+    const { container, rerender } = render(<TriageSection />);
+    expect(container).toBeEmptyDOMElement();
+    data.trackerConnected = false;
+    rerender(<TriageSection />);
     expect(container).toBeEmptyDOMElement();
   });
 });
 
 describe("TriageSection", () => {
-  it("draws nothing while triage is off", () => {
-    app.triageEnabled = false;
-    queue({ active: [ticket("AK-1")] });
-    const { container } = render(<TriageSection />);
-    expect(container).toBeEmptyDOMElement();
-  });
-
   /** The header's scope menu *is* the "be a good citizen" setting — the one
    *  control for it now that Settings no longer carries a copy. The trigger
    *  names the current scope; the menu marks it and offers the other. */
@@ -242,22 +240,8 @@ describe("TriageSection", () => {
     const header = screen.getByRole("button", { name: "Collapse triage" })
       .parentElement as HTMLElement;
     const count = within(header).getByText("2");
-    // Reference in the Reviews band's own muted register — not a tinted pill,
-    // which read as an alarm on a rail that is open all day.
-    expect(count.className).toContain("text-muted-4");
-    expect(count.className).not.toMatch(/rounded-full|bg-\[/);
     // A bare number is not a fact; the noun rides along for a screen reader.
     expect(count).toHaveTextContent("2 in the queue");
-  });
-
-  /** The queue is a section of the rail, not a widget in it: it scrolls with the
-   *  sidebar, and folding is how you stop seeing it. A capped viewport of its own
-   *  is what it used to have. */
-  it("scrolls with the sidebar rather than inside a viewport of its own", () => {
-    queue({ active: [ticket("AK-1")] });
-    const { container } = render(<TriageSection />);
-    expect(container.querySelector("[class*='overflow-y']")).toBeNull();
-    expect(container.querySelector("[class*='max-h-']")).toBeNull();
   });
 
   /** Selection follows the route and nothing else: the row lights while the
@@ -309,25 +293,17 @@ describe("TriageSection", () => {
     expect(screen.queryByText(/SLA in/)).toBeNull();
   });
 
-  it("draws no snoozed lane when nothing is snoozed", () => {
-    queue({ active: [ticket("AK-1")] });
-    render(<TriageSection />);
-    expect(screen.queryByRole("button", { name: /snoozed tickets/ })).toBeNull();
-  });
-
   /** "We haven't looked yet" is not "nothing in triage": the cold load shows
    *  placeholder rows rather than asserting an empty queue. */
-  it("shows skeleton rows while the queue loads, never the empty state", () => {
+  it("shows skeleton rows while the queue loads, and the empty state once it resolves", () => {
     queue({ loading: true });
-    const { container } = render(<TriageSection />);
+    const { container, rerender } = render(<TriageSection />);
 
     expect(container.querySelector(".animate-pulse")).not.toBeNull();
     expect(screen.queryByText("Nothing in triage")).toBeNull();
-  });
 
-  it("says so once the queue has resolved to nothing", () => {
     queue({});
-    render(<TriageSection />);
+    rerender(<TriageSection />);
     expect(screen.getByText("Nothing in triage")).toBeInTheDocument();
   });
 
@@ -372,13 +348,11 @@ describe("TriageSection", () => {
     // No team tag on the tickets: the row already names the team.
     expect(screen.queryByText("SAN")).toBeNull();
     expect(screen.queryByText("MSG")).toBeNull();
-    // No indent either: a ticket sits where it sits with one team.
-    expect((card("AK-1") as HTMLElement).style.marginLeft).toBe("10px");
   });
 
-  /** Each team's row folds its own tickets and remembers it; its chip opens
-   *  that team's schedule without folding anything. */
-  it("folds a team from its row, and opens its schedule from the chip", () => {
+  /** Each team's row folds its own tickets, and the fold outlives a remount: it
+   *  is a preference, not view state. */
+  it("folds a team from its row and remembers it", () => {
     data.schedules = [
       schedule(),
       schedule({ team: "Messaging", teamKey: "MSG", scheduleName: "MSG triage" }),
@@ -393,10 +367,7 @@ describe("TriageSection", () => {
       "aria-expanded",
       "false",
     );
-
-    fireEvent.click(screen.getByRole("button", { name: "Show the Messaging triage rotation" }));
-    expect(screen.getByRole("dialog")).toHaveTextContent("MSG triage");
-    expect(screen.getByText("MS-2")).toBeInTheDocument();
+    expect(localStorage.getItem("santree.shell.triage.foldedTeams")).toContain("SAN");
   });
 
   /** Each team's row carries its own Mine/All: the header's default until the
@@ -449,21 +420,14 @@ describe("TriageSection", () => {
     expect(screen.queryByRole("button", { name: /Messaging|MSG triage rotation/ })).toBeNull();
   });
 
-  /** One team needs no row: the section header is its header, and its
-   *  rotation is the plain one-line row. */
   /** The only team gets a row too: it is what names the team, and what folds
    *  it — a rotation row alone said "You" over a list with no team on it. */
-  it("draws the team row for a single team, and folds it", () => {
+  it("draws the team row for a single team", () => {
     data.schedules = [schedule()];
     queue({ active: [ticket("AK-1", { team: "SAN" })] });
     render(<TriageSection />);
     expect(screen.getByText("Santree")).toBeInTheDocument();
-    expect(screen.getByText("Sam Ortiz")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Collapse Santree" }));
-    expect(screen.queryByText("AK-1")).toBeNull();
-    // The fold outlives a remount: it is a preference, not view state.
-    expect(localStorage.getItem("santree.shell.triage.foldedTeams")).toContain("SAN");
+    expect(screen.getByRole("button", { name: "Collapse Santree" })).toBeInTheDocument();
   });
 
   /** An investigation hangs under its ticket the way a worktree's agents hang
@@ -491,7 +455,7 @@ describe("TriageSection", () => {
   });
 
   describe("the rotation", () => {
-    it("names who has it, and 'You' when it is you", () => {
+    it("names who has it, 'You' when it is you, and 'uncovered' rather than inventing a name", () => {
       data.schedules = [schedule()];
       const { rerender } = render(<TriageSection />);
       expect(screen.getByText("Sam Ortiz")).toBeInTheDocument();
@@ -499,11 +463,9 @@ describe("TriageSection", () => {
       data.schedules = [schedule({ currentIsMe: true })];
       rerender(<TriageSection />);
       expect(screen.getByText("You")).toBeInTheDocument();
-    });
 
-    it("says an uncovered rotation is uncovered rather than inventing a name", () => {
       data.schedules = [schedule({ currentName: null, currentAvatarUrl: null })];
-      render(<TriageSection />);
+      rerender(<TriageSection />);
       expect(screen.getByText("uncovered")).toBeInTheDocument();
     });
 
@@ -599,33 +561,35 @@ describe("TriageSection", () => {
     });
 
     /** A connection with no snooze to write to (an MCP-connected Linear org)
-     *  keeps the rows, disabled with its own reason rather than the read-only one. */
-    it("disables the snooze rows with the reason where the connection can't snooze", () => {
-      const reason = "Linear's MCP server can't snooze tickets.";
-      data.features = { ...data.features, snoozeUnavailable: reason };
-      try {
-        queue({ active: [ticket("AK-1")] });
-        render(<TriageSection />);
-        fireEvent.contextMenu(card("AK-1") as HTMLElement);
-        for (const name of ["Snooze until tomorrow", "Snooze for a week"]) {
-          const row = screen.getByRole("menuitem", { name });
-          expect(row).toBeDisabled();
-          expect(row).toHaveAttribute("title", reason);
-        }
-        expect(screen.getByRole("menuitem", { name: "Copy ticket id" })).toBeEnabled();
-      } finally {
-        data.features = { ...data.features, snoozeUnavailable: null };
-      }
-    });
-
-    it("keeps the snooze rows but disables them on a read-only org", () => {
-      data.readOnly = true;
+     *  or a read-only org keeps the rows, disabled with its own reason. */
+    it.each([
+      [
+        "a connection that can't snooze",
+        () => {
+          data.features = {
+            ...data.features,
+            snoozeUnavailable: "Linear's MCP server can't snooze tickets.",
+          };
+        },
+        "Linear's MCP server can't snooze tickets.",
+      ],
+      [
+        "a read-only org",
+        () => {
+          data.readOnly = true;
+        },
+        expect.stringMatching(/read-only/i),
+      ],
+    ])("keeps the snooze rows but disables them with the reason on %s", (_, arrange, reason) => {
+      arrange();
       queue({ active: [ticket("AK-1")] });
       render(<TriageSection />);
       fireEvent.contextMenu(card("AK-1") as HTMLElement);
-      const snooze = screen.getByRole("menuitem", { name: "Snooze for a week" });
-      expect(snooze).toBeDisabled();
-      expect(snooze).toHaveAttribute("title", expect.stringMatching(/read-only/i));
+      for (const name of ["Snooze until tomorrow", "Snooze for a week"]) {
+        const row = screen.getByRole("menuitem", { name });
+        expect(row).toBeDisabled();
+        expect(row).toHaveAttribute("title", reason);
+      }
       expect(screen.getByRole("menuitem", { name: "Copy ticket id" })).toBeEnabled();
     });
   });

@@ -281,41 +281,35 @@ describe("a lost pane in the layer", () => {
     expect(surfaceResume).toHaveBeenCalledTimes(1);
   });
 
-  test("a Trees pane no tab is showing hands nothing over: the sidebar's open is its path", async () => {
-    const { findByRole } = await mountLost("tree:AK-1:tab:t1", true);
-    fireEvent.click(await findByRole("button", { name: "Resume this session" }));
-    await waitFor(() => expect(openAgent).toHaveBeenCalledTimes(1));
-    expect(openAgent.mock.calls[0][0].origin.kind).toBe("tree-tab");
-  });
-
-  test.each([
-    "Down",
-    "Failing",
-    "Starting",
-    "Stopping",
-  ])("Resume is unavailable while the server is %s, and the tab is kept", async (kind) => {
-    world.server = { state: { kind } } as LayerWorld["server"];
-    const { getByTestId, findByRole } = await mountLost("tree:AK-1:tab:t1", true);
-    const resume = await findByRole("button", { name: "Resume this session" });
-    expect(resume).toBeDisabled();
-    // The reason is said beside it, and the button points at it.
-    const hint = document.getElementById(resume.getAttribute("aria-describedby") ?? "");
-    expect(hint?.textContent).toMatch(/server/);
-    fireEvent.click(resume);
-    await new Promise((r) => setTimeout(r, 50));
-    expect(getByTestId("tabs")).toHaveTextContent("1");
-    expect(backend.close).not.toHaveBeenCalled();
-    expect(openAgent).not.toHaveBeenCalled();
-  });
-
-  test("Resume is available when the server is running or off", async () => {
-    for (const kind of ["Running", "Off"]) {
+  /** Only a server that is running (or a build without one) can take a
+   *  resumed agent; while it is anything else the click would launch into a
+   *  host that cannot hold it, so the tab is kept and the reason said. */
+  test("Resume is available only while the server is running or off", async () => {
+    for (const kind of ["Down", "Failing", "Starting", "Stopping", "Running", "Off"]) {
       world.server = { state: { kind } } as LayerWorld["server"];
       const { findByRole, unmount } = await mountLost("tree:AK-1:tab:t1", true);
-      expect(await findByRole("button", { name: "Resume this session" })).toBeEnabled();
+      const resume = await findByRole("button", { name: "Resume this session" });
+      if (kind === "Running" || kind === "Off") {
+        expect(resume, kind).toBeEnabled();
+      } else {
+        expect(resume, kind).toBeDisabled();
+        // The reason is said beside it, and the button points at it.
+        const hint = document.getElementById(resume.getAttribute("aria-describedby") ?? "");
+        expect(hint?.textContent, kind).toMatch(/server/);
+      }
       unmount();
       vi.clearAllMocks();
       resetAdoption();
     }
+  });
+
+  test("a click on a blocked Resume keeps the tab and starts nothing", async () => {
+    world.server = { state: { kind: "Down" } } as LayerWorld["server"];
+    const { getByTestId, findByRole } = await mountLost("tree:AK-1:tab:t1", true);
+    fireEvent.click(await findByRole("button", { name: "Resume this session" }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(getByTestId("tabs")).toHaveTextContent("1");
+    expect(backend.close).not.toHaveBeenCalled();
+    expect(openAgent).not.toHaveBeenCalled();
   });
 });

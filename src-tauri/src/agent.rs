@@ -126,13 +126,8 @@ impl HelperDir {
             });
         }
         let path = std::env::temp_dir().join(format!("santree-helper-{}", uuid::Uuid::new_v4()));
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&path)?;
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
         Ok(Self {
             path,
             scratch: true,
@@ -213,8 +208,8 @@ fn build_args(allowed_tools: &[&str], model: Option<&str>) -> Vec<String> {
 /// caller swallows the error to fall back.
 ///
 /// The prompt is piped to the child's **stdin**, not passed as an argument: these
-/// prompts carry the repo diff and ticket text, and argv is world-readable on Linux
-/// (`/proc/<pid>/cmdline`). stdin also means no size limit — no `ARG_MAX` cap, no
+/// prompts carry the repo diff and ticket text, and argv is visible to
+/// every local user (`ps`). stdin also means no size limit — no `ARG_MAX` cap, no
 /// temp-file spill.
 ///
 /// Blocking — call from `spawn_blocking` (Claude can take 5–30s, and much longer
@@ -546,12 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn build_args_omits_model_flag_when_none() {
-        let args = build_args(&[], None);
-        assert!(!args.contains(&"--model".to_string()));
-    }
-
-    #[test]
     fn codex_helpers_disable_ambient_extensions_and_writes() {
         let args = build_codex_helper_args(Path::new("/tmp/wt"), Some("gpt-5.6-sol"));
         for required in [
@@ -581,8 +570,8 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.contains("sandbox_permissions")));
     }
 
-    /// The prompt embeds the repo diff and ticket text; argv is world-readable on
-    /// Linux, so it must not appear there — it goes in on stdin instead.
+    /// The prompt embeds the repo diff and ticket text; argv is visible to
+    /// every local user (`ps`), so it must not appear there — it goes in on stdin instead.
     #[test]
     fn build_args_carry_no_prompt() {
         let args = build_args(&[], None);
@@ -597,35 +586,10 @@ mod tests {
         assert!(!args.contains(&"--".to_string()));
     }
 
-    /// A `Read` grant is confined to one directory tree, so ticket text that says
-    /// "read ~/.ssh/id_rsa" can't. `//abs` is the CLI's absolute-path spelling.
-    #[test]
-    fn read_within_scopes_the_grant_to_one_tree() {
-        assert_eq!(
-            read_within(Path::new("/Users/x/work/wt")),
-            "Read(//Users/x/work/wt/**)"
-        );
-    }
-
-    /// stdin carries the prompt (and is closed afterwards — `cat` would otherwise
-    /// read until the deadline instead of echoing and exiting).
-    #[cfg(unix)]
-    #[test]
-    fn the_prompt_is_fed_on_stdin() {
-        let (status, stdout, _) = run_with_timeout(
-            Command::new("cat"),
-            "secret prompt",
-            Duration::from_secs(20),
-        )
-        .expect("cat runs");
-        assert!(status.success());
-        assert_eq!(String::from_utf8_lossy(&stdout), "secret prompt");
-    }
-
-    /// stdin replaced the `ARG_MAX` cap and its temp-file spill, so size is no
-    /// longer a limit — and a prompt past the 64 KB pipe buffer must not deadlock
+    /// The prompt goes in on stdin (closed afterwards, or `cat` would read until
+    /// the deadline). stdin replaced the `ARG_MAX` cap and its temp-file spill, so
+    /// size is no longer a limit — and a prompt past the 64 KB pipe buffer must not deadlock
     /// the writer against a child that hasn't started reading yet.
-    #[cfg(unix)]
     #[test]
     fn a_prompt_larger_than_the_pipe_buffer_is_not_truncated() {
         let prompt = "x".repeat(1024 * 1024);
@@ -633,7 +597,7 @@ mod tests {
             run_with_timeout(Command::new("cat"), &prompt, Duration::from_secs(20))
                 .expect("cat runs");
         assert!(status.success());
-        assert_eq!(stdout.len(), prompt.len());
+        assert_eq!(stdout, prompt.as_bytes());
     }
 
     /// `kill()` signals only the direct child, so a grandchild holding the stdout
@@ -642,7 +606,6 @@ mod tests {
     /// The grandchild outlives the child by 30s; we must return in the grace period
     /// with what the child did write, not in 30s (and — before the reader threads
     /// stopped being `join`ed — not never).
-    #[cfg(unix)]
     #[test]
     fn a_grandchild_holding_the_pipe_cannot_wedge_the_call() {
         let mut cmd = Command::new("sh");
@@ -660,7 +623,6 @@ mod tests {
 
     /// A hung child is killed at the deadline rather than held to the (much longer)
     /// life of the process it spawned.
-    #[cfg(unix)]
     #[test]
     fn a_hung_child_is_killed_at_the_deadline() {
         let mut cmd = Command::new("sh");

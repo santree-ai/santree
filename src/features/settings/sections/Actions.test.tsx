@@ -162,7 +162,14 @@ describe("app-scope Triage settings", () => {
     expect(within(never).getByRole("button", { name: "Add a team to Never show" })).toBeEnabled();
   });
 
-  it("really disables every control in the panel while triage is off", () => {
+  it("really disables every control in the panel while triage is off, and only then", () => {
+    triageOn = true;
+    const { unmount } = render(<TriageActionSection />);
+    for (const select of screen.getAllByRole("combobox")) expect(select).toBeEnabled();
+    for (const s of screen.getAllByRole("switch")) expect(s).toBeEnabled();
+    unmount();
+
+    triageOn = false;
     render(<TriageActionSection />);
 
     // `pointer-events-none` on the wrapper only stops the mouse — without a real
@@ -212,18 +219,6 @@ describe("app-scope Triage settings", () => {
     expect(setRules).toHaveBeenLastCalledWith({ ...teamRules, picked: [] });
   });
 
-  /** The queue's Mine/All switch lives on the sidebar's Triage section, and the
-   *  snoozed lane is a subsection there — a copy of either here would be two
-   *  controls for one setting, disagreeing the moment one lagged. */
-  it("offers no queue preferences — the sidebar section is the one control", () => {
-    triageOn = true;
-    render(<TriageActionSection />);
-
-    expect(screen.queryByText("Be a good citizen")).toBeNull();
-    expect(screen.queryByText("Show snoozed issues")).toBeNull();
-    expect(screen.getByText(/Show the Triage section in the sidebar/)).toBeInTheDocument();
-  });
-
   /** Triage has nothing to pull without a tracker, so the master switch is dimmed —
    *  and dimming it is only honest if it is also really `disabled`. The panel's
    *  own rule (every control below takes the real attribute, not just
@@ -234,14 +229,6 @@ describe("app-scope Triage settings", () => {
 
     expect(screen.getByText(/Connect Linear or Jira first/)).toBeInTheDocument();
     expect(screen.getAllByRole("switch")[0]).toBeDisabled();
-  });
-
-  it("leaves them all live once triage is on", () => {
-    triageOn = true;
-    render(<TriageActionSection />);
-
-    for (const select of screen.getAllByRole("combobox")) expect(select).toBeEnabled();
-    for (const s of screen.getAllByRole("switch")) expect(s).toBeEnabled();
   });
 
   /** One setting for two things — where tickets run, and which Linear org the
@@ -290,11 +277,6 @@ describe("app-scope Reviews settings", () => {
     settingValues = {};
   });
 
-  it("offers an agent picker for the default review provider", () => {
-    render(<ReviewActionSection />);
-    expect(screen.getByText("Default agent")).toBeInTheDocument();
-  });
-
   it("configures the default provider's model and effort", () => {
     render(<ReviewActionSection />);
     expect(screen.getAllByText("Model")).toHaveLength(1);
@@ -322,7 +304,7 @@ describe("app-scope Reviews settings", () => {
 });
 
 describe("provider effort capabilities", () => {
-  it("uses only efforts advertised by the selected Codex model", () => {
+  it("offers Codex only the efforts its model advertises, and Claude its own CLI scale", () => {
     expect(
       effortOptionsFor("Codex", {
         id: "gpt-test",
@@ -338,14 +320,9 @@ describe("provider effort capabilities", () => {
       { value: "medium", description: "Balanced" },
       { value: "ultra", description: "Deep" },
     ]);
-  });
-
-  it("keeps Claude's CLI effort scale independent from Codex models", () => {
-    expect(effortOptionsFor("Claude").map(({ value }) => value)).toEqual(["low", "high"]);
-  });
-
-  it("does not guess Codex efforts before the model capabilities load", () => {
+    // Never guessed before the model's capabilities load.
     expect(effortOptionsFor("Codex")).toEqual([]);
+    expect(effortOptionsFor("Claude").map(({ value }) => value)).toEqual(["low", "high"]);
   });
 });
 

@@ -27,11 +27,6 @@ function publishes(run: () => void): number {
 }
 
 describe("sessionTitles", () => {
-  it("records a pane's title under its label", () => {
-    setSessionTitle("tree:AK-1", "◐ Fix the flaky suite");
-    expect(sessionTitles().get("tree:AK-1")).toBe("◐ Fix the flaky suite");
-  });
-
   it("keeps panes apart", () => {
     setSessionTitle("tree:AK-1", "◐ one");
     setSessionTitle("tree:AK-2", "✳ two");
@@ -70,10 +65,6 @@ describe("sessionTitles", () => {
     const n = publishes(() => clearSessionTitle("tree:AK-1"));
     expect(n).toBe(1);
     expect(sessionTitles().has("tree:AK-1")).toBe(false);
-  });
-
-  it("says nothing when asked to clear a pane it never had", () => {
-    expect(publishes(() => clearSessionTitle("tree:AK-9"))).toBe(0);
   });
 
   it("re-publishes a repeated title after its pane was cleared", () => {

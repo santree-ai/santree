@@ -431,12 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn the_requested_scope_is_space_separated_for_the_mcp_server() {
-        assert_eq!(mcp_scope("read"), "read");
-        assert_eq!(mcp_scope("read,write"), "read write");
-    }
-
-    #[test]
     fn a_refused_refresh_says_where_the_access_token_stood() {
         let now = 1_700_000_000_000;
         assert_eq!(

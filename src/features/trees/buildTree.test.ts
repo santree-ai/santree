@@ -9,19 +9,13 @@ function shape(nodes: TreeNode[]): unknown {
 
 describe("buildTree", () => {
   it("nests files under their directories, with full paths on every node", () => {
-    expect(shape(buildTree(["src/lib/a.ts", "src/b.ts", "README.md"]))).toEqual([
+    // One node per directory, however many files sit under it.
+    expect(shape(buildTree(["src/lib/a.ts", "src/b.ts", "src/c.ts", "README.md"]))).toEqual([
       {
-        "src (src)": [{ "lib (src/lib)": ["a.ts"] }, "b.ts"],
+        "src (src)": [{ "lib (src/lib)": ["a.ts"] }, "b.ts", "c.ts"],
       },
       "README.md",
     ]);
-  });
-
-  it("reuses one node per directory instead of duplicating it per file", () => {
-    const tree = buildTree(["a/one.ts", "a/two.ts", "a/b/three.ts"]);
-    expect(tree).toHaveLength(1);
-    const a = tree[0];
-    expect(a.children.map((c) => c.name)).toEqual(["b", "one.ts", "two.ts"]);
   });
 
   it("keeps a file and a directory of the same name apart", () => {

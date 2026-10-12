@@ -11,39 +11,19 @@ const milestone = (id: string, name: string, sortOrder: number | null): ProjectM
 });
 
 describe("groupByMilestone", () => {
-  it("uses Linear order, then name and id, with no milestone last", () => {
+  it("uses Linear order, then name and id, with no milestone last, keeping row order inside", () => {
     const items = [
       { id: "unassigned", milestone: null },
       { id: "z", milestone: milestone("z", "Zulu", 1) },
       { id: "b", milestone: milestone("b", "Alpha", 1) },
       { id: "a", milestone: milestone("a", "Alpha", 1) },
       { id: "first", milestone: milestone("first", "First", 0) },
+      { id: "first-2", milestone: milestone("first", "First", 0) },
     ];
 
-    expect(groupByMilestone(items, (item) => item.milestone).map((group) => group.key)).toEqual([
-      "first",
-      "a",
-      "b",
-      "z",
-      "No milestone",
-    ]);
-  });
-
-  it("preserves row order inside each non-empty milestone", () => {
-    const release = milestone("release", "Release", 0);
-    const groups = groupByMilestone(
-      [
-        { id: "AK-3", milestone: release },
-        { id: "AK-1", milestone: null },
-        { id: "AK-2", milestone: release },
-      ],
-      (item) => item.milestone,
-    );
-
-    expect(groups.map((group) => [group.label, group.items.map((item) => item.id)])).toEqual([
-      ["Release", ["AK-3", "AK-2"]],
-      ["No milestone", ["AK-1"]],
-    ]);
+    const groups = groupByMilestone(items, (item) => item.milestone);
+    expect(groups.map((group) => group.key)).toEqual(["first", "a", "b", "z", "No milestone"]);
+    expect(groups[0].items.map((item) => item.id)).toEqual(["first", "first-2"]);
   });
 });
 
@@ -82,20 +62,6 @@ describe("groupByProject", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].items.map((i) => i.id)).toEqual(["AK-1", "AK-2"]);
   });
-
-  it("carries the project's color, icon and target date onto its group", () => {
-    const [group] = groupByProject([{ id: "AK-1" }], () => ({
-      name: "Core",
-      color: "#abc123",
-      icon: "\u{1F680}",
-      targetDate: "2026-03-01",
-    }));
-    expect([group.color, group.icon, group.targetDate]).toEqual([
-      "#abc123",
-      "\u{1F680}",
-      "2026-03-01",
-    ]);
-  });
 });
 
 describe("showProjectGroups", () => {
@@ -110,22 +76,17 @@ describe("showProjectGroups", () => {
 });
 
 describe("changeSizeOf", () => {
-  it("steps at 500 and 2,500", () => {
+  // Every file counts as reading (the same 300 lines across thirty files is
+  // thirty context switches), and a deletion weighs a third of an addition
+  // (checking removed code has no callers is quicker than reading new code).
+  it("steps at 500 and 2,500 of weighted lines and files", () => {
     expect(changeSizeOf(479, 0, 1)).toBe("Small");
     expect(changeSizeOf(480, 0, 1)).toBe("Medium");
     expect(changeSizeOf(2479, 0, 1)).toBe("Medium");
     expect(changeSizeOf(2480, 0, 1)).toBe("Large");
-  });
-
-  // The same 300 lines: in one file it's a read, across thirty it's thirty
-  // context switches.
-  it("counts every file as reading, not just the lines", () => {
-    expect(changeSizeOf(300, 0, 1)).toBe("Small");
     expect(changeSizeOf(300, 0, 30)).toBe("Medium");
-  });
-
-  // Checking that removed code has no callers left is quicker than reading new code.
-  it("counts a deletion as a third of an addition", () => {
+    expect(changeSizeOf(0, 1200, 3)).toBe("Small");
+    expect(changeSizeOf(1200, 0, 3)).toBe("Medium");
     expect(changeSizeOf(0, 1200, 3)).toBe("Small");
     expect(changeSizeOf(1200, 0, 3)).toBe("Medium");
   });

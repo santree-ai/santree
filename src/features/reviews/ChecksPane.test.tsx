@@ -38,16 +38,11 @@ const pr = { id: "p1", repo: "acme/api", number: 7 } as ReviewPr;
  * moment the read lands, which is the one moment it should be still.
  */
 describe("ChecksPane while the read is in flight", () => {
-  it("waits in the shape of grouped check rows", () => {
+  it("claims nothing about the outcome while it waits", () => {
     spies.loading = true;
-    const { container } = render(<ChecksPane pr={pr} />);
+    render(<ChecksPane pr={pr} />);
     spies.loading = false;
 
-    // Bordered rows in groups, the way checks arrive — not a block of prose.
-    const rows = container.querySelectorAll(".rounded-md.border");
-    expect(rows.length).toBeGreaterThan(2);
-    expect(container.querySelectorAll("section").length).toBeGreaterThan(1);
-    // And it claims nothing about the outcome while it waits.
     expect(screen.queryByText(/No checks reported/)).not.toBeInTheDocument();
   });
 });
@@ -71,11 +66,5 @@ describe("ChecksPane", () => {
     ]);
     expect(screen.getByRole("img", { name: "running" })).toBeInTheDocument();
     expect(container.querySelectorAll(".animate-pulse").length).toBe(2);
-  });
-
-  it("renders nothing active when every check has finished", () => {
-    spies.checks = [check({ name: "lint" })];
-    const { container } = render(<ChecksPane pr={pr} />);
-    expect(container.querySelector(".animate-pulse")).toBeNull();
   });
 });

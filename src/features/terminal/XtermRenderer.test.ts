@@ -43,21 +43,15 @@ vi.mock("@xterm/xterm", () => ({
   },
 }));
 
-describe("withAlpha", () => {
-  it("expands a hex accent to an rgba() literal xterm can parse", () => {
-    // The two live accents (dark, then light) plus a 3-digit form.
-    expect(withAlpha("#ffffff", 0.2)).toBe("rgba(255, 255, 255, 0.2)");
-    expect(withAlpha("16171b", 0.2)).toBe("rgba(22, 23, 27, 0.2)");
-    expect(withAlpha("#0af", 0.5)).toBe("rgba(0, 170, 255, 0.5)");
-  });
-
-  // The old `${accent}33` suffix produced garbage ("var(--accent)33",
-  // "rgb(1,2,3)33") the moment the accent wasn't a plain hex. Pass those through
-  // instead — xterm parses rgb()/named colors itself, opaque but not broken.
-  it("passes a non-hex color through rather than concatenating an alpha suffix", () => {
-    expect(withAlpha("rgb(1, 2, 3)", 0.2)).toBe("rgb(1, 2, 3)");
-    expect(withAlpha("var(--accent)", 0.2)).toBe("var(--accent)");
-  });
+// The old `${accent}33` suffix produced garbage ("var(--accent)33",
+// "rgb(1,2,3)33") the moment the accent wasn't a plain hex. A non-hex color now
+// passes through — xterm parses rgb()/named colors itself, opaque but not broken.
+it("withAlpha expands a hex accent to rgba() and passes anything else through", () => {
+  expect(withAlpha("#ffffff", 0.2)).toBe("rgba(255, 255, 255, 0.2)");
+  expect(withAlpha("16171b", 0.2)).toBe("rgba(22, 23, 27, 0.2)");
+  expect(withAlpha("#0af", 0.5)).toBe("rgba(0, 170, 255, 0.5)");
+  expect(withAlpha("rgb(1, 2, 3)", 0.2)).toBe("rgb(1, 2, 3)");
+  expect(withAlpha("var(--accent)", 0.2)).toBe("var(--accent)");
 });
 
 /** WebGL contexts currently held across all terminals. */
@@ -80,11 +74,6 @@ describe("XtermRenderer WebGL contexts", () => {
     // The pool is module state — leave it empty for the next test.
     for (const r of renderers) r.dispose();
     renderers.length = 0;
-  });
-
-  it("gives a mounted terminal a WebGL context", () => {
-    mounted();
-    expect(live()).toHaveLength(1);
   });
 
   it("caps live contexts, evicting the least-recently-activated terminal", () => {

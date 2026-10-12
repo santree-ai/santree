@@ -69,6 +69,12 @@ fn every_hook_failure_path_exits_zero_and_silently() {
             r#"{"session_id":"s1"}"#.into(),
         ),
         (
+            // Argv the app got wrong must not start a server scoped to nothing.
+            "mcp with incomplete args",
+            vec!["--db", missing_db, "mcp", "--pr", "acme/web"],
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.into(),
+        ),
+        (
             "--db points at a directory, not a database",
             vec!["--db", "/tmp", "Stop"],
             r#"{"session_id":"s1"}"#.into(),
@@ -189,15 +195,4 @@ fn mcp_mode_speaks_only_json_and_reports_failures_to_the_model() {
         .unwrap()
         .contains("isn't a changed file"));
     assert!(!missing_db.exists(), "must never create the app's db");
-}
-
-/// Argv the app got wrong must not start a server scoped to nothing.
-#[test]
-fn mcp_mode_with_incomplete_args_exits_zero_without_serving() {
-    let (code, stdout) = run(
-        &["--db", "/tmp/nope.db", "mcp", "--pr", "acme/web"],
-        r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
-    );
-    assert_eq!(code, Some(0));
-    assert!(stdout.is_empty(), "nothing should have been served");
 }

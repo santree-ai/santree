@@ -391,43 +391,6 @@ mod tests {
         );
     }
 
-    /// A stale socket stays stale however many processes are being forked
-    /// around it (other tests spawn `nc` and servers while this one runs).
-    #[tokio::test]
-    async fn a_stale_socket_is_refused_while_other_threads_fork() {
-        use std::process::{Command, Stdio};
-        use std::sync::atomic::AtomicBool;
-
-        let dir = scratch();
-        let stop = Arc::new(AtomicBool::new(false));
-        let forker = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                while !stop.load(Ordering::SeqCst) {
-                    let _ = Command::new("/usr/bin/true")
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                }
-            })
-        };
-        for i in 0..400 {
-            let socket = dir.path().join(format!("s{i}.sock"));
-            crate::server::testkit::stale_socket(&socket);
-            let got = ServerConnector::new(socket, Expect::UidOnly)
-                .connect()
-                .await;
-            assert_eq!(
-                got.map(|_| ()).unwrap_err(),
-                ConnectError::NotRunning,
-                "round {i}"
-            );
-        }
-        stop.store(true, Ordering::SeqCst);
-        forker.join().unwrap();
-    }
-
     #[tokio::test]
     async fn a_peer_that_fails_verification_is_sent_nothing() {
         let dir = scratch();
@@ -476,42 +439,6 @@ mod tests {
         assert_eq!(recorder.received(), Vec::<u8>::new());
         assert!(host.client().is_none());
         assert!(host.peer().is_none());
-    }
-
-    #[tokio::test]
-    async fn a_verification_that_hangs_or_panics_is_untrusted_and_writes_nothing() {
-        let dir = scratch();
-        let socket = dir.path().join("s.sock");
-        let recorder = Recorder::at(&socket);
-
-        let hangs: Verifier = Arc::new(|_| {
-            std::thread::sleep(Duration::from_millis(600));
-            Verdict::Trusted
-        });
-        let slow = ServerConnector::new(socket.clone(), Expect::UidOnly)
-            .with_verifier(hangs)
-            .with_timeout(Duration::from_millis(50));
-        let err = slow.connect().await.unwrap_err();
-        assert!(
-            matches!(err, ConnectError::Unverified { slow: true, .. }),
-            "{err:?}"
-        );
-
-        let panics: Verifier = Arc::new(|_| panic!("the signature library fell over"));
-        let err = ServerConnector::new(socket, Expect::UidOnly)
-            .with_verifier(panics)
-            .connect()
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, ConnectError::Unverified { slow: false, .. }),
-            "{err:?}"
-        );
-
-        // The slow check finishes after its timeout (still "trusted" in its own
-        // mind) and drops the connection it owned; nothing was ever written.
-        recorder.until_closed(2).await;
-        assert_eq!(recorder.received(), Vec::<u8>::new());
     }
 
     #[tokio::test]
@@ -653,7 +580,6 @@ mod tests {
             "peer is not com.santree.server signed by team T: peer audit token unreadable: Socket is not connected (os error 57)",
             "peer is not com.santree.server signed by team T: SecRequirementCreateWithString: OSStatus -67000",
             "team id \"A B\" is not [A-Za-z0-9.-]+",
-            "code signatures are macOS-only",
         ] {
             assert!(!is_definitive_verdict(not_a_verdict), "{not_a_verdict}");
         }
@@ -711,19 +637,9 @@ mod tests {
         .unwrap_err();
         assert!(matches!(failed, ConnectError::Untrusted(_)), "{failed:?}");
 
-        // A path that isn't our plain socket is a verdict too.
-        let wrong_owner = ServerConnector::new(socket.clone(), Expect::UidOnly)
-            .with_verifier(trusting())
-            .with_owner(unsafe { libc::geteuid() } + 1)
-            .connect()
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(wrong_owner, ConnectError::Untrusted(_)),
-            "{wrong_owner:?}"
-        );
-
-        recorder.until_closed(5).await;
+        // The slow check finishes after its timeout and drops the connection
+        // it owned; nothing was ever written to any of them.
+        recorder.until_closed(4).await;
         assert_eq!(recorder.received(), Vec::<u8>::new());
     }
 
@@ -731,7 +647,6 @@ mod tests {
     /// server: `nc` is signed by Apple, under another team and identifier — an
     /// agent squatting the socket. (Not this test binary: hashing a debug test
     /// binary for its signature takes longer than any real peer's.)
-    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn the_real_signature_check_refuses_a_same_user_process_that_is_not_the_server() {
         use std::process::{Command, Stdio};

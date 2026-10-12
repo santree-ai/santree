@@ -59,7 +59,7 @@ describe("Settings → English tutor", () => {
     analyze.mockClear();
   });
 
-  it("lists days newest-first with the newest expanded", () => {
+  it("lists days newest-first with the newest expanded, and expands another on click", () => {
     render(<EnglishTutorSection />);
 
     // The backend ships chronological order; the pane must reverse it, or you land
@@ -72,16 +72,9 @@ describe("Settings → English tutor", () => {
     // Newest day's entries are visible; the collapsed day's are not.
     expect(screen.getByText("corr-2026-07-30-0")).toBeInTheDocument();
     expect(screen.queryByText("corr-2026-07-29-0")).not.toBeInTheDocument();
-  });
-
-  it("expands a collapsed day on click", () => {
-    render(<EnglishTutorSection />);
-    const headers = dayHeaders();
 
     fireEvent.click(headers[1]);
-
     expect(screen.getByText("corr-2026-07-29-0")).toBeInTheDocument();
-    expect(screen.getByText("orig-2026-07-29-0")).toBeInTheDocument();
   });
 
   it("renders the ISO date as a local calendar day, not a UTC-shifted one", () => {

@@ -51,45 +51,30 @@ function renderSection(checks: PrCheck[], items: typeof spies.items = []) {
 }
 
 describe("PrChecksSection", () => {
-  it("summarizes the run by outcome", () => {
-    renderSection([
-      check({ name: "a", status: "Success" }),
-      check({ name: "b", status: "Success" }),
-      check({ name: "c", status: "Failure" }),
-    ]);
-    expect(screen.getByText("passing").previousSibling).toHaveTextContent("2");
-    expect(screen.getByText("failing").previousSibling).toHaveTextContent("1");
-  });
-
   /** A queued/in-progress run is what you're waiting on — it gets counted by
-   *  name in the summary and listed above the finished checks, rather than
+   *  name in the summary and listed after failures but above the passed checks, rather than
    *  disappearing into the "other" tally. */
-  it("counts running checks and lists them above the finished ones", () => {
+  it("summarizes the run by outcome, listing running checks above the passed ones", () => {
     renderSection([
       check({ name: "lint", status: "Success" }),
       check({ name: "docs", status: "Skipped" }),
       check({ name: "e2e", status: "Pending" }),
       check({ name: "build", status: "Pending" }),
+      check({ name: "unit", status: "Failure" }),
     ]);
 
+    expect(screen.getByText("failing").previousSibling).toHaveTextContent("1");
     expect(screen.getByText("running").previousSibling).toHaveTextContent("2");
     expect(screen.getByText("other").previousSibling).toHaveTextContent("1");
 
     // The section headers, in the order they render.
     const headers = screen.getAllByTitle(/⌘-click for all/);
     expect(headers.map((h) => h.textContent?.trim())).toEqual([
+      "1 failed",
       "2 running",
       "1 passed",
       "1 skipped",
     ]);
-  });
-
-  /** The static glyph reads as an outcome; a running check hasn't got one, so it
-   *  wears the app's pulsing in-progress dot instead. */
-  it("marks a running check as active rather than settled", () => {
-    const { container } = renderSection([check({ name: "e2e", status: "Pending" })]);
-    expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("img", { name: "running" }).length).toBe(1);
   });
 
   /** A repo can run a hundred path-filter checks on one change. Listing them by
@@ -110,23 +95,28 @@ describe("PrChecksSection", () => {
     expect(screen.getByText("failing")).toBeInTheDocument();
   });
 
-  it("expands a check to its metadata, not its output", () => {
+  it("expands a check to its metadata, and opens its log in the main area", () => {
     renderSection([check()]);
     fireEvent.click(screen.getByRole("button", { name: /test \(ubuntu-latest\)/ }));
-
-    expect(screen.getByText("Status:")).toBeInTheDocument();
     expect(screen.getByText("check #2")).toBeInTheDocument();
     expect(screen.getByText("workflow #1")).toBeInTheDocument();
-    // The log itself is a main-area view, reached from here.
-    expect(screen.getByText("View full details")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("View full details"));
+    expect(spies.showCheckLog).toHaveBeenCalledWith({
+      jobId: 2,
+      name: "test (ubuntu-latest)",
+      url: "https://github.com/acme/api/actions/runs/1/job/2",
+      prRepo: "acme/api",
+    });
   });
 
   /** A status context has no Actions run behind it, so there is no log to open —
    *  and AGENTS.md forbids rendering a control that can't do anything. */
-  it("offers no log for a check with no job", () => {
+  it("offers no log for a check with no job, and no queueing for one that passed", () => {
     renderSection([check({ status: "Success", jobId: null, runId: null })]);
     fireEvent.click(screen.getByRole("button", { name: /test \(ubuntu-latest\)/ }));
     expect(screen.queryByText("View full details")).toBeNull();
+    expect(screen.queryByText("Add to queue")).toBeNull();
   });
 
   it("queues a failing check by name", () => {
@@ -139,28 +129,9 @@ describe("PrChecksSection", () => {
     );
   });
 
-  it("won't offer to queue a check that passed", () => {
-    renderSection([check({ status: "Success" })]);
-    fireEvent.click(screen.getByRole("button", { name: /test \(ubuntu-latest\)/ }));
-    expect(screen.queryByText("Add to queue")).toBeNull();
-  });
-
   it("says so when the check is already queued", () => {
     renderSection([check()], [{ source: "check", sourceId: "test (ubuntu-latest)" }]);
     fireEvent.click(screen.getByRole("button", { name: /test \(ubuntu-latest\)/ }));
     expect(screen.getByText("In queue")).toBeInTheDocument();
-  });
-
-  it("opens the log in the main area with what it needs to fetch it", () => {
-    renderSection([check()]);
-    fireEvent.click(screen.getByRole("button", { name: /test \(ubuntu-latest\)/ }));
-    fireEvent.click(screen.getByText("View full details"));
-
-    expect(spies.showCheckLog).toHaveBeenCalledWith({
-      jobId: 2,
-      name: "test (ubuntu-latest)",
-      url: "https://github.com/acme/api/actions/runs/1/job/2",
-      prRepo: "acme/api",
-    });
   });
 });

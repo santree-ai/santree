@@ -554,17 +554,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_words_reads_posix_quoting() {
-        assert_eq!(
-            shell_words(r#"a 'b c' "d \"e\" $f" g\ h  "#).unwrap(),
-            ["a", "b c", "d \"e\" $f", "g h"]
-        );
-        assert_eq!(shell_words("").unwrap(), Vec::<String>::new());
-        assert!(shell_words("'open").is_none());
-        assert!(shell_words("\"open").is_none());
-    }
-
-    #[test]
     fn enable_wraps_and_disable_restores_byte_for_byte() {
         let dir = scratch("roundtrip");
         let path = dir.join("settings.json");

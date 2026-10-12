@@ -130,14 +130,11 @@ describe("PrThreadCard", () => {
     expect(spies.resolve).toHaveBeenCalledWith({ threadId: "PRRT_1", resolved: false });
   });
 
-  it("hides resolve when GitHub says the viewer can't", () => {
-    const { queryByText } = card(thread({ viewerCanResolve: false }));
-    expect(queryByText("Resolve")).toBeNull();
-  });
-
-  it("hides reply when there's no root comment to reply under", () => {
-    const { queryByText } = card(thread({ replyToId: "" }));
-    expect(queryByText("Reply")).toBeNull();
+  it("hides resolve when GitHub says the viewer can't, and reply with no root to reply under", () => {
+    const noResolve = card(thread({ viewerCanResolve: false }));
+    expect(noResolve.queryByText("Resolve")).toBeNull();
+    noResolve.unmount();
+    expect(card(thread({ replyToId: "" })).queryByText("Reply")).toBeNull();
   });
 
   it("marks an unsubmitted comment as a draft, with nothing to act on", () => {
@@ -180,9 +177,6 @@ describe("draftCount", () => {
         ]),
       ),
     ).toBe(2);
-  });
-
-  it("is zero with nothing pending, and on an unloaded detail", () => {
     expect(draftCount(detail([thread()]))).toBe(0);
     expect(draftCount(undefined)).toBe(0);
   });

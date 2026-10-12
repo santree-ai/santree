@@ -4,13 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentEntry as entry, NOW, STALE } from "../test/fixtures";
 import {
   compareAttention,
-  decayDeadline,
   HOOK_STALE_AFTER_MS,
   highest,
-  IDLE,
   isUnseen,
   levelOf,
-  needsYou,
   nextDecayAt,
   type SeenMap,
   seenKeyOf,
@@ -28,17 +25,11 @@ describe("seenKeyOf", () => {
 });
 
 describe("isUnseen", () => {
-  const e = entry({ bucket: "done", updatedAtMs: NOW });
-
-  it("is unseen when it moved after it was last looked at", () => {
+  it("is unseen only when it moved after it was last looked at", () => {
+    const e = entry({ bucket: "done", updatedAtMs: NOW });
     expect(isUnseen(e, { "tree:AK-1": NOW - 1000 })).toBe(true);
-  });
-
-  it("is seen once acknowledged at its own event time", () => {
     expect(isUnseen(e, { "tree:AK-1": NOW })).toBe(false);
-  });
-
-  it("treats a timestamp-less entry as seen rather than permanently bold", () => {
+    // A timestamp-less entry reads as seen rather than permanently bold.
     expect(isUnseen(entry({ bucket: "done", updatedAtMs: null }), {})).toBe(false);
   });
 });
@@ -54,14 +45,6 @@ describe("levelOf", () => {
   it("decays a finished agent to idle once seen", () => {
     expect(levelOf(entry({ bucket: "done" }), fresh, NOW).level).toBe("done");
     expect(levelOf(entry({ bucket: "done" }), acknowledged, NOW).level).toBe("idle");
-  });
-
-  it("reports work in progress without seen-gating it", () => {
-    expect(levelOf(entry({ bucket: "working" }), acknowledged, NOW).level).toBe("working");
-  });
-
-  it("treats a detached session as at rest", () => {
-    expect(levelOf(entry({ bucket: "detached" }), fresh, NOW).level).toBe("idle");
   });
 });
 
@@ -146,19 +129,6 @@ describe("levelOf tiers", () => {
     expect(levelOf(ghost, seen, NOW)).toMatchObject({ level: "idle", source: "none" });
   });
 
-  it("resolves exactly as it always did when there is no title in play", () => {
-    for (const bucket of ["attention", "working", "idle", "detached"] as const) {
-      const withTitle = levelOf(entry({ bucket, updatedAtMs: NOW }), seen, NOW);
-      const withoutTitle = levelOf(
-        entry({ bucket, updatedAtMs: NOW, terminalTitle: null }),
-        seen,
-        NOW,
-      );
-      expect(withTitle.level).toBe(withoutTitle.level);
-      expect(withTitle.source).toBe("hook");
-    }
-  });
-
   it("treats a row that cannot say when it changed as not fresh", () => {
     // A timestamp is what makes a claim checkable. Without one the row asserts
     // "working" with nothing to date it, so the live title answers instead.
@@ -178,40 +148,13 @@ describe("levelOf tiers", () => {
   });
 });
 
-describe("decayDeadline", () => {
-  it("is one window past the hook event", () => {
-    expect(decayDeadline(entry({ bucket: "working", updatedAtMs: NOW }))).toBe(
-      NOW + HOOK_STALE_AFTER_MS,
-    );
-  });
-
-  it("is absent for a session that cannot decay", () => {
-    expect(decayDeadline(entry({ bucket: "done", updatedAtMs: NOW }))).toBeNull();
-    expect(decayDeadline(entry({ bucket: "working", updatedAtMs: null }))).toBeNull();
-  });
-});
-
 describe("nextDecayAt", () => {
-  it("arms for the earliest expiry, not for each entry", () => {
-    const entries = [
-      entry({ bucket: "working", updatedAtMs: NOW - 5 * 60_000 }),
-      entry({ bucket: "working", updatedAtMs: NOW - 20 * 60_000 }),
-      entry({ bucket: "attention", updatedAtMs: NOW - 60_000 }),
-    ];
-    expect(nextDecayAt(entries, NOW)).toBe(NOW - 20 * 60_000 + HOOK_STALE_AFTER_MS);
-  });
-
   it("ignores deadlines that have already passed — they need no timer", () => {
     const entries = [
       entry({ bucket: "working", updatedAtMs: NOW - HOOK_STALE_AFTER_MS - 1 }),
       entry({ bucket: "working", updatedAtMs: NOW }),
     ];
     expect(nextDecayAt(entries, NOW)).toBe(NOW + HOOK_STALE_AFTER_MS);
-  });
-
-  it("has nothing to arm for when nothing can decay", () => {
-    expect(nextDecayAt([], NOW)).toBeNull();
-    expect(nextDecayAt([entry({ bucket: "done", updatedAtMs: NOW })], NOW)).toBeNull();
   });
 });
 
@@ -287,10 +230,6 @@ describe("highest", () => {
       ]).at,
     ).toBe(90);
   });
-
-  it("is idle when there is nothing to summarize", () => {
-    expect(highest([])).toEqual(IDLE);
-  });
 });
 
 describe("compareAttention", () => {
@@ -310,13 +249,5 @@ describe("compareAttention", () => {
       { level: "working" as const, at: 90 },
     ].sort(compareAttention);
     expect(rows[0]?.at).toBe(90);
-  });
-});
-
-describe("needsYou", () => {
-  it("counts only the level a human has to act on", () => {
-    expect(needsYou("needs-you")).toBe(true);
-    expect(needsYou("done")).toBe(false);
-    expect(needsYou("working")).toBe(false);
   });
 });

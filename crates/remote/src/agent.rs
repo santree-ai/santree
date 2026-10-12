@@ -237,33 +237,10 @@ fn verdict(line: &[u8]) -> Result<AgentOk, ConnectError> {
 mod tests {
     use super::*;
 
+    /// The ok line and every refusal are pinned through the fake agent
+    /// (tests.rs); this is a first line that is neither.
     #[test]
-    fn the_socket_is_the_agents() {
-        let path = socket_path();
-        assert!(
-            path.ends_with("daedalus-agent/run/santree.sock"),
-            "{path:?}"
-        );
-        assert!(path.is_absolute());
-    }
-
-    #[test]
-    fn verdicts_read_as_ok_or_refusals() {
-        assert_eq!(
-            verdict(br#"{"id":null,"ok":{"host":"box:7789","node":"00ff","agent":"0.22.0"}}"#),
-            Ok(AgentOk {
-                host: "box:7789".into(),
-                node: "00ff".into(),
-                agent: "0.22.0".into(),
-            })
-        );
-        assert_eq!(
-            verdict(br#"{"id":null,"err":{"code":"santree_off","msg":"off"}}"#),
-            Err(ConnectError::Refused {
-                refusal: Refusal::SantreeOff,
-                msg: "off".into(),
-            })
-        );
+    fn a_malformed_verdict_is_a_failure() {
         for garbage in [
             &b"not json"[..],
             br#"{"id":null}"#,

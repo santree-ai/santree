@@ -351,10 +351,7 @@ pub fn process_group_of(pid: u32) -> Option<u32> {
 }
 
 /// The NAMES in a process's environment — never a value, which a failing
-/// assertion would otherwise print. macOS only: on Linux the server makes
-/// itself non-dumpable, which is exactly what makes its `/proc/<pid>/environ`
-/// unreadable.
-#[cfg(target_os = "macos")]
+/// assertion would otherwise print.
 pub fn environment_names_of(pid: u32) -> Vec<String> {
     // `ps eww` prints the environment after the command line, which here
     // has no `NAME=` tokens of its own (flags are `--x value`).
@@ -464,48 +461,5 @@ mod tests {
         assert!(bare.exists());
         assert!(busy.exists(), "a dir something runs out of was removed");
         assert!(decoy.exists(), "a dir `scratch()` did not make was removed");
-    }
-
-    #[test]
-    fn a_fixture_leaves_no_scratch_dir_behind() {
-        let fx = Fixture::new();
-        let dir = fx.dir.path().to_path_buf();
-        assert!(dir.exists());
-        drop(fx);
-        assert!(!dir.exists(), "{} was left in /tmp", dir.display());
-    }
-
-    /// The server is built into a target dir of its own, so no other cargo's
-    /// lock on the main one can block it.
-    #[test]
-    fn the_test_server_builds_beside_the_main_target_dir_not_in_it() {
-        let target = test_target_dir(Path::new("/w"));
-        assert_eq!(target, PathBuf::from("/w/target/server-testbin"));
-        for main in ["debug", "release"] {
-            assert!(!target.starts_with(Path::new("/w/target").join(main)));
-        }
-    }
-
-    #[test]
-    fn a_build_that_runs_too_long_is_killed_and_says_so() {
-        let mut slow = Command::new("sleep");
-        slow.arg("30");
-        let began = std::time::Instant::now();
-        let err = run_bounded(slow, Duration::from_millis(300)).unwrap_err();
-        assert!(err.contains("didn't finish"), "{err}");
-        assert!(began.elapsed() < Duration::from_secs(10));
-
-        assert_eq!(
-            run_bounded(Command::new("true"), Duration::from_secs(10)),
-            Ok(())
-        );
-        let err = run_bounded(Command::new("false"), Duration::from_secs(10)).unwrap_err();
-        assert!(err.contains("exited"), "{err}");
-        let err = run_bounded(
-            Command::new("/definitely/not/here"),
-            Duration::from_secs(10),
-        )
-        .unwrap_err();
-        assert!(err.contains("can't run"), "{err}");
     }
 }

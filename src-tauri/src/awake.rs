@@ -1,5 +1,5 @@
 //! Keep-awake: hold the machine awake (no display sleep, so no lock screen)
-//! while santree is running long agent sessions. macOS only.
+//! while santree is running long agent sessions.
 //!
 //! Implemented by spawning `/usr/bin/caffeinate -d -i -w <our pid>`: `-d`
 //! blocks display sleep (the thing that triggers the lock screen), `-i` blocks
@@ -13,7 +13,7 @@
 //! is absent until the toggle is first used.
 //!
 //! Only a hold that *took* is remembered: [`set`] persists the resulting state,
-//! never the requested one, so a failed spawn or a non-macOS run can't leave a
+//! never the requested one, so a failed spawn can't leave a
 //! phantom "on" behind for the next launch to trip over. With a local server the
 //! hold is the server's to take: the wish is remembered (the server is told it
 //! on every connect), and the toggle shows only what the server confirmed.
@@ -32,11 +32,6 @@ use crate::settings;
 /// [`settings::validate_user_scope`] — because a value written there would be
 /// remembered without a `caffeinate` ever being spawned.
 pub const KEEP_AWAKE_KEY: &str = "keep_awake";
-
-/// Whether this platform can hold the machine awake at all. Compiled on every
-/// platform (the bindings export runs on Linux in CI, so the command set must
-/// not vary by OS); only the value is platform-dependent.
-const SUPPORTED: bool = cfg!(target_os = "macos");
 
 /// The current keep-awake state, as the chrome needs it: `supported` decides
 /// whether the toggle renders at all, `active` its on/off look.
@@ -81,10 +76,10 @@ impl KeepAwake {
     pub fn status(&self) -> KeepAwakeStatus {
         let active = match self {
             Self::Own(child) => alive(&mut child.lock().unwrap()),
-            Self::Server { held, .. } => SUPPORTED && held.load(Ordering::SeqCst),
+            Self::Server { held, .. } => held.load(Ordering::SeqCst),
         };
         KeepAwakeStatus {
-            supported: SUPPORTED,
+            supported: true,
             active,
         }
     }
@@ -107,7 +102,7 @@ impl KeepAwake {
 
     /// Turn the hold on or off at the process level; returns what to remember
     /// for the next launch: for a hold of this process's own, the resulting
-    /// state (the spawn can fail, and unsupported platforms stay off); for the
+    /// state (the spawn can fail); for the
     /// server's, the wish, which it is told on every connect.
     ///
     /// Private on purpose: every caller goes through [`set`] or [`restore`], so
@@ -116,14 +111,13 @@ impl KeepAwake {
     fn apply(&self, on: bool) -> std::io::Result<bool> {
         let slot = match self {
             Self::Server { wanted, .. } => {
-                let on = on && SUPPORTED;
                 wanted.store(on, Ordering::SeqCst);
                 return Ok(on);
             }
             Self::Own(slot) => slot,
         };
         let mut slot = slot.lock().unwrap();
-        if on && SUPPORTED {
+        if on {
             if !alive(&mut slot) {
                 *slot = Some(spawn_caffeinate()?);
             }
@@ -188,36 +182,24 @@ mod tests {
 
     /// With a local server the hold is the server's: turning it on here spawns
     /// no `caffeinate` of the app's (which would die with the app, and be a
-    /// second assertion beside the server's), and the state is what the app
-    /// remembers for the server to be told.
-    /// With a local server the hold is the server's: turning it on here spawns
-    /// no `caffeinate` of the app's (which would die with the app, and be a
     /// second assertion beside the server's), and the wish is what the server
-    /// is told.
+    /// is told. The toggle shows what holds the Mac awake, not what was asked
+    /// for: a hold the server hasn't confirmed is not on, and one it confirmed is.
     #[test]
-    fn a_hold_delegated_to_the_server_spawns_nothing_here() {
+    fn a_hold_delegated_to_the_server_spawns_nothing_and_is_on_once_confirmed() {
         let awake = KeepAwake::delegated_to_server();
         assert!(!awake.wanted());
-        assert_eq!(awake.apply(true).unwrap(), SUPPORTED);
-        assert_eq!(awake.wanted(), SUPPORTED);
+        assert!(awake.apply(true).unwrap());
+        assert!(awake.wanted());
+        assert!(!awake.status().active, "on before the server held it");
+        awake.confirm(true);
+        assert!(awake.status().active);
+        awake.confirm(false);
+        assert!(!awake.status().active, "the server let go");
         assert!(!awake.apply(false).unwrap());
         assert!(!awake.wanted());
     }
 
-    /// The toggle shows what holds the Mac awake, not what was asked for: a
-    /// hold the server hasn't confirmed is not on, and one it confirmed is.
-    #[test]
-    fn a_hold_delegated_to_the_server_is_on_only_once_the_server_holds_it() {
-        let awake = KeepAwake::delegated_to_server();
-        awake.apply(true).unwrap();
-        assert!(!awake.status().active, "on before the server held it");
-        awake.confirm(true);
-        assert_eq!(awake.status().active, SUPPORTED);
-        awake.confirm(false);
-        assert!(!awake.status().active, "the server let go");
-    }
-
-    #[cfg(target_os = "macos")]
     #[test]
     fn without_a_server_the_app_holds_the_machine_awake_itself() {
         let awake = KeepAwake::default();

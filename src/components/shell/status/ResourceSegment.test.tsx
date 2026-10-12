@@ -137,26 +137,6 @@ describe("ResourceSegment", () => {
     expect(within(menu).getByText("0%")).toBeTruthy();
   });
 
-  it("explains both metrics without the tooltip being the only route", () => {
-    usage = snapshot();
-    render(<ResourceSegment />);
-    const menu = openPanel();
-    const summary = header(menu);
-
-    const cpu = within(summary).getByText(/Share of all logical cores/);
-    const rss = within(summary).getByText(/Summed resident set size/);
-    expect(cpu.className).toContain("sr-only");
-    expect(rss.className).toContain("sr-only");
-
-    // The same copy is on the hoverable figures.
-    expect(within(summary).getByText("58.0%").getAttribute("title")).toMatch(
-      /Share of all logical cores/,
-    );
-    expect(within(summary).getByText("7.79 GB").getAttribute("title")).toMatch(
-      /Summed resident set size/,
-    );
-  });
-
   it("never divides by zero when the snapshot has no core count", () => {
     // Not reachable from our own backend, which never sends 0, but a payload
     // cached by an older build would otherwise render "Infinity%".

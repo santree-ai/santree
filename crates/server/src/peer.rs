@@ -2,13 +2,13 @@
 //!
 //! Every agent in a santree PTY runs as the same uid as santree, so a uid check
 //! alone would let one agent attach to, read, or type into another agent's
-//! terminal. On macOS the server therefore also requires its peer to be
+//! terminal. The server therefore also requires its peer to be
 //! code-signed by the same team with the app's identifier, and the app checks
 //! the server the same way, so a squatted socket gets neither keystrokes nor
 //! env secrets. The check reads the peer's audit token from the socket — never
 //! its pid, which a dead peer's successor could reuse.
 //!
-//! Without a team id (dev builds, Linux) the caller passes `None` and only the
+//! Without a team id (dev builds) the caller passes `None` and only the
 //! uid is checked.
 
 use std::os::fd::RawFd;
@@ -67,7 +67,6 @@ fn is_plain(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn peer_uid(fd: RawFd) -> std::io::Result<libc::uid_t> {
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
@@ -80,50 +79,6 @@ fn peer_uid(fd: RawFd) -> std::io::Result<libc::uid_t> {
     Ok(uid)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn peer_uid(fd: RawFd) -> std::io::Result<libc::uid_t> {
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: `cred` is a writable ucred and `len` holds its exact size, which
-    // is what SO_PEERCRED writes; an invalid fd is reported through the return
-    // value.
-    let rc = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut cred as *mut libc::ucred).cast(),
-            &mut len,
-        )
-    };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if len as usize != std::mem::size_of::<libc::ucred>() {
-        return Err(std::io::Error::other("short SO_PEERCRED"));
-    }
-    Ok(cred.uid)
-}
-
-#[cfg(not(target_os = "macos"))]
-mod imp {
-    use super::{Identity, Verdict};
-    use std::os::fd::RawFd;
-
-    pub fn own_identity() -> Identity {
-        Identity::Unsigned
-    }
-
-    pub fn check_signature(_fd: RawFd, _team: &str, _identifier: &str) -> Verdict {
-        Verdict::Refused("code signatures are macOS-only".into())
-    }
-}
-
-#[cfg(target_os = "macos")]
 mod imp {
     use super::{Identity, Verdict};
     use std::ffi::{c_char, c_void};
@@ -489,17 +444,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn a_team_is_refused_off_macos() {
-        let (a, _b) = UnixStream::pair().unwrap();
-        assert_eq!(
-            verify(a.as_raw_fd(), Some("ABCDE12345"), "x"),
-            Verdict::Refused("code signatures are macOS-only".into())
-        );
-    }
-
-    #[cfg(target_os = "macos")]
     mod apple_peer {
         use std::os::unix::net::{UnixListener, UnixStream};
         use std::path::Path;
@@ -559,7 +503,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn audit_token_reaches_the_requirement_check() {
         use super::imp::check_requirement;
@@ -579,7 +522,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_failed_copy_is_an_error_not_a_crash() {
         use super::imp::check_requirement;
@@ -592,7 +534,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_hung_up_peer_is_refused() {
         let peer = apple_peer::nc();
@@ -603,7 +544,6 @@ mod tests {
         assert!(err.starts_with("peer audit token unreadable"), "{err}");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn the_peer_is_the_connected_process_not_this_one() {
         use super::imp::check_requirement;

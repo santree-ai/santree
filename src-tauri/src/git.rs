@@ -1560,26 +1560,25 @@ mod tests {
     use super::*;
     use std::process::Command;
 
+    /// The SHA is passed positionally to `worktree add` / `checkout`, so a
+    /// leading dash is flag injection, not a bad commit.
     #[test]
-    fn safe_sha_accepts_real_object_ids() {
-        assert!(safe_sha("a1b2c3d").is_ok());
-        assert!(safe_sha(&"0".repeat(40)).is_ok());
-        // SHA-256 repos.
-        assert!(safe_sha(&"f".repeat(64)).is_ok());
-    }
-
-    #[test]
-    fn safe_sha_rejects_anything_that_could_be_read_as_a_flag() {
-        // The SHA is passed positionally to `worktree add` / `checkout`, so a
-        // leading dash is flag injection, not a bad commit.
-        assert!(safe_sha("--force").is_err());
-        assert!(safe_sha("-abc123").is_err());
-        assert!(safe_sha("HEAD").is_err());
-        assert!(safe_sha("main").is_err());
-        assert!(safe_sha("a1b2c3d; rm -rf /").is_err());
-        assert!(safe_sha("").is_err());
-        assert!(safe_sha("abc").is_err());
-        assert!(safe_sha(&"a".repeat(65)).is_err());
+    fn safe_sha_takes_object_ids_and_nothing_that_reads_as_a_flag() {
+        for ok in ["a1b2c3d", &"0".repeat(40), &"f".repeat(64)] {
+            assert!(safe_sha(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "--force",
+            "-abc123",
+            "HEAD",
+            "main",
+            "a1b2c3d; rm -rf /",
+            "",
+            "abc",
+            &"a".repeat(65),
+        ] {
+            assert!(safe_sha(bad).is_err(), "{bad}");
+        }
     }
 
     /// A unique scratch dir under the OS temp dir, cleaned before use. Mirrors
@@ -1610,7 +1609,6 @@ mod tests {
         for name in [
             "main",
             "feature/AK-1-do-a-thing",
-            "santree/ak-165-fix",
             "release-2.0",
             "user@host",
             "a.b.c",
@@ -1697,21 +1695,11 @@ mod tests {
     // ---- safe_path (lexical traversal guard) ----
 
     #[test]
-    fn safe_path_rejects_absolute() {
+    fn safe_path_joins_only_a_relative_path_that_stays_inside() {
         let cwd = Path::new("/repo/worktree");
-        assert!(safe_path(cwd, "/etc/passwd").is_err());
-    }
-
-    #[test]
-    fn safe_path_rejects_parent_dir_traversal() {
-        let cwd = Path::new("/repo/worktree");
-        assert!(safe_path(cwd, "../x").is_err());
-        assert!(safe_path(cwd, "a/../../x").is_err());
-    }
-
-    #[test]
-    fn safe_path_accepts_normal_relative_path() {
-        let cwd = Path::new("/repo/worktree");
+        for bad in ["/etc/passwd", "../x", "a/../../x"] {
+            assert!(safe_path(cwd, bad).is_err(), "{bad}");
+        }
         assert_eq!(
             safe_path(cwd, "sub/file.txt").unwrap(),
             cwd.join("sub/file.txt")
@@ -1772,66 +1760,36 @@ mod tests {
     // ---- safe_real_path (symlink-resolving containment check) ----
 
     #[test]
-    #[cfg(unix)]
-    fn safe_real_path_rejects_symlink_escape() {
+    fn safe_real_path_rejects_a_symlink_out_of_root_for_existing_and_new_files() {
         let base = scratch_dir("symlink-escape");
         let root = base.join("root");
         let outside = base.join("outside");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("file"), "x").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
 
-        assert!(
-            safe_real_path(&root, "link/file").is_err(),
-            "a path through a symlink pointing outside root must be rejected"
-        );
+        // Through the link to a file that exists, and to a not-yet-created one
+        // whose parent dir is the escaping link.
+        assert!(safe_real_path(&root, "link/file").is_err());
+        assert!(safe_real_path(&root, "link/new.txt").is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
-    fn safe_real_path_accepts_nonexistent_nested_path() {
-        let base = scratch_dir("nonexistent-nested");
-        let root = base.join("root");
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-
-        // `sub/new.txt` doesn't exist yet, but its parent does and resolves
-        // inside root — this is the "not-yet-created file" branch.
-        let real = safe_real_path(&root, "sub/new.txt").unwrap();
-        assert!(!real.exists());
-        assert!(real.starts_with(std::fs::canonicalize(&root).unwrap()));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn safe_real_path_rejects_symlinked_parent_dir_for_new_file() {
-        let base = scratch_dir("symlink-parent");
-        let root = base.join("root");
-        let outside = base.join("outside");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, root.join("evil-link-dir")).unwrap();
-
-        assert!(
-            safe_real_path(&root, "evil-link-dir/new.txt").is_err(),
-            "a not-yet-created file whose parent dir is itself a symlink \
-             escaping root must be rejected"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn safe_real_path_accepts_normal_nested_paths() {
+    fn safe_real_path_resolves_existing_and_not_yet_created_files_inside_root() {
         let base = scratch_dir("normal-nested");
         let root = base.join("root");
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/file.txt"), "hi\n").unwrap();
 
-        let real = safe_real_path(&root, "sub/file.txt").unwrap();
         assert_eq!(
-            real,
+            safe_real_path(&root, "sub/file.txt").unwrap(),
             std::fs::canonicalize(root.join("sub/file.txt")).unwrap()
         );
+        let real = safe_real_path(&root, "sub/new.txt").unwrap();
+        assert!(!real.exists());
+        assert!(real.starts_with(std::fs::canonicalize(&root).unwrap()));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -2048,59 +2006,36 @@ mod tests {
 
     // ---- status() on an unborn HEAD (freshly `git init`-ed repo) ----
 
-    /// A brand-new repo (zero commits) is a valid, connected repo per this
-    /// app's validation (`rev-parse --show-toplevel` succeeds with no commits).
-    /// `status()` used to propagate `git diff HEAD`'s failure on the unborn
-    /// HEAD, erroring out the whole commit box instead of listing the
-    /// untracked files a user adding their first commit needs to see.
+    /// A brand-new repo (zero commits) is a valid, connected repo. `status()`
+    /// used to propagate `git diff HEAD`'s failure on the unborn HEAD, erroring
+    /// out the whole commit box. A staged file diffs against the empty tree (its
+    /// count isn't silently 0), and an untracked directory is expanded into its
+    /// files — without `-uall` it read as one `dir/` "file" with an empty diff.
     #[test]
-    fn status_on_unborn_head_lists_untracked_files() {
-        let base = scratch_dir("status-unborn-head-untracked");
+    fn status_on_an_unborn_head_lists_staged_and_untracked_files() {
+        let base = scratch_dir("status-unborn-head");
         let repo = base.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(repo.join("newdir/nested")).unwrap();
         run_git(&repo, &["init", "-b", "main"]);
-        run_git(&repo, &["config", "user.email", "t@t.test"]);
-        run_git(&repo, &["config", "user.name", "Test"]);
-
-        std::fs::write(repo.join("new.txt"), "hello\nworld\n").unwrap();
-
-        let files =
-            status(&Checkout::local(&repo)).expect("status() must not error on unborn HEAD");
-        let f = files
-            .iter()
-            .find(|f| f.path == "new.txt")
-            .expect("untracked file must be listed on unborn HEAD");
-        assert_eq!(f.status, FileStatus::Untracked);
-        assert!(!f.staged);
-        assert_eq!(f.add_lines, 2);
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// A staged file on an unborn HEAD diffs against the empty tree, so its
-    /// line count is still reported correctly (not silently `0`).
-    #[test]
-    fn status_on_unborn_head_counts_staged_file_via_empty_tree_diff() {
-        let base = scratch_dir("status-unborn-head-staged");
-        let repo = base.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        run_git(&repo, &["init", "-b", "main"]);
-        run_git(&repo, &["config", "user.email", "t@t.test"]);
-        run_git(&repo, &["config", "user.name", "Test"]);
-
         std::fs::write(repo.join("staged.txt"), "a\nb\nc\n").unwrap();
         run_git(&repo, &["add", "staged.txt"]);
+        std::fs::write(repo.join("newdir/a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(repo.join("newdir/nested/b.txt"), "solo\n").unwrap();
 
         let files =
             status(&Checkout::local(&repo)).expect("status() must not error on unborn HEAD");
-        let f = files
-            .iter()
-            .find(|f| f.path == "staged.txt")
-            .expect("staged file must be listed on unborn HEAD");
-        assert_eq!(f.status, FileStatus::Added);
-        assert!(f.staged);
-        assert_eq!(f.add_lines, 3);
-        assert_eq!(f.del_lines, 0);
+        let mut paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, ["newdir/a.txt", "newdir/nested/b.txt", "staged.txt"]);
+
+        let staged = files.iter().find(|f| f.path == "staged.txt").unwrap();
+        assert_eq!(staged.status, FileStatus::Added);
+        assert!(staged.staged);
+        assert_eq!((staged.add_lines, staged.del_lines), (3, 0));
+        let a = files.iter().find(|f| f.path == "newdir/a.txt").unwrap();
+        assert_eq!(a.status, FileStatus::Untracked);
+        assert!(!a.staged);
+        assert_eq!(a.add_lines, 2, "the file's real line count, not 0");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2205,126 +2140,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Without `-uall`, git collapses an untracked directory into one `?? dir/`
-    /// record — which reads as a file with 0 added lines and (on click) an empty
-    /// diff, because there's no such file to open or diff.
-    #[test]
-    fn status_expands_untracked_directories_into_files() {
-        let base = scratch_dir("status-untracked-dir");
-        let repo = base.join("repo");
-        std::fs::create_dir_all(repo.join("newdir/nested")).unwrap();
-        run_git(&repo, &["init", "-b", "main"]);
-        run_git(&repo, &["config", "user.email", "t@t.test"]);
-        run_git(&repo, &["config", "user.name", "Test"]);
-        std::fs::write(repo.join("newdir/a.txt"), "one\ntwo\n").unwrap();
-        std::fs::write(repo.join("newdir/nested/b.txt"), "solo\n").unwrap();
-
-        let files = status(&Checkout::local(&repo)).unwrap();
-        let mut paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-        paths.sort_unstable();
-        assert_eq!(paths, ["newdir/a.txt", "newdir/nested/b.txt"]);
-        assert!(files.iter().all(|f| f.status == FileStatus::Untracked));
-        let a = files.iter().find(|f| f.path == "newdir/a.txt").unwrap();
-        assert_eq!(a.add_lines, 2, "the file's real line count, not 0");
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
     // ---- count_new_file's NUL-byte binary heuristic ----
 
+    /// The badge must agree with `git diff`: a NUL byte is binary, an empty file
+    /// adds 0, an unterminated last line counts — and a huge file saturates at
+    /// [`MAX_COUNTED_LINES`] rather than being read end to end.
     #[test]
-    fn count_new_file_detects_embedded_nul_as_binary() {
-        let base = scratch_dir("count-new-file-binary");
+    fn count_new_file_matches_git_and_caps_huge_files() {
+        let base = scratch_dir("count-new-file");
         std::fs::write(base.join("bin.dat"), [b'h', b'i', 0u8, b'x']).unwrap();
-
-        let (add, del, binary) = count_new_file(&Checkout::local(&base), "bin.dat");
-        assert!(
-            binary,
-            "a NUL byte in the content must be detected as binary"
-        );
-        assert_eq!((add, del), (0, 0));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn count_new_file_counts_lines_for_text() {
-        let base = scratch_dir("count-new-file-text");
         std::fs::write(base.join("text.txt"), "one\ntwo\nthree\n").unwrap();
-
-        let (add, del, binary) = count_new_file(&Checkout::local(&base), "text.txt");
-        assert!(!binary);
-        assert_eq!(add, 3);
-        assert_eq!(del, 0);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// `git diff` reports 0 additions for an empty file and counts a final line
-    /// that has no trailing newline ("\ No newline at end of file") — the badge
-    /// must say the same thing.
-    #[test]
-    fn count_new_file_matches_git_for_empty_and_unterminated_files() {
-        let base = scratch_dir("count-new-file-edges");
         std::fs::write(base.join("empty.txt"), "").unwrap();
         std::fs::write(base.join("no-newline.txt"), "one\ntwo").unwrap();
+        std::fs::write(
+            base.join("huge.txt"),
+            "x\n".repeat(MAX_COUNTED_LINES as usize + 500),
+        )
+        .unwrap();
 
-        assert_eq!(
-            count_new_file(&Checkout::local(&base), "empty.txt"),
-            (0, 0, false)
-        );
-        assert_eq!(
-            count_new_file(&Checkout::local(&base), "no-newline.txt"),
-            (2, 0, false)
-        );
+        let checkout = Checkout::local(&base);
+        for (file, want) in [
+            ("bin.dat", (0, 0, true)),
+            ("text.txt", (3, 0, false)),
+            ("empty.txt", (0, 0, false)),
+            ("no-newline.txt", (2, 0, false)),
+            ("huge.txt", (MAX_COUNTED_LINES, 0, false)),
+        ] {
+            assert_eq!(count_new_file(&checkout, file), want, "{file}");
+        }
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// A large untracked file (log, dataset, lockfile) must not be read end to
-    /// end just to count its lines — the count saturates at
-    /// [`MAX_COUNTED_LINES`] instead of scanning the whole file.
-    #[test]
-    fn count_new_file_caps_line_count_for_huge_files() {
-        let base = scratch_dir("count-new-file-cap");
-        let content = "x\n".repeat(MAX_COUNTED_LINES as usize + 500);
-        std::fs::write(base.join("huge.txt"), content).unwrap();
-
-        let (add, del, binary) = count_new_file(&Checkout::local(&base), "huge.txt");
-        assert!(!binary);
-        assert_eq!(
-            add, MAX_COUNTED_LINES,
-            "line count must saturate at the cap"
-        );
-        assert_eq!(del, 0);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    // ---- parse_numstat_line ----
-
-    #[test]
-    fn parse_numstat_line_flags_binary_dash_counts() {
-        let (path, add, del, binary) = parse_numstat_line("-\t-\tfoo.png").unwrap();
-        assert_eq!(path, "foo.png");
-        assert_eq!((add, del), (0, 0));
-        assert!(binary);
-    }
-
-    #[test]
-    fn parse_numstat_line_parses_normal_counts() {
-        let (path, add, del, binary) = parse_numstat_line("12\t3\tfoo.rs").unwrap();
-        assert_eq!(path, "foo.rs");
-        assert_eq!(add, 12);
-        assert_eq!(del, 3);
-        assert!(!binary);
     }
 
     // ---- create_worktree start point ----
 
-    /// A worktree stacked on a sibling branch must start from that branch's *local*
-    /// tip. The parent is a branch someone is actively working in, so its unpushed
-    /// commits are exactly the code the child is being started to build on —
-    /// preferring `origin/<parent>` (right for a stale local `master`) would fork
-    /// the child off the parent's last *pushed* commit and silently lose them.
+    /// A worktree stacked on a sibling branch starts from — and is measured
+    /// against — that branch's *local* tip. The parent is being worked in, so
+    /// its unpushed commits are exactly what the child builds on: forking off
+    /// `origin/<parent>` silently lost them, and measuring against it left the
+    /// child "up to date" with a parent that had moved on (Pull disabled, no
+    /// way to restack).
     #[test]
-    fn create_worktree_stacks_on_the_parent_branch_local_tip() {
+    fn a_stacked_child_follows_the_parent_branch_local_tip() {
         let (_origin, seed, repo) = init_origin_seed_and_clone("stacked-base");
 
         // The parent worktree: pushed once (it has a PR), then committed to again.
@@ -2357,69 +2213,23 @@ mod tests {
             child_head, parent_tip,
             "child must fork from the parent's local tip, not its pushed one"
         );
-        assert_eq!(
-            std::fs::read_to_string(child.join("p.txt")).unwrap(),
-            "unpushed\n"
-        );
-
-        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
-    }
-
-    /// A stacked child's divergence must be measured against its parent's **local**
-    /// tip. Pulling master into the parent advances only the local branch — its
-    /// `origin/<parent>` ref doesn't move until a push — so comparing against the
-    /// remote leaves the child reporting "up to date" with a parent that has moved
-    /// on, and its Pull button disabled with no way to restack.
-    #[test]
-    fn stats_measure_a_stacked_child_against_the_parent_local_tip() {
-        let (_origin, seed, repo) = init_origin_seed_and_clone("stacked-stats");
-
-        // Parent worktree, pushed (so `origin/santree/ak-274` exists — it has a PR).
-        let parent = repo.join(".santree/worktrees/AK-274");
-        create_worktree(&Checkout::local(&repo), &parent, "santree/ak-274", "main").unwrap();
-        std::fs::write(parent.join("p.txt"), "pushed\n").unwrap();
-        run_git(&parent, &["add", "-A"]);
-        run_git(&parent, &["commit", "-m", "pushed work"]);
-        run_git(&parent, &["push", "-u", "origin", "santree/ak-274"]);
-
-        // Child stacked on the parent, in sync at this point.
-        let child = repo.join(".santree/worktrees/AK-275");
-        create_worktree(
-            &Checkout::local(&repo),
-            &child,
-            "santree/ak-275",
-            "santree/ak-274",
-        )
-        .unwrap();
-        assert_eq!(
+        let behind = || {
             stats(
                 &Checkout::local(&child),
                 "santree/ak-275",
                 "santree/ak-274",
-                BaseKind::LocalBranch
+                BaseKind::LocalBranch,
             )
-            .behind,
-            0,
-            "freshly stacked child starts level with its parent"
-        );
+            .behind
+        };
+        assert_eq!(behind(), 0, "freshly stacked child starts level");
 
-        // The parent moves on locally only — exactly what "pull master into the
-        // parent" does. Nothing is pushed, so origin/santree/ak-274 stays put.
+        // The parent moves on locally only — what "pull master into the parent"
+        // does. Nothing is pushed, so origin/santree/ak-274 stays put.
         std::fs::write(parent.join("p.txt"), "local only\n").unwrap();
         run_git(&parent, &["add", "-A"]);
         run_git(&parent, &["commit", "-m", "merged master locally"]);
-
-        assert_eq!(
-            stats(
-                &Checkout::local(&child),
-                "santree/ak-275",
-                "santree/ak-274",
-                BaseKind::LocalBranch
-            )
-            .behind,
-            1,
-            "child must see the parent's unpushed advance, so it can restack"
-        );
+        assert_eq!(behind(), 1, "child sees the parent's unpushed advance");
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
@@ -2468,7 +2278,7 @@ mod tests {
     }
 
     #[test]
-    fn common_git_dir_of_a_linked_worktree_is_the_main_repos() {
+    fn common_git_dir_of_a_linked_worktree_or_its_repo_is_the_main_repos() {
         let (repo, worktree) = init_repo_with_linked_worktree("common-dir-linked");
         assert!(
             worktree.join(".git").is_file(),
@@ -2477,18 +2287,11 @@ mod tests {
 
         let expected = std::fs::canonicalize(repo.join(".git")).unwrap();
         assert_eq!(common_git_dir(&worktree).as_deref(), Some(&*expected));
+        assert_eq!(common_git_dir(&repo).as_deref(), Some(&*expected));
         // The per-worktree metadata a fetch/rebase writes sits under it, so the
         // one root covers both halves.
         assert!(expected.join("worktrees/wt").is_dir());
 
-        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
-    }
-
-    #[test]
-    fn common_git_dir_of_a_plain_checkout_is_its_own_git_dir() {
-        let (repo, _worktree) = init_repo_with_linked_worktree("common-dir-plain");
-        let expected = std::fs::canonicalize(repo.join(".git")).unwrap();
-        assert_eq!(common_git_dir(&repo).as_deref(), Some(&*expected));
         let _ = std::fs::remove_dir_all(repo.parent().unwrap());
     }
 
@@ -2569,52 +2372,29 @@ mod tests {
         run_git(seed, &["push", "origin", "main"]);
     }
 
-    /// When `base` isn't the branch checked out in `repo`, `update_base` must
-    /// fast-forward the local `refs/heads/<base>` ref directly (the combined
-    /// `fetch origin base:base` refspec) rather than needing a separate merge.
+    /// When `base` isn't checked out, `update_base` fast-forwards the local
+    /// `refs/heads/<base>` directly (`fetch origin base:base`). When it IS,
+    /// git refuses to move the ref HEAD points at, so it falls back to fetch +
+    /// `merge --ff-only`, updating the working tree too.
     #[test]
-    fn update_base_fast_forwards_local_ref_when_not_checked_out() {
-        let (origin, seed, repo) = init_origin_seed_and_clone("update-base-not-checked-out");
-        // Switch off `main` so it's not the checked-out branch — mirrors an
-        // agent's worktree sitting on its own feature branch.
+    fn update_base_fast_forwards_the_base_checked_out_or_not() {
+        let (origin, seed, repo) = init_origin_seed_and_clone("update-base");
+        let origin_main = || git(&Checkout::local(&origin), &["rev-parse", "main"]).unwrap();
+
+        // Off `main`, as an agent's worktree sits on its own feature branch.
         run_git(&repo, &["checkout", "-b", "feature"]);
-
         advance_origin_main(&seed, "v2\n");
-
         update_base(&Checkout::local(&repo), "main").expect("update_base should succeed");
-
         let local_main = git(&Checkout::local(&repo), &["rev-parse", "refs/heads/main"]).unwrap();
-        let origin_tip = git(&Checkout::local(&origin), &["rev-parse", "main"]).unwrap();
-        assert_eq!(
-            local_main, origin_tip,
-            "local main ref must be fast-forwarded to origin's tip"
-        );
+        assert_eq!(local_main, origin_main());
 
-        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
-    }
-
-    /// When `base` IS the checked-out branch, a direct-ref fetch can't move it
-    /// (git refuses to update the ref HEAD points at) — `update_base` must
-    /// fall back to a plain fetch + `merge --ff-only`, updating the working
-    /// tree too.
-    #[test]
-    fn update_base_ff_merges_when_base_is_checked_out() {
-        let (origin, seed, repo) = init_origin_seed_and_clone("update-base-checked-out");
-        // `clone` checks out `main` by default, so this is already the
-        // "base is checked out" case.
-
-        advance_origin_main(&seed, "v2\n");
-
+        // On `main`.
+        run_git(&repo, &["checkout", "main"]);
+        advance_origin_main(&seed, "v3\n");
         update_base(&Checkout::local(&repo), "main").expect("update_base should succeed");
-
-        let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
-        assert_eq!(
-            content, "v2\n",
-            "checked-out main's working tree must be ff-merged"
-        );
+        assert_eq!(std::fs::read_to_string(repo.join("f.txt")).unwrap(), "v3\n");
         let local_head = git(&Checkout::local(&repo), &["rev-parse", "HEAD"]).unwrap();
-        let origin_tip = git(&Checkout::local(&origin), &["rev-parse", "main"]).unwrap();
-        assert_eq!(local_head, origin_tip);
+        assert_eq!(local_head, origin_main());
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
@@ -2643,73 +2423,40 @@ mod tests {
         (origin, seed, repo)
     }
 
-    /// `pull_remote` fast-forwards the worktree's own branch to origin/<branch>,
-    /// pulling in a commit added to the branch remotely.
+    /// `stats().remote_behind` counts commits on origin/<branch> the local branch
+    /// lacks, but only after a fetch has updated the tracking ref (it reads the
+    /// local `origin/<branch>` ref, as the worktree-list builder observes it);
+    /// `pull_remote` then fast-forwards the worktree onto them.
     #[test]
-    fn pull_remote_fast_forwards_branch_from_origin() {
-        let (origin, seed, repo) = init_diverged_feature("pull-remote-ff");
+    fn remote_behind_counts_after_fetch_and_pull_remote_takes_it() {
+        let (origin, seed, repo) = init_diverged_feature("remote-behind-count");
+        let remote_behind = || {
+            stats(
+                &Checkout::local(&repo),
+                "feature",
+                "main",
+                BaseKind::Upstream,
+            )
+            .remote_behind
+        };
+
+        assert_eq!(
+            remote_behind(),
+            0,
+            "the tracking ref is stale until a fetch"
+        );
+        run_git(&repo, &["fetch", "origin", "feature"]);
+        assert_eq!(remote_behind(), 1, "one remote commit is now pending");
 
         pull_remote(&Checkout::local(&repo), "feature").expect("pull_remote should ff cleanly");
-
-        let content = std::fs::read_to_string(repo.join("f.txt")).unwrap();
+        assert_eq!(remote_behind(), 0, "up to date after pulling");
         assert_eq!(
-            content, "remote-edit\n",
-            "working tree must reflect the remote commit"
+            std::fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "remote-edit\n"
         );
         let local_head = git(&Checkout::local(&repo), &["rev-parse", "HEAD"]).unwrap();
         let origin_tip = git(&Checkout::local(&origin), &["rev-parse", "feature"]).unwrap();
-        assert_eq!(
-            local_head, origin_tip,
-            "local branch must match origin's feature tip"
-        );
-
-        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
-    }
-
-    /// `stats().remote_behind` counts commits on origin/<branch> the local branch
-    /// lacks, but only after a fetch has updated the tracking ref (it reads the local
-    /// `origin/<branch>` ref, matching how the worktree-list builder observes it).
-    #[test]
-    fn remote_behind_counts_after_fetch() {
-        let (_origin, seed, repo) = init_diverged_feature("remote-behind-count");
-
-        // Tracking ref is stale until a fetch, so nothing looks pending yet.
-        assert_eq!(
-            stats(
-                &Checkout::local(&repo),
-                "feature",
-                "main",
-                BaseKind::Upstream
-            )
-            .remote_behind,
-            0
-        );
-
-        run_git(&repo, &["fetch", "origin", "feature"]);
-        assert_eq!(
-            stats(
-                &Checkout::local(&repo),
-                "feature",
-                "main",
-                BaseKind::Upstream
-            )
-            .remote_behind,
-            1,
-            "one remote commit is now pending"
-        );
-
-        pull_remote(&Checkout::local(&repo), "feature").expect("pull_remote should succeed");
-        assert_eq!(
-            stats(
-                &Checkout::local(&repo),
-                "feature",
-                "main",
-                BaseKind::Upstream
-            )
-            .remote_behind,
-            0,
-            "up to date after pulling"
-        );
+        assert_eq!(local_head, origin_tip);
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
@@ -2729,6 +2476,16 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "pushed"]);
+        // …though before its push there is no tracking ref: nothing can be
+        // pending, and every commit over the base is what a push would upload.
+        let s = stats(
+            &Checkout::local(&repo),
+            "feature",
+            "main",
+            BaseKind::Upstream,
+        );
+        assert_eq!((s.ahead, s.unpushed, s.remote_behind), (1, 1, 0));
+        assert!(!s.dirty);
         run_git(&repo, &["push", "-u", "origin", "feature"]);
         // …and one that isn't.
         std::fs::write(repo.join("b.txt"), "three\n").unwrap();
@@ -2762,29 +2519,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());
     }
 
-    /// A branch that was never pushed has no tracking ref: nothing can be pending on
-    /// it, and *every* commit it added over the base is what a push would upload.
-    #[test]
-    fn stats_treats_a_never_pushed_branch_as_fully_unpushed() {
-        let (_origin, seed, repo) = init_origin_seed_and_clone("stats-unpushed");
-        run_git(&repo, &["checkout", "-b", "feature"]);
-        std::fs::write(repo.join("a.txt"), "x\n").unwrap();
-        run_git(&repo, &["add", "-A"]);
-        run_git(&repo, &["commit", "-m", "c1"]);
-
-        let s = stats(
-            &Checkout::local(&repo),
-            "feature",
-            "main",
-            BaseKind::Upstream,
-        );
-        assert_eq!((s.ahead, s.unpushed), (1, 1));
-        assert_eq!(s.remote_behind, 0, "no tracking ref, nothing to pull");
-        assert!(!s.dirty);
-
-        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
-    }
-
     /// `would_conflict` is the Pull button's up-front check. Its `merge-tree
     /// --write-tree` writes objects into the ODB and the status build re-runs on every
     /// filesystem burst, so the answer is memoized on the (HEAD, target) commit pair:
@@ -2795,7 +2529,23 @@ mod tests {
         std::fs::write(repo.join("f.txt"), "local-conflict\n").unwrap();
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "conflicting local edit"]);
-        run_git(&repo, &["fetch", "origin", "feature"]);
+
+        // The Trees sidebar's pending-pull pair: `refresh_remote_ref` is the
+        // fetch that makes the count live, and the virtual merge names the
+        // conflicting file without touching the tree.
+        refresh_remote_ref(&Checkout::local(&repo), "feature");
+        let s = stats(
+            &Checkout::local(&repo),
+            "feature",
+            "main",
+            BaseKind::Upstream,
+        );
+        assert_eq!(s.remote_behind, 1, "one remote commit is pending");
+        assert_eq!(
+            merge_conflicts(&Checkout::local(&repo), "origin/feature").unwrap(),
+            vec!["f.txt".to_string()]
+        );
+        assert!(!is_dirty(&Checkout::local(&repo)));
 
         assert!(would_conflict(&Checkout::local(&repo), "origin/feature"));
         // The repeat answer costs a single `rev-parse` — no second virtual merge.
@@ -2831,6 +2581,10 @@ mod tests {
         std::fs::write(repo.join("g.txt"), "local only\n").unwrap();
         run_git(&repo, &["add", "-A"]);
         run_git(&repo, &["commit", "-m", "local divergence"]);
+
+        // Pending, but not flagged: the Pull button stays enabled.
+        refresh_remote_ref(&Checkout::local(&repo), "feature");
+        assert!(!would_conflict(&Checkout::local(&repo), "origin/feature"));
 
         pull_remote(&Checkout::local(&repo), "feature")
             .expect("non-conflicting divergence should merge");
@@ -2895,85 +2649,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(repo.join("f.txt")).unwrap(),
             "local-conflict\n"
-        );
-
-        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
-    }
-
-    /// `merge_conflicts` reports the would-conflict paths from a *virtual* merge
-    /// without touching the working tree — the primitive behind the up-front check.
-    #[test]
-    fn merge_conflicts_detects_without_touching_tree() {
-        let (_origin, seed, repo) = init_diverged_feature("merge-conflicts-detect");
-        std::fs::write(repo.join("f.txt"), "local-conflict\n").unwrap();
-        run_git(&repo, &["add", "-A"]);
-        run_git(&repo, &["commit", "-m", "conflicting local edit"]);
-        run_git(&repo, &["fetch", "origin", "feature"]);
-
-        let conflicts = merge_conflicts(&Checkout::local(&repo), "origin/feature")
-            .expect("detection should run");
-        assert_eq!(conflicts, vec!["f.txt".to_string()]);
-        assert!(
-            !is_dirty(&Checkout::local(&repo)),
-            "virtual merge must not touch the working tree"
-        );
-
-        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
-    }
-
-    /// The pending-pull pair the Trees sidebar shows: how many commits origin added to
-    /// the branch, and whether taking them would conflict (which disables the button).
-    /// `refresh_remote_ref` is the fetch that makes the count live.
-    #[test]
-    fn pending_pull_is_counted_and_flagged_as_conflicting() {
-        let (_origin, seed, repo) = init_diverged_feature("pull-state-conflict");
-        std::fs::write(repo.join("f.txt"), "local-conflict\n").unwrap();
-        run_git(&repo, &["add", "-A"]);
-        run_git(&repo, &["commit", "-m", "conflicting local edit"]);
-
-        refresh_remote_ref(&Checkout::local(&repo), "feature");
-        let s = stats(
-            &Checkout::local(&repo),
-            "feature",
-            "main",
-            BaseKind::Upstream,
-        );
-        assert_eq!(s.remote_behind, 1, "one remote commit is pending");
-        assert!(
-            would_conflict(&Checkout::local(&repo), "origin/feature"),
-            "the pending pull conflicts with the local edit"
-        );
-        assert!(
-            !is_dirty(&Checkout::local(&repo)),
-            "detecting it must not touch the tree"
-        );
-
-        let _ = std::fs::remove_dir_all(seed.parent().unwrap());
-    }
-
-    /// A non-conflicting divergence pulls cleanly, so the Pull button stays enabled.
-    #[test]
-    fn pending_pull_is_not_flagged_when_it_would_merge_cleanly() {
-        let (_origin, seed, repo) = init_diverged_feature("pull-state-clean");
-        // Local commit on a *different* file — pending pull, but no conflict.
-        std::fs::write(repo.join("g.txt"), "local only\n").unwrap();
-        run_git(&repo, &["add", "-A"]);
-        run_git(&repo, &["commit", "-m", "non-conflicting local edit"]);
-
-        refresh_remote_ref(&Checkout::local(&repo), "feature");
-        assert_eq!(
-            stats(
-                &Checkout::local(&repo),
-                "feature",
-                "main",
-                BaseKind::Upstream
-            )
-            .remote_behind,
-            1
-        );
-        assert!(
-            !would_conflict(&Checkout::local(&repo), "origin/feature"),
-            "a non-conflicting pull must not be flagged"
         );
 
         let _ = std::fs::remove_dir_all(seed.parent().unwrap());

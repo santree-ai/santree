@@ -15,30 +15,18 @@ describe("focus modality", () => {
     initFocusModality();
   });
 
-  it("marks the document while the user is driving with a pointer", () => {
+  it("marks pointer use, keeps it through typing, and clears it on a navigation key", () => {
     expect(marked()).toBe(false);
     window.dispatchEvent(new PointerEvent("pointerdown"));
     expect(marked()).toBe(true);
-  });
 
-  it("clears the mark on a navigation key, so keyboard focus rings again", () => {
-    window.dispatchEvent(new PointerEvent("pointerdown"));
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
-    expect(marked()).toBe(false);
-  });
-
-  /** Typing is not navigating: a character key must not light up rings on
-   *  whatever else happens to be focused. */
-  it("keeps the pointer mark while the user only types characters", () => {
-    window.dispatchEvent(new PointerEvent("pointerdown"));
+    // Typing is not navigating: a character key must not light up rings on
+    // whatever else happens to be focused.
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift" }));
     expect(marked()).toBe(true);
-  });
 
-  it("re-marks when the pointer comes back after keyboard use", () => {
-    window.dispatchEvent(new PointerEvent("pointerdown"));
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab" }));
     expect(marked()).toBe(false);
     window.dispatchEvent(new PointerEvent("pointerdown"));
     expect(marked()).toBe(true);

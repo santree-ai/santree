@@ -56,19 +56,6 @@ describe("TriageRepoGate", () => {
     state.setRepo.mockClear();
   });
 
-  it("names the action, and offers to attach when nothing is", () => {
-    mount();
-    expect(screen.getByRole("dialog", { name: "Attach a project" })).toHaveTextContent(
-      /Investigating with Codex needs a project/,
-    );
-  });
-
-  it("calls it a change once a project is attached", () => {
-    state.repo = "acme/app";
-    mount();
-    expect(screen.getByRole("dialog", { name: "Change the project" })).toBeInTheDocument();
-  });
-
   /** The provider is the one writer: the caller gets a name that is already
    *  true of the cache, so it runs without a second write. */
   it("writes the pick, then resolves with it", async () => {

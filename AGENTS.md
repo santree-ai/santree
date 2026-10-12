@@ -4,7 +4,7 @@ Guidance for working in this repo. Keep it accurate as the code changes.
 
 ## What this is
 
-**santree** — a cross-platform (macOS + Linux) desktop app for **managing AI coding
+**santree** — a macOS desktop app for **managing AI coding
 agents** across a repo's tickets. Tauri 2 + React 19, with a **fully-typed
 Rust ↔ TypeScript bridge** (tauri-specta). Shipped via GitHub Releases with a
 built-in updater, but with ~zero external users — prefer deleting dead/old code
@@ -27,7 +27,7 @@ load-bearing for where new PR work goes; see "Key patterns".
 
 **Terminals outlive the app on a signed build.** santree launches a detached
 `santree-server` that owns this Mac's PTYs, so a quit, a crash or an update never
-ends an agent or a setup script; unsigned, dev and Linux builds keep in-app PTYs
+ends an agent or a setup script; unsigned and dev builds keep in-app PTYs
 unless opted in (`SANTREE_SERVER=1`). `terminal.rs` runs on the
 `sessions::Terminals` facade; liveness consumers honour `Liveness.complete` (an
 unreachable server is "unknown", never "exited"), and agent hooks name a stable
@@ -81,7 +81,7 @@ applied version the resolved set no longer has — and `0028` drops the table.
   test daemon's host; Daedalus's session host to adopt it) +
   `crates/server` (`santree-server`: the local server binary — santree-host on a
   unix socket, built with `--profile server` (panics unwind); its `REVISION`
-  (1 for the first release) is pinned by `revision.lock`: when its code or linked
+  (1 shipped in 0.1.19-beta.1; 2 in 0.1.19-beta.2) is pinned by `revision.lock`: when its code or linked
   crates change, bump it if a release carries it, then run
   `UPDATE_REVISION_LOCK=1 cargo test -p santree-server revision`; docs/server.md
   "Versions and draining").
@@ -94,7 +94,10 @@ applied version the resolved set no longer has — and `0028` drops the table.
   provider, passed explicitly (no aws-lc-rs in its tree, never the process
   default). The engine builds them with nix on an older rustc than
   `rust-toolchain.toml` pins, so they declare `rust-version = "1.95"` and must
-  keep building on it. `santree-host` is not consumed yet but carries the same
+  keep building on it. They are the only code that runs on Linux (the engine's
+  box): ci.yml's `engine-linux` job clippies and tests them there and checks
+  them on rustc 1.95. The app itself is macOS-only — no Linux code or tests
+  outside these crates. `santree-host` is not consumed yet but carries the same
   contract (`rust-version = "1.95"`; no santree-core, Tauri, specta, transport
   or crypto). The `#[allow(clippy::disallowed_methods)]` attributes in
   `santree-pty` and `santree-host` mark this workspace's sanctioned PTY sites;
@@ -613,10 +616,44 @@ src/
 gates: `cargo fmt --all --check`, `cargo check`/`clippy`, `pnpm gen:bindings` if
 commands changed, `npx tsc --noEmit`, `pnpm lint`, both test suites — all green).
 `cargo fmt` is first because it is the gate that keeps getting skipped: clippy
-and the tests pass happily on unformatted code, and CI's backend job runs `fmt`
-*before* them, so the drift fails the build and masks everything after it. For any new
+and the tests pass happily on unformatted code, and CI's `backend-lint` job runs
+`fmt` *before* clippy, so the drift fails the build and masks clippy's verdict. For any new
 command taking a path/id/branch, confirm it's validated (`safe_path` /
 no-leading-dash) before it reaches fs or git.
+
+## Tests: what earns one
+
+The suites were trimmed hard (2026-10-12: vitest ~1.7k → ~1.3k, app-core ~520 →
+~400, integrations 315 → 211) because redundant tests slow CI and every change.
+Don't grow them back. A new test must protect something a reader can't see from
+the code; when a change touches tested behaviour, edit or merge the existing
+test rather than adding a neighbour. When in doubt, don't add it.
+
+**Write (and keep):**
+- security and validation gates (`safe_path`, id/arg validation, the host/URL
+  sinks), and the compliance invariants (`COMPLIANCE.md`);
+- wire and format pins: protocol text, the verbatim Claude/Codex hook payloads,
+  migration checksums, `santree-hook`'s DB writes, the updater channel rules;
+- data-loss, race and ordering cases that are hard to hit by hand;
+- a regression for a real bug, named for the bug it pins;
+- the path production takes. A test of a component's default doesn't cover the
+  caller that overrides it, and a pure-logic test doesn't cover a render bug:
+  when the bug was visible, render the component.
+
+**Don't write:**
+- a second test for a branch another already covers, or several that only vary
+  an input (one table-driven test);
+- tests that restate a constant, an enum's variants, a derive, or a library's
+  own behaviour;
+- tests whose fixture is a guess about a third-party tool's behaviour — they
+  encode the same wrong guess as the code. Check one real captured instance;
+- Linux-only branches or tests outside the engine-consumed crates (the app is
+  macOS-only);
+- slow tests (sleeps, real network, real git remotes) when a fake would do.
+
+A test that simulates a missing CLI or box sets an explicit minimal `PATH`
+instead of inheriting the developer's. A failure that only reproduces locally is
+usually ambient-environment leakage, not flakiness.
 
 ## Releasing & the self-updater
 
@@ -668,13 +705,12 @@ version.
   missing binary is an error). The server is signed with identifier
   `com.santree.server` and no entitlements. A new resource binary must be added
   there.
-- **`santree-server` is a macOS-only resource**, declared in
+- **`santree-server` is a bundle resource**, declared in
   `tauri.macos.conf.json` (merged over `tauri.conf.json` by JSON merge patch, so
-  `bundle.resources` keys add up). Linux builds neither need nor ship it. But
-  tauri-build fails on a *declared* resource that doesn't exist, so on macOS
-  every cargo build of `src-tauri` needs `target/bundle-resources/santree-server`
-  staged first — `pnpm bundle:binaries` does it, and ci.yml's cargo-only job
-  stages both binaries by hand. Add the file to the conf only after it is staged.
+  `bundle.resources` keys add up). tauri-build fails on a *declared* resource
+  that doesn't exist, so every cargo build of `src-tauri` needs
+  `target/bundle-resources/santree-server` staged first — `pnpm bundle:binaries`
+  does it, and ci.yml's cargo-only jobs stage both binaries by hand. Add the file to the conf only after it is staged.
 - **`SANTREE_TEAM_ID` is baked into the server at build time**
   (`option_env!`; cargo rebuilds when it changes, no build script needed). The
   server refuses every peer unless its own signature carries that Team ID, so
@@ -709,8 +745,7 @@ version.
   `releases/latest/download/…` link. Stop uploading it and the download button
   404s on the next release.
 - `SANTREE_SMOKE=1` (lib.rs) is CI's launch probe — exit 0 once the window
-  loads, watchdog exit 3 if it never does. It runs in ci.yml's macOS bundle
-  smoke and against the signed .app in the release job; it is the only thing
+  loads, watchdog exit 3 if it never does. It runs in ci.yml's bundle smoke and against the signed .app in the release job; it is the only thing
   that ever *runs* what ships.
 
 ## Claude project config (committed in `.claude/`)

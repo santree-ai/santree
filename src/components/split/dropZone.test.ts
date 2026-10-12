@@ -20,14 +20,13 @@ function sideBySide(): GroupGeometry[] {
 
 describe("zoneAt", () => {
   const body = { left: 0, top: 0, width: 800, height: 600 };
-  it("splits at the edges and moves in the middle", () => {
+  it("splits at the edges (corners to left/right) and moves in the middle", () => {
     expect(zoneAt(body, 10, 300)).toBe("left");
     expect(zoneAt(body, 790, 300)).toBe("right");
     expect(zoneAt(body, 400, 10)).toBe("top");
     expect(zoneAt(body, 400, 590)).toBe("bottom");
     expect(zoneAt(body, 400, 300)).toBe("center");
-  });
-  it("gives the corners to left and right", () => {
+    // The corners go to left and right.
     expect(zoneAt(body, 5, 5)).toBe("left");
     expect(zoneAt(body, 795, 595)).toBe("right");
   });

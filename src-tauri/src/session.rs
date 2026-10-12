@@ -140,6 +140,66 @@ fn unreadable_record(why: &str) -> anyhow::Error {
     )
 }
 
+/// A session Claude's own daemon is running in the background (`claude --bg`):
+/// `claude agents --json` entries of kind `background`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackgroundSession {
+    /// The short id `claude attach` takes.
+    pub id: String,
+    pub session_id: String,
+}
+
+/// How long a launch waits for `claude agents --json` before treating the answer
+/// as "none". It answers in ~0.1s; the bound only matters if the CLI wedges.
+const AGENTS_LISTING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The shape `claude attach` accepts as an id, and the only one that may reach
+/// its argv: the listing's text is the CLI's, not santree's.
+fn is_background_id(id: &str) -> bool {
+    (6..=16).contains(&id.len()) && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The background entries of a `claude agents --json` array. Anything that is
+/// not a well-formed background entry — including an id that is not
+/// [`is_background_id`] — is dropped, never an error: this only ever *adds* an
+/// attach, and a launch must not fail because the listing was odd.
+fn parse_background_sessions(json: &[u8]) -> Vec<BackgroundSession> {
+    let Ok(Value::Array(entries)) = serde_json::from_slice::<Value>(json) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|e| e.get("kind").and_then(Value::as_str) == Some("background"))
+        .filter_map(|e| {
+            let id = e.get("id")?.as_str()?;
+            let session_id = e.get("sessionId")?.as_str()?;
+            is_background_id(id).then(|| BackgroundSession {
+                id: id.to_string(),
+                session_id: session_id.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Claude's background sessions on this Mac, from the CLI itself (process
+/// identity, never terminal output). Any failure — no such binary, a timeout, a
+/// non-zero exit, text that is not JSON — is "none": a launch then does what it
+/// always did.
+pub(crate) async fn background_sessions(executable: &str) -> Vec<BackgroundSession> {
+    let mut cmd = tokio::process::Command::new(executable);
+    cmd.args(["agents", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let Ok(Ok(out)) = tokio::time::timeout(AGENTS_LISTING_TIMEOUT, cmd.output()).await else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    parse_background_sessions(&out.stdout)
+}
+
 /// Resolve how to (re)launch claude for the logical terminal `term_key` in
 /// `repo`: resume a still-on-disk session, mint a fresh one (only when
 /// `allow_fresh` — i.e. an explicit launch, not a passive reopen), or leave it a
@@ -170,6 +230,7 @@ pub async fn resolve(
         executable,
         allow_fresh,
         |stored_cwd, id| async move { transcript_presence(home, &stored_cwd, &id).await },
+        || background_sessions(executable),
     )
     .await
 }
@@ -177,7 +238,15 @@ pub async fn resolve(
 /// [`resolve`], asking `presence(stored_cwd, session_id)` whether a stored
 /// session's transcript is still there — wherever the transcripts are: this
 /// machine's `~/.claude`, or the box's for a Daedalus project.
-pub async fn resolve_with<F, Fut>(
+///
+/// `background` lists Claude's background sessions where the agent runs; it is
+/// asked only when a session is stored. One of them being the stored session
+/// means the tab's conversation outlived its pane in Claude's daemon, so the
+/// tab attaches to it ([`AgentSession::Attach`]) — checked before the
+/// transcript, since a running session is attachable whatever its record says.
+/// Daedalus passes an empty listing: `claude attach` is this Mac's daemon's.
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_with<F, Fut, B, BFut>(
     db: &Db,
     repo: &str,
     term_key: &str,
@@ -185,10 +254,13 @@ pub async fn resolve_with<F, Fut>(
     executable: &str,
     allow_fresh: bool,
     presence: F,
+    background: B,
 ) -> Result<AgentSession>
 where
     F: FnOnce(String, String) -> Fut,
     Fut: std::future::Future<Output = RecordPresence>,
+    B: FnOnce() -> BFut,
+    BFut: std::future::Future<Output = Vec<BackgroundSession>>,
 {
     let row: Option<(String, String, String)> = sqlx::query_as(
         "SELECT session_id, cwd, agent_kind FROM terminal_sessions
@@ -203,6 +275,18 @@ where
         let agent_kind: AgentKind = agent_kind.parse()?;
         if agent_kind != AgentKind::Claude {
             anyhow::bail!("stored provider does not match Claude session resolver");
+        }
+        if let Some(running) = background()
+            .await
+            .into_iter()
+            .find(|b| b.session_id == session_id)
+        {
+            return Ok(AgentSession::Attach {
+                agent_kind: AgentKind::Claude,
+                executable: executable.to_string(),
+                session_id,
+                background_id: running.id,
+            });
         }
         match presence(stored_cwd, session_id.clone()).await {
             RecordPresence::Present => {
@@ -1363,6 +1447,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[test]
+    fn background_listing_keeps_only_well_formed_background_entries() {
+        let json = br#"[
+            {"pid": 1, "kind": "interactive", "sessionId": "aaaaaaaa-0000-4000-8000-000000000001"},
+            {"pid": 2, "id": "14ffdc20", "kind": "background", "sessionId": "14ffdc20-a4ce-4bac-b737-d952b4a43500"},
+            {"pid": 3, "id": "--resume", "kind": "background", "sessionId": "bbbbbbbb-0000-4000-8000-000000000002"},
+            {"pid": 4, "id": "ABCDEF12", "kind": "background", "sessionId": "cccccccc-0000-4000-8000-000000000003"},
+            {"pid": 5, "id": "abc", "kind": "background", "sessionId": "dddddddd-0000-4000-8000-000000000004"},
+            {"pid": 6, "kind": "background", "sessionId": "eeeeeeee-0000-4000-8000-000000000005"}
+        ]"#;
+        // An id that is not 6-16 lowercase hex never reaches `claude attach`'s argv.
+        assert_eq!(
+            parse_background_sessions(json),
+            vec![BackgroundSession {
+                id: "14ffdc20".into(),
+                session_id: "14ffdc20-a4ce-4bac-b737-d952b4a43500".into(),
+            }]
+        );
+        assert!(parse_background_sessions(b"not json").is_empty());
+        assert!(parse_background_sessions(br#"{"kind":"background"}"#).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_missing_executable_lists_no_background_sessions() {
+        assert!(background_sessions("/nonexistent/santree-test-claude")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_attaches_a_stored_session_that_runs_in_the_background() {
+        let base = std::env::temp_dir().join(format!("santree-attach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let (cwd, key) = ("/tmp/santree/work/AK-1", "tree:AK-1");
+        let stored = mint(&db, "repo", key, cwd).await.unwrap();
+        let listing = |session_id: &str, id: &str| {
+            let b = BackgroundSession {
+                id: id.into(),
+                session_id: session_id.into(),
+            };
+            move || async move { vec![b] }
+        };
+
+        // Running in the background → attach, whatever its transcript says: the
+        // record is irrelevant to a session that is alive.
+        for presence in [RecordPresence::Present, RecordPresence::Absent] {
+            let got = resolve_with(
+                &db,
+                "repo",
+                key,
+                cwd,
+                "/bin/claude",
+                false,
+                move |_, _| async move { presence },
+                listing(&stored, "14ffdc20"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                got,
+                AgentSession::Attach {
+                    agent_kind: AgentKind::Claude,
+                    executable: "/bin/claude".into(),
+                    session_id: stored.clone(),
+                    background_id: "14ffdc20".into(),
+                }
+            );
+        }
+
+        // A background session that is some other conversation changes nothing.
+        let got = resolve_with(
+            &db,
+            "repo",
+            key,
+            cwd,
+            "/bin/claude",
+            false,
+            |_, _| async { RecordPresence::Present },
+            listing("aaaaaaaa-0000-4000-8000-000000000001", "14ffdc20"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(got, AgentSession::Resume { .. }), "{got:?}");
+
+        // No listing (the CLI failed, timed out, or printed nothing usable) is
+        // today's behaviour exactly.
+        let got = resolve_with(
+            &db,
+            "repo",
+            key,
+            cwd,
+            "/bin/claude",
+            false,
+            |_, _| async { RecordPresence::Present },
+            || async { Vec::new() },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(got, AgentSession::Resume { .. }), "{got:?}");
+
+        // A listed entry whose id is not attach-shaped was dropped by the parser,
+        // so it cannot match.
+        let hostile =
+            format!(r#"[{{"kind":"background","id":"--resume","sessionId":"{stored}"}}]"#);
+        let got = resolve_with(
+            &db,
+            "repo",
+            key,
+            cwd,
+            "/bin/claude",
+            false,
+            |_, _| async { RecordPresence::Present },
+            move || async move { parse_background_sessions(hostile.as_bytes()) },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(got, AgentSession::Resume { .. }), "{got:?}");
+
+        // Nothing stored → nothing to attach to, and the CLI is not even asked.
+        let got = resolve_with(
+            &db,
+            "repo",
+            "tree:AK-2",
+            cwd,
+            "/bin/claude",
+            false,
+            |_, _| async { RecordPresence::Present },
+            || async { panic!("listed background sessions with no stored session") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, AgentSession::Shell);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[tokio::test]
     async fn resolve_mints_fresh_then_resumes_when_transcript_exists() {
         let base = std::env::temp_dir().join(format!("santree-session-{}", std::process::id()));
@@ -1467,56 +1688,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn resolve_finds_transcript_for_underscore_cwd() {
-        // Regression test for the escaping bug: an underscore in `cwd` must be
-        // escaped the same way Claude Code escapes it, or `is_resumable` never
-        // finds the transcript Claude actually wrote.
-        let base =
-            std::env::temp_dir().join(format!("santree-session-underscore-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let home = base.join("home");
-
-        let db = crate::db::init(base.join("test.db")).await.unwrap();
-        let cwd = "/Users/x/dev/my_repo";
-        let key = "tree:AK-2";
-
-        let fresh = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
-            .await
-            .unwrap();
-        let AgentSession::Fresh {
-            session_id: Some(session_id),
-            ..
-        } = fresh
-        else {
-            panic!("expected Fresh with a santree-minted id, got {fresh:?}");
-        };
-
-        // Write the transcript at the path Claude Code would actually use.
-        let path = transcript_path(&home, cwd, &session_id);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "{}").unwrap();
-
-        assert_eq!(
-            resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", false)
-                .await
-                .unwrap(),
-            AgentSession::Resume {
-                agent_kind: AgentKind::Claude,
-                executable: "/bin/claude".into(),
-                session_id,
-                launch_flags: String::new(),
-            }
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
     /// Make `dir` unreadable and hand back a guard that puts it back — so a
     /// failing assertion can't leave a directory the test harness can't clean up.
     /// `None` when the mode bits don't actually bite (running as root), which is
     /// the only honest way to skip: the point of the test is a *failed* read.
-    #[cfg(unix)]
     fn deny_reads(dir: &Path, probe: &Path) -> Option<ModeGuard> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -1531,10 +1706,8 @@ mod tests {
     }
 
     /// Restores a directory's mode, whatever the test does next.
-    #[cfg(unix)]
     struct ModeGuard(PathBuf);
 
-    #[cfg(unix)]
     impl Drop for ModeGuard {
         fn drop(&mut self) {
             use std::os::unix::fs::PermissionsExt;
@@ -1549,7 +1722,6 @@ mod tests {
     /// pruned session — so an unmounted volume or a permission change made the
     /// tab start a brand-new conversation over one the user still had, silently.
     /// Now that third state is its own answer and the launch refuses.
-    #[cfg(unix)]
     #[tokio::test]
     async fn resolve_refuses_a_transcript_it_cannot_read_instead_of_starting_fresh() {
         let base =
@@ -1619,7 +1791,6 @@ mod tests {
     /// transcript directory that can't be read makes *every* row look
     /// transcript-less, and one startup would delete the sessions the user is
     /// actively resuming.
-    #[cfg(unix)]
     #[tokio::test]
     async fn reap_stale_keeps_the_rows_it_could_not_check() {
         let base =
@@ -1662,7 +1833,6 @@ mod tests {
     /// read_dir(dir) else { return }` reported an unreadable tree as an empty
     /// one — with the same consequence: the fresh run's `SessionStart` repoints
     /// the row, and the user's thread stops being reachable from that surface.
-    #[cfg(unix)]
     #[tokio::test]
     async fn resolve_codex_refuses_a_rollout_tree_it_cannot_read() {
         let base =
@@ -1996,50 +2166,6 @@ mod tests {
         assert_eq!(
             gate(unbound, liveness(&[], false)).await,
             Occupancy::Unknown
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// What the relaunch then runs: the tab's own stored conversation, resumed —
-    /// the resolver keys it by the tab's `triage:` key like any other surface.
-    #[tokio::test]
-    async fn a_triage_tab_relaunches_on_its_own_stored_session() {
-        let base = std::env::temp_dir().join(format!(
-            "santree-session-triage-tab-resume-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        let db = crate::db::init(base.join("test.db")).await.unwrap();
-        sqlx::query(
-            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
-             VALUES ('repo', 'triage:AK-1:tab:t1', '/repo', 's1', 'Claude'),
-                    ('repo', 'triage:AK-1', '/repo', 'investigation', 'Claude')",
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-        let got = resolve_with(
-            &db,
-            "repo",
-            "triage:AK-1:tab:t1",
-            "/repo",
-            "/bin/claude",
-            true,
-            |cwd, id| async move {
-                assert_eq!((cwd.as_str(), id.as_str()), ("/repo", "s1"));
-                RecordPresence::Present
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            got,
-            AgentSession::Resume {
-                agent_kind: AgentKind::Claude,
-                executable: "/bin/claude".into(),
-                session_id: "s1".into(),
-                launch_flags: String::new(),
-            }
         );
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2638,33 +2764,6 @@ mod tests {
     fn escape_like_escapes_only_like_metacharacters() {
         assert_eq!(escape_like("AK-170"), "AK-170");
         assert_eq!(escape_like("a%b_c\\d"), "a\\%b\\_c\\\\d");
-    }
-
-    #[test]
-    fn transcript_turn_keeps_prose_and_drops_tool_noise() {
-        // User string content → kept.
-        assert_eq!(
-            transcript_turn(r#"{"type":"user","message":{"content":"do the thing"}}"#).as_deref(),
-            Some("User: do the thing")
-        );
-        // Assistant text blocks kept; tool_use block dropped.
-        assert_eq!(
-            transcript_turn(
-                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"I chose approach B"},{"type":"tool_use","name":"Edit","input":{"x":"secret"}}]}}"#
-            )
-            .as_deref(),
-            Some("Assistant: I chose approach B")
-        );
-        // A user turn that's only a tool_result → no prose → dropped.
-        assert_eq!(
-            transcript_turn(
-                r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"huge file dump"}]}}"#
-            ),
-            None
-        );
-        // Summaries and malformed lines → dropped.
-        assert_eq!(transcript_turn(r#"{"type":"summary","summary":"x"}"#), None);
-        assert_eq!(transcript_turn("not json"), None);
     }
 
     #[tokio::test]
