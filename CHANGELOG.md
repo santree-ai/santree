@@ -7,6 +7,16 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.3 — 2026-10-12
+
+- Projects can now read tickets from different trackers. Each project is linked to one Linear workspace or Jira site, and the Tickets page lists every tracker together, with a source menu to narrow it and a small logo on each row once there is more than one.
+- A project with no tracker linked shows no tickets, instead of quietly using Linear. Projects you already had keep the tracker they were reading. Settings, Ticket tracker, picks the connection, and adding a project asks which one when several are connected.
+- Settings is grouped by what each item is for: issue trackers, code hosting, AI harness, environment and extras. "Environment" is now called "Variables".
+- In the Reviews list on the sidebar, a PR nobody has reviewed yet shows a filled dot and one a colleague already reviewed shows a ring, so you can pick up the ones still waiting for a first look.
+- Checking out several PRs at once now works, shows "Creating..." right away, and deleting a PR's checkout updates at once and can't be repeated. Opening an AI review on a PR that is already checked out no longer asks to create a worktree again.
+- A split layout now stays put when you switch to another project and back.
+- The refresh button moved next to the list and tree toggle in the Changes list, and the Find box no longer draws a white outline when you press ⌘F.
+
 ## 0.1.19-beta.2 — 2026-10-12
 
 - A tab whose agent Claude has moved to its own background now reopens straight onto it, instead of failing with "That session is running in the background".
