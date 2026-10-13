@@ -39,7 +39,7 @@ import {
 import { usePersistedState } from "../../lib/usePersistedState";
 import { useOptionalAgentRuns } from "../../state/AgentRuns";
 import { defaultTabTitle } from "../trees/model";
-import { aiReviewTermKey } from "./AiReviewSessionPane";
+import { aiReviewTermKey, REVIEW_AGENTS } from "./checkoutSource";
 import { type PrCheckout, usePrCheckout } from "./PrCheckout";
 import { ticketIdFor } from "./ticket";
 import { useWorktreeGate } from "./WorktreeGate";
@@ -48,9 +48,6 @@ import { useWorktreeGate } from "./WorktreeGate";
 const LAYOUT_BY_PR_KEY = "santree-reviews-layout-by-pr";
 /** Which pull requests have their ticket open as a tab. */
 const ISSUE_VIEW_BY_PR_KEY = "santree-reviews-issue-view-by-pr";
-
-/** The providers that can review a pull request, in menu order. */
-export const REVIEW_AGENTS: AgentKind[] = ["Codex", "Claude"];
 
 export type ReviewMainTab = "pr" | "issueView" | `ai:${AgentKind}` | `tab:${string}`;
 
@@ -202,11 +199,16 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
   // exists once the review session has created it — so the request waits here for
   // the id to appear. Cleared before the call, and `startSetup` refuses a second
   // run for a worktree already setting up, so this can't stack.
+  //
+  // The checkout the *review* cuts is a review checkout, which the PR's own
+  // worktree lookup (`checkout.worktreeId`) never lists — the source is the one
+  // that names whichever kind landed.
+  const { worktreeId: sourceId, repo: sourceRepo } = checkout.source;
   useEffect(() => {
-    if (!pendingSetup.current || !worktreeId) return;
+    if (!pendingSetup.current || !sourceId) return;
     pendingSetup.current = false;
-    agentRuns?.runSetup(checkout.repo, worktreeId);
-  }, [checkout.repo, worktreeId, agentRuns]);
+    agentRuns?.runSetup(sourceRepo, sourceId);
+  }, [sourceRepo, sourceId, agentRuns]);
 
   // Showing an AI review tab and starting its session are the same act: the tab
   // can exist (a stored session from a previous launch) with nothing mounted
@@ -218,14 +220,24 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
   // a leftover tab would put a worktree back on disk without a word. So the same
   // question is asked here as at the "+" menu, and only in the case that would
   // actually write something.
+  //
+  // "Has a checkout" is the *source's* answer — the PR's own worktree or the one
+  // an earlier review cut. The review's kind is hidden from the worktree list, so
+  // asking the list alone put the dialog up for a PR whose checkout was sitting
+  // on disk. And until both reads have answered there is no answer: the tab is
+  // shown, not started, and its "Open review" button asks again once they have.
+  const hasCheckout = checkout.source.worktree !== null;
+  const { known } = checkout;
   const select = useCallback(
     (tab: ReviewMainTab) => {
       const agent = aiTabAgent(tab);
-      if (!agent) {
+      // A pane already mounted is already running (or already cutting its
+      // checkout): showing it is all a click can mean.
+      if (!agent || !known || mounted.includes(agent)) {
         show(tab);
         return;
       }
-      if (worktreeId) {
+      if (hasCheckout) {
         openReview(agent);
         return;
       }
@@ -233,7 +245,7 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
         if (choice.ok) openReview(agent, choice.runSetup);
       });
     },
-    [openReview, worktreeId, askForWorktree, show],
+    [openReview, known, hasCheckout, mounted, askForWorktree, show],
   );
 
   const addTab = useCallback(

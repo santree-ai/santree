@@ -75,7 +75,13 @@ import { commands, events } from "../bindings";
 import { type ToastOptions, toast } from "../state/toast";
 import { agentOff, gitOff, runOff } from "./daedalusLink";
 import { splitRepoSlug } from "./repo";
-import { type TrackerFeatures, trackerFeatures } from "./tracker";
+import {
+  type Connection,
+  connectionLabel,
+  connectionProvider,
+  type TrackerFeatures,
+  trackerFeatures,
+} from "./tracker";
 
 // ── Shared primitives ────────────────────────────────────────────────────────
 // The machinery every hook below is built from: unwrapping a generated `Result`
@@ -349,6 +355,9 @@ export const queryKeys = {
    *  the one an agent already read. */
   reviewWorkspace: (repo: string, prRepo: string, number: number, headSha: string) =>
     ["review-workspace", repo, prRepo, number, headSha] as const,
+  /** Every head of one PR's checkout read — what "is it being cut right now?" asks. */
+  reviewWorkspacePr: (repo: string, prRepo: string, number: number) =>
+    ["review-workspace", repo, prRepo, number] as const,
   /** Not keyed on the head SHA, unlike the checkout's *creation*: this read asks
    *  which commit the checkout is actually at, so keying it on the expected
    *  answer would hide every case where the two disagree. */
@@ -1665,64 +1674,52 @@ export const useJiraConnect = () => {
   });
 };
 
-/** Flip a repo's registry row to `provider` at once, so the tracker switch and
- *  every mark reading `Repo.provider` move with the click. Returns the rollback. */
-function patchRepoProvider(qc: QueryClient, repo: string, provider: TicketProvider) {
+/** Move a repo's registry row onto `connection` at once, so the tracker picker
+ *  and every mark reading `Repo.provider` move with the click. The label
+ *  (`Repo.tracker`) reconciles on settle. Returns the rollback. */
+function patchRepoConnection(qc: QueryClient, repo: string, connection: string | null) {
   const prev = qc.getQueryData<Repo[]>(queryKeys.repos);
   if (prev === undefined) return () => {};
+  const provider = connection ? connectionProvider(connection) : null;
   qc.setQueryData<Repo[]>(
     queryKeys.repos,
-    prev.map((r) => (r.name === repo ? { ...r, provider } : r)),
+    prev.map((r) => (r.name === repo ? { ...r, connection, provider } : r)),
   );
   return () => qc.setQueryData(queryKeys.repos, prev);
 }
 
-/** Bind (or clear) the Linear org a repo uses. Binding one takes the repo off
- *  Jira — the backend clears that link in the same write. */
-export const useSetRepoLinearOrg = () =>
-  useOptimisticMutation({
-    mutationKey: ["set-repo-linear-org"],
-    mutationFn: (args: { repo: string; slug: string | null }) =>
-      unwrap(commands.setRepoLinearOrg(args.repo, args.slug)),
-    optimistic: (qc, args) => {
-      // Reflect the new org binding in the status read so the picker updates at
-      // once; full status (auth flags, names) reconciles on settle.
-      const key = queryKeys.linearStatus(args.repo);
-      const prev = qc.getQueryData<{ orgSlug: string | null }>(key);
-      const undoProvider = args.slug ? patchRepoProvider(qc, args.repo, "Linear") : () => {};
-      if (prev !== undefined) qc.setQueryData(key, { ...prev, orgSlug: args.slug });
-      return () => {
-        undoProvider();
-        if (prev !== undefined) qc.setQueryData(key, prev);
-      };
-    },
-    invalidate: (args) => [
-      queryKeys.repos,
-      queryKeys.linearStatusPrefix,
-      queryKeys.jiraStatusPrefix,
-      queryKeys.tasksPrefix,
-      queryKeys.triageTickets(args.repo),
-      queryKeys.triageSchedule(args.repo),
+/** Every connected ticket tracker account — Linear orgs and Jira sites — as the
+ *  ids a repo is linked by. Empty until both reads have answered. */
+export function useConnections(): Connection[] {
+  const { data: orgs } = useLinearOrgs();
+  const { data: sites } = useJiraSites();
+  return useMemo(
+    () => [
+      ...(orgs ?? []).map((o) => ({
+        id: `linear:${o.slug}`,
+        provider: "Linear" as const,
+        name: o.name,
+        label: connectionLabel("Linear", o.name),
+      })),
+      ...(sites ?? []).map((s) => ({
+        id: `jira:${s.cloudId}`,
+        provider: "Jira" as const,
+        name: s.siteName,
+        label: connectionLabel("Jira", s.siteName),
+      })),
     ],
-  });
+    [orgs, sites],
+  );
+}
 
-/** Bind (or clear) the Jira site a repo uses. Binding one takes the repo off
- *  Linear — the backend clears that link in the same write. */
-export const useSetRepoJiraSite = () =>
+/** Link a repo to a ticket connection, or (with `null`) take it off its tracker.
+ *  A repo has exactly one, so this replaces whatever it had. */
+export const useSetRepoConnection = () =>
   useOptimisticMutation({
-    mutationKey: ["set-repo-jira-site"],
-    mutationFn: (args: { repo: string; cloudId: string | null }) =>
-      unwrap(commands.setRepoJiraSite(args.repo, args.cloudId)),
-    optimistic: (qc, args) => {
-      const key = queryKeys.jiraStatus(args.repo);
-      const prev = qc.getQueryData<{ cloudId: string | null }>(key);
-      const undoProvider = args.cloudId ? patchRepoProvider(qc, args.repo, "Jira") : () => {};
-      if (prev !== undefined) qc.setQueryData(key, { ...prev, cloudId: args.cloudId });
-      return () => {
-        undoProvider();
-        if (prev !== undefined) qc.setQueryData(key, prev);
-      };
-    },
+    mutationKey: ["set-repo-connection"],
+    mutationFn: (args: { repo: string; connection: string | null }) =>
+      unwrap(commands.setRepoConnection(args.repo, args.connection)),
+    optimistic: (qc, args) => patchRepoConnection(qc, args.repo, args.connection),
     invalidate: (args) => [
       queryKeys.repos,
       queryKeys.linearStatusPrefix,
@@ -3885,6 +3882,11 @@ export const useReviewWorkspace = (repo: string, target: ReviewTarget | null, en
   return query;
 };
 
+/** Whether a PR's review checkout is being cut right now — by any pane, mounted
+ *  or not, since the find-or-create read keeps running after its pane is gone. */
+export const useReviewWorkspaceCutting = (repo: string, prRepo: string, number: number) =>
+  useIsFetching({ queryKey: queryKeys.reviewWorkspacePr(repo, prRepo, number) }) > 0;
+
 /** The AI review's checkout of a PR, when one exists — the fallback the rail's
  *  branch panes read for a pull request with no worktree of its own. `null` until
  *  a review has run for it. Never creates one; see `useReviewWorkspace`
@@ -4217,20 +4219,60 @@ export const useReviewAiWatcher = () => {
   }, [qc]);
 };
 
-/** Delete a PR's review checkout — the pane's "Remove checkout" action. */
+/** What a removal of a PR's checkout is asked about. */
+interface RemoveReviewVars {
+  prRepo: string;
+  number: number;
+  headSha: string;
+}
+
+/** Delete a PR's review checkout — the "Remove checkout" and "Delete review
+ *  checkout" actions.
+ *
+ *  Optimistic: the checkout leaves the review-checkout read the moment it is
+ *  asked, so every surface that offers it (the PR row's menu, the rail, the bar)
+ *  stops offering it at once — a second delete from a stale offer is what used
+ *  to come back as an error. Rolled back, with the usual toast, if it fails. */
 export const useRemoveReviewWorkspace = (repo: string) => {
   const qc = useQueryClient();
-  return useActionMutation<{ prRepo: string; number: number; headSha: string }, null>({
-    mutationFn: ({ prRepo, number }) =>
-      unwrap(commands.removeReviewWorkspace(repo, prRepo, number)),
-    invalidate: ({ prRepo, number, headSha }) => {
+  return useOptimisticMutation<RemoveReviewVars, null>({
+    // Shared by every site that removes one, so {@link usePrCheckoutRemovals} can
+    // tell the rest of the app (the sidebar's PR rows) which PRs are mid-removal.
+    mutationKey: ["remove-review-workspace", repo],
+    mutationFn: async ({ prRepo, number, headSha }) => {
+      const removed = await unwrap(commands.removeReviewWorkspace(repo, prRepo, number));
       // Drop the memoized path so the next open recreates rather than handing the
-      // terminal a cwd that no longer exists.
+      // terminal a cwd that no longer exists. After the removal, not before: an
+      // observer of that read would otherwise refetch — find-or-create — and cut
+      // the checkout back while it is being deleted.
       qc.removeQueries({ queryKey: queryKeys.reviewWorkspace(repo, prRepo, number, headSha) });
-      return [];
+      return removed;
     },
-    success: () => "Review checkout removed.",
+    optimistic: (client, { prRepo, number }) => {
+      const key = queryKeys.reviewCheckout(repo, prRepo, number);
+      const previous = client.getQueryData<ReviewCheckout | null>(key);
+      // Not loaded: nothing on screen to retract, and `undefined` is not a value
+      // `setQueryData` can restore.
+      if (previous === undefined) return undefined;
+      client.setQueryData<ReviewCheckout | null>(key, null);
+      return () => client.setQueryData(key, previous);
+    },
+    invalidate: ({ prRepo, number }) => [queryKeys.reviewCheckout(repo, prRepo, number)],
   });
+};
+
+/** `owner/name#number` of every pull request whose checkout is being removed
+ *  right now, from any site that removes one — the key the sidebar files a PR's
+ *  agents under, so it can drop them at the click rather than at the refetch. */
+export const usePrCheckoutRemovals = (): Set<string> => {
+  const removing = useMutationState({
+    filters: { mutationKey: ["remove-review-workspace"], status: "pending" },
+    select: (mutation) => {
+      const vars = mutation.state.variables as RemoveReviewVars;
+      return `${vars.prRepo}#${vars.number}`;
+    },
+  });
+  return useMemo(() => new Set(removing), [removing]);
 };
 
 // ── Triage ───────────────────────────────────────────────────────────────────
@@ -4687,9 +4729,7 @@ export function useTriageRepo(ticketId: string | null): {
  *
  * The fallback is deliberately *stable* rather than "wherever you are looking".
  * A queue that re-pointed itself as you moved around the app is a queue whose
- * rows change under the cursor, and — since a repo with no explicit link
- * resolves to the only connected org anyway (see `resolve_org_slug`) — the
- * first project answers the org question as well as any other. Setting
+ * rows change under the cursor. Setting
  * {@link TRIAGE_DEFAULT_REPO_KEY} is how you pick a different one.
  */
 export function useTriageOrgRepo(): string {
@@ -4700,21 +4740,21 @@ export function useTriageOrgRepo(): string {
 
 /**
  * Every registered project a ticket read through `repo` could be started in —
- * the ones resolving to the same Linear org, in registration order.
+ * the ones linked to the same connection (Linear org or Jira site), in
+ * registration order.
  *
- * A ticket belongs to an org, not to a project, and several projects routinely
- * resolve to one org (a project with no explicit link takes the only connected
- * one — see `resolve_org_slug`). So "which projects carry this ticket" has an
- * answer wider than "the project whose list I read it from", and that answer is
- * what {@link useWorkRepoGate} chooses between. Same rule as `useTickets`' fold,
- * which keys a row by (org, id) for exactly this reason.
+ * A ticket belongs to a connection, not to a project, and several projects
+ * routinely share one. So "which projects carry this ticket" has an answer wider
+ * than "the project whose list I read it from", and that answer is what
+ * {@link useWorkRepoGate} chooses between. Same rule as `useTickets`' fold, which
+ * keys a row by (connection, id) for exactly this reason.
  */
 export function useOrgSiblings(repo: string): string[] {
   const { data: repos } = useRepos();
   return useMemo(() => {
-    const org = repos?.find((r) => r.name === repo)?.tracker;
-    if (!repos || org === undefined) return repo ? [repo] : [];
-    return repos.filter((r) => r.tracker === org).map((r) => r.name);
+    const connection = repos?.find((r) => r.name === repo)?.connection;
+    if (!repos || !connection) return repo ? [repo] : [];
+    return repos.filter((r) => r.connection === connection).map((r) => r.name);
   }, [repos, repo]);
 }
 
@@ -4929,8 +4969,15 @@ export function awaitingReviewPrs(inbox: ReviewInbox | undefined): ReviewPr[] {
   return [...inbox.requested, ...inbox.teams.flatMap((team) => team.prs)].filter((pr) => {
     if (seen.has(pr.id)) return false;
     seen.add(pr.id);
-    return !pr.viewerReview || pr.headCommittedAt > pr.viewerReview.submittedAt;
+    return needsViewerReview(pr);
   });
+}
+
+/** The rule itself, for a single PR: the viewer never reviewed it, or the head moved
+ *  on after their latest review. A row that wants to say *why* a PR is waiting asks
+ *  this (and `viewerReview` for never-vs-again) rather than comparing dates itself. */
+export function needsViewerReview(pr: ReviewPr): boolean {
+  return !pr.viewerReview || pr.headCommittedAt > pr.viewerReview.submittedAt;
 }
 
 /** One project's share of the review requests waiting on you. */
@@ -5100,10 +5147,9 @@ export function reviewGroupsByProject(inbox: ReviewInbox | undefined): Map<strin
 }
 
 /** How many tickets the Tickets destination has to show — the count on its rail
- *  row. Distinct by (org, id), which is the whole difference from asking one
- *  project: several registered projects routinely resolve to the same Linear
- *  org (see `resolve_org_slug`), so a per-project count counts the same ticket
- *  once per project. The rail row is not scoped to a project, so its number
+ *  row. Distinct by (connection, id), which is the whole difference from asking
+ *  one project: several registered projects routinely share a connection, so a
+ *  per-project count counts the same ticket once per project. The rail row is not scoped to a project, so its number
  *  must not be either. Shares {@link useTasksByRepo}'s cache with the page. */
 export const useTicketCount = (): number => {
   const { data: repos } = useRepos();
@@ -5112,7 +5158,9 @@ export const useTicketCount = (): number => {
   return useMemo(() => {
     const seen = new Set<string>();
     for (const repo of repos ?? []) {
-      for (const task of tasksByRepo.get(repo.name) ?? []) seen.add(`${repo.tracker}|${task.id}`);
+      for (const task of tasksByRepo.get(repo.name) ?? []) {
+        seen.add(`${repo.connection ?? repo.name}|${task.id}`);
+      }
     }
     return seen.size;
   }, [repos, tasksByRepo]);

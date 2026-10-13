@@ -17,9 +17,16 @@
  * team when every team is showing, and the graph draws the picked team's
  * tickets through the same provider.
  */
+import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 
-import { BranchIcon, CheckIcon, ChevronDownIcon, ListIcon } from "../../components/icons";
+import {
+  BranchIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  ListIcon,
+  TrackerLogo,
+} from "../../components/icons";
 import {
   Button,
   Dot,
@@ -39,9 +46,11 @@ import { TicketsGraph } from "./TicketsGraph";
 import { TicketsList } from "./TicketsList";
 import {
   type TicketProjectGroup,
+  type TicketSource,
   type TicketsSummary,
   type TicketTeam,
   useTickets,
+  useUnlinkedConnections,
 } from "./useTickets";
 
 type Mode = "list" | "graph";
@@ -51,6 +60,9 @@ const ACTIONABLE_KEY = "santree.tickets.actionableOnly";
 /** The team pick — team keys, or `[]` for every team. Persisted as picked;
  *  the fold drops a key while it has no tickets and takes it back with them. */
 const TEAMS_KEY = "santree.tickets.teams";
+/** The source pick — a connection id, or `null` for every source. Persisted as
+ *  picked; the fold ignores it while that connection has no tickets. */
+const SOURCE_KEY = "santree.tickets.source";
 
 const MODE_OPTIONS = [
   { value: "list" as const, label: "List", icon: <ListIcon size={11} /> },
@@ -163,6 +175,103 @@ function TeamMenu({
   );
 }
 
+/**
+ * Which connection's tickets the page shows — "All sources", or one Linear org or
+ * Jira site. One choice rather than a set: a source is a whole workspace, and the
+ * graph can draw only one. Drawn only once two connections have tickets here;
+ * with one, the page is that connection's and the control would name a choice
+ * that isn't there. Same chip family as the team menu beside it.
+ */
+function SourceMenu({
+  sources,
+  picked,
+  onChange,
+}: {
+  sources: TicketSource[];
+  picked: string | null;
+  onChange: (id: string | null) => void;
+}) {
+  if (sources.length < 2) return null;
+  const current = sources.find((s) => s.id === picked) ?? null;
+  const label = current?.label ?? "All sources";
+  return (
+    <Dropdown
+      menuClassName="w-64 overflow-hidden"
+      trigger={(toggle) => (
+        <button
+          type="button"
+          onClick={toggle}
+          aria-label={`Source: ${label}`}
+          title="Which connection's tickets to show"
+          className="flex h-6 max-w-56 flex-none cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 text-[11px] whitespace-nowrap text-fg-2 transition-colors hover:border-line-strong"
+        >
+          {current && <TrackerLogo provider={current.provider} size={10} />}
+          <span className="min-w-0 truncate">{label}</span>
+          <ChevronDownIcon size={9} className="flex-none text-muted-3" />
+        </button>
+      )}
+    >
+      {(close) => (
+        <>
+          {[{ id: null, label: "All sources", provider: null, count: null }, ...sources].map(
+            (source) => {
+              const checked = (source.id ?? null) === (current?.id ?? null);
+              return (
+                <button
+                  key={source.id ?? "all"}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={checked}
+                  onClick={() => {
+                    onChange(source.id);
+                    close();
+                  }}
+                  className={MENU_ITEM}
+                >
+                  <span className="flex h-4 w-3 flex-none items-center text-fg">
+                    {checked && <CheckIcon size={11} />}
+                  </span>
+                  {source.provider && <TrackerLogo provider={source.provider} size={10} />}
+                  <span className={`min-w-0 flex-1 truncate ${checked ? "text-fg" : ""}`}>
+                    {source.label}
+                  </span>
+                  <span className="font-mono text-[10px] text-muted-4 tabular-nums">
+                    {source.count ?? sources.reduce((sum, s) => sum + s.count, 0)}
+                  </span>
+                </button>
+              );
+            },
+          )}
+        </>
+      )}
+    </Dropdown>
+  );
+}
+
+/** Connections no project is linked to have no tickets here — the page reads
+ *  through a project — so each is named, with the way to fix it, instead of being
+ *  left out as though it were empty. */
+function UnlinkedNotice() {
+  const unlinked = useUnlinkedConnections();
+  const navigate = useNavigate();
+  if (unlinked.length === 0) return null;
+  return (
+    <div className="flex flex-none items-center gap-2 border-b border-line bg-deep px-3 py-1.5 text-[11.5px] text-muted-3">
+      <span className="min-w-0 truncate">
+        {unlinked.map((c) => c.label).join(", ")} {unlinked.length === 1 ? "has" : "have"} no
+        project linked, so no tickets show here.
+      </span>
+      <button
+        type="button"
+        onClick={() => navigate({ to: "/settings", search: { scope: "repo", section: "tracker" } })}
+        className="flex-none cursor-pointer text-fg-3 underline decoration-line-strong underline-offset-2 hover:text-fg"
+      >
+        Link one in Settings
+      </button>
+    </div>
+  );
+}
+
 /** The filter, as the switch it is — drawn as one chip of the same family as
  *  the button and the segmented control beside it: the same height, edge and
  *  fill, with a small track inside next to the words. A full-size settings
@@ -238,7 +347,12 @@ export function TicketsView() {
   const [teamPick, setTeamPick] = usePersistedState<string[]>(TEAMS_KEY, []);
   // `picked` is the pick in force: the stored keys that name a team with
   // tickets on the page — the provider and the menu both read it.
-  const { groups, teams, picked, summary, loading } = useTickets(actionableOnly, teamPick);
+  const [sourcePick, setSourcePick] = usePersistedState<string | null>(SOURCE_KEY, null);
+  const { groups, teams, picked, sources, source, sourceRepo, summary, loading } = useTickets(
+    actionableOnly,
+    teamPick,
+    sourcePick,
+  );
 
   const toggleActionable = useCallback(() => setActionableOnly((v) => !v), [setActionableOnly]);
 
@@ -250,7 +364,7 @@ export function TicketsView() {
   );
 
   return (
-    <IssuesProvider actionable={actionable} teams={picked}>
+    <IssuesProvider actionable={actionable} teams={picked} scopeRepo={sourceRepo}>
       <TicketsShortcuts onToggleActionable={toggleActionable} />
       <TicketsPage
         mode={mode}
@@ -260,6 +374,9 @@ export function TicketsView() {
         teams={teams}
         picked={picked}
         onTeams={setTeamPick}
+        sources={sources}
+        source={source}
+        onSource={setSourcePick}
         groups={groups}
         summary={summary}
         loading={loading}
@@ -278,6 +395,9 @@ function TicketsPage({
   teams,
   picked,
   onTeams,
+  sources,
+  source,
+  onSource,
   groups,
   summary,
   loading,
@@ -289,6 +409,9 @@ function TicketsPage({
   teams: TicketTeam[];
   picked: string[];
   onTeams: (keys: string[]) => void;
+  sources: TicketSource[];
+  source: string | null;
+  onSource: (id: string | null) => void;
   groups: TicketProjectGroup[];
   summary: TicketsSummary;
   loading: boolean;
@@ -308,6 +431,7 @@ function TicketsPage({
           className={`flex ${CHROME.subBar} flex-none items-center gap-2.5 border-b border-line bg-deep pr-2 pl-3`}
         >
           <span className="flex-none text-[13px] font-semibold text-fg">Tickets</span>
+          <SourceMenu sources={sources} picked={source} onChange={onSource} />
           <TeamMenu teams={teams} picked={picked} onChange={onTeams} />
           <span className="min-w-0 truncate text-[11px] text-muted-4">{summaryLine(summary)}</span>
           <div className="ml-auto flex flex-none items-center gap-2">
@@ -323,8 +447,14 @@ function TicketsPage({
           </div>
         </div>
 
+        <UnlinkedNotice />
+
         <div className="relative flex min-h-0 min-w-0 flex-1">
-          {mode === "list" ? <TicketsList groups={groups} loading={loading} /> : <TicketsGraph />}
+          {mode === "list" ? (
+            <TicketsList groups={groups} loading={loading} showSource={sources.length > 1} />
+          ) : (
+            <TicketsGraph />
+          )}
         </div>
       </div>
       <RightPanel />

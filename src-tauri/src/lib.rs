@@ -17,6 +17,7 @@ mod commit_draft;
 // tree and asserts over what it finds.
 #[cfg(test)]
 mod compliance;
+mod connection;
 mod daedalus;
 mod db;
 mod diagnostics;
@@ -250,14 +251,13 @@ fn specta_builder() -> AppBuilder {
             commands::linear_auth_status,
             commands::linear_orgs,
             commands::linear_api_budget,
-            commands::set_repo_linear_org,
+            commands::set_repo_connection,
             commands::linear_list_issues,
             commands::linear_invalidate_caches,
             commands::linear_connect,
             commands::linear_mcp_connect,
             commands::jira_auth_status,
             commands::jira_sites,
-            commands::set_repo_jira_site,
             commands::jira_connect,
             commands::daedalus_status,
             commands::daedalus_health,

@@ -27,9 +27,9 @@
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
-import { useTicketCount, useTicketProvider, useWorkScopeRepo } from "../../lib/queries";
+import { useTicketCount } from "../../lib/queries";
 import { useAppUi } from "../../state/AppContext";
-import { SearchIcon, TrackerLogo } from "../icons";
+import { ListIcon, SearchIcon } from "../icons";
 
 interface NavItem {
   label: string;
@@ -48,14 +48,13 @@ export function SidebarNav() {
   const { toggleCommandPalette } = useAppUi();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const tasks = useTicketCount();
-  const provider = useTicketProvider(useWorkScopeRepo());
 
   const items: NavItem[] = [
     { label: "Search", icon: <SearchIcon size={13} />, action: toggleCommandPalette, hint: "⌘K" },
     {
       label: "Tickets",
       path: "/issues",
-      icon: <TrackerLogo provider={provider} size={12} />,
+      icon: <ListIcon size={12} />,
       count: tasks,
     },
   ];

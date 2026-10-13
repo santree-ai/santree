@@ -333,7 +333,7 @@ export function FindBar({ find }: { find: FindState }) {
         spellCheck={false}
         aria-label="Find in file"
         placeholder="Find"
-        className="w-36 bg-transparent font-mono text-[11.5px] text-fg-2 outline-none placeholder:text-muted-4"
+        className="overlay-search-input w-36 bg-transparent font-mono text-[11.5px] text-fg-2 outline-none placeholder:text-muted-4"
       />
       {/* Reserved width, so stepping through matches doesn't shuffle the
           buttons beside it. Announced, since the number is the only feedback a

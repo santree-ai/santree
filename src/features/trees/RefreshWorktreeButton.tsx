@@ -1,9 +1,7 @@
-/** Re-read the worktree's local state on demand — the rail's own refresh.
- *
- *  It sits in the panel header rather than inside one pane because the three
- *  panes it serves (Files, Changes, Session history) all read the same thing:
- *  what is on disk right now. See {@link useRefreshWorktree} for why a watcher
- *  is not enough on its own. */
+/** Re-read the worktree's local state on demand. It lives in the Changes list's
+ *  header row, beside the list/tree toggle: the file list is the one place it is
+ *  about, so it is drawn at the toggle's size and shape. See
+ *  {@link useRefreshWorktree} for why a watcher is not enough on its own. */
 import { RefreshIcon } from "../../components/icons";
 import { useRefreshWorktree } from "../../lib/queries";
 
@@ -19,7 +17,7 @@ export function RefreshWorktreeButton({ repo, worktreeId }: { repo: string; work
       aria-busy={fetching}
       aria-label="Refresh files and git status"
       title="Refresh files and git status"
-      className="flex h-[22px] w-7 flex-none cursor-pointer items-center justify-center self-center rounded text-muted-4 transition-colors hover:bg-hover hover:text-fg-2"
+      className="flex cursor-pointer items-center rounded-[5px] border border-transparent px-1.5 py-1 text-muted-3 transition-colors hover:bg-hover hover:text-fg-2"
     >
       <RefreshIcon size={12} className={fetching ? "animate-spin" : ""} />
     </button>

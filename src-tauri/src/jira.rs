@@ -12,11 +12,12 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use santree_core::domain::{
-    JiraSite, JiraStatus, Task, TeamRef, TicketRef, TriageComment, TriageDetail, TriageSchedule,
-    TriageTicket, WorkflowState,
+    JiraSite, JiraStatus, Task, TeamRef, TicketProvider, TicketRef, TriageComment, TriageDetail,
+    TriageSchedule, TriageTicket, WorkflowState,
 };
 use santree_core::jira as core_jira;
 
+use crate::connection;
 use crate::db::{now_ms, Db};
 use crate::gql;
 use crate::oauth::{self, Tokens};
@@ -114,43 +115,13 @@ fn scopes_allow_write(scopes: &str) -> bool {
     scopes.split(',').any(|s| s.trim() == "write:jira-work")
 }
 
-pub(crate) fn resolved_site<'a>(
-    sites: &'a [(String, String)],
-    linked: Option<&str>,
-) -> Option<&'a (String, String)> {
-    linked
-        .and_then(|id| sites.iter().find(|(cid, _)| cid == id))
-        .or_else(|| sites.first())
-}
-
+/// The cloud id a repo's queries go to: the Jira site its connection names, if that
+/// is what it is linked to.
 async fn resolve_cloud_id(db: &Db, repo: &str) -> Result<Option<String>> {
-    let linked: Option<Option<String>> =
-        sqlx::query_scalar("SELECT jira_cloud_id FROM repos WHERE name = ?")
-            .bind(repo)
-            .fetch_optional(db)
-            .await?;
-    let sites = sites_by_name(db).await?;
-    Ok(resolved_site(&sites, linked.flatten().as_deref()).map(|(id, _)| id.clone()))
-}
-
-pub async fn set_repo_site(db: &Db, repo: &str, cloud_id: Option<String>) -> Result<()> {
-    // A repo has one tracker: linking a site takes it off Linear, while clearing
-    // the link leaves a Linear link alone.
-    let affected = sqlx::query(
-        "UPDATE repos SET jira_cloud_id = ?,
-           linear_org_slug = CASE WHEN ? IS NULL THEN linear_org_slug ELSE NULL END
-         WHERE name = ?",
-    )
-    .bind(cloud_id.clone())
-    .bind(cloud_id)
-    .bind(repo)
-    .execute(db)
-    .await?
-    .rows_affected();
-    if affected == 0 {
-        bail!("repo '{repo}' is not registered");
-    }
-    Ok(())
+    Ok(connection::of(db, repo)
+        .await?
+        .filter(|c| c.provider == TicketProvider::Jira)
+        .map(|c| c.key))
 }
 
 pub async fn auth_status(db: &Db, repo: &str) -> Result<JiraStatus> {
@@ -1596,10 +1567,6 @@ pub async fn connect(db: &Db) -> Result<Vec<JiraSite>> {
         if !same_grant {
             continue;
         }
-        sqlx::query("UPDATE repos SET jira_cloud_id = NULL WHERE jira_cloud_id = ?")
-            .bind(&cloud_id)
-            .execute(db)
-            .await?;
         sqlx::query("DELETE FROM jira_sites WHERE cloud_id = ?")
             .bind(&cloud_id)
             .execute(db)
@@ -1756,18 +1723,5 @@ mod tests {
 
         let jira_format = "2024-01-15T10:30:00.000+0000";
         assert!(parse_jira_datetime(jira_format).is_some());
-    }
-
-    #[test]
-    fn resolved_site_picks_linked_then_first() {
-        let sites = vec![
-            ("cloud1".to_string(), "Alpha".to_string()),
-            ("cloud2".to_string(), "Beta".to_string()),
-        ];
-        assert_eq!(resolved_site(&sites, Some("cloud2")).unwrap().0, "cloud2");
-        assert_eq!(resolved_site(&sites, Some("gone")).unwrap().0, "cloud1");
-        assert_eq!(resolved_site(&sites, None).unwrap().0, "cloud1");
-        let empty: Vec<(String, String)> = vec![];
-        assert!(resolved_site(&empty, None).is_none());
     }
 }

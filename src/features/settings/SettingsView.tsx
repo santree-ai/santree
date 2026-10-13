@@ -119,6 +119,21 @@ const promptsEntry = (forRepo: boolean): SectionDef => ({
   render: (repo) => <PromptsSection repo={repo} forRepo={forRepo} />,
 });
 
+// The variables pane is the one the repo scope shares, hence an entry. Its key is
+// still `environment`, which deep links and the scope switch land on.
+const environmentEntry = (forRepo: boolean): SectionDef => ({
+  key: "environment",
+  label: "Variables",
+  icon: <KeyIcon size={ICON_SIZE} />,
+  render: (repo) => <EnvironmentSection repo={forRepo ? repo : undefined} />,
+});
+const terminalEntry: SectionDef = {
+  key: "terminal",
+  label: "Terminal",
+  icon: <TerminalIcon size={ICON_SIZE} />,
+  render: () => <TerminalSection />,
+};
+
 const APP_NAV: NavNode[] = [
   {
     key: "general",
@@ -126,10 +141,10 @@ const APP_NAV: NavNode[] = [
     icon: <GearIcon size={ICON_SIZE} />,
     render: () => <GeneralSection />,
   },
-  // One item per connected service, and one per agent harness: each provider is
-  // its own destination, so the pane it opens is only ever about that provider.
+  // One item per provider, grouped by what the provider is for: each is its own
+  // destination, so the pane it opens is only ever about that provider.
   {
-    group: "Integrations",
+    group: "Issue trackers",
     sections: [
       {
         key: "linear",
@@ -143,6 +158,11 @@ const APP_NAV: NavNode[] = [
         icon: <JiraLogo size={ICON_SIZE} />,
         render: () => <JiraSection />,
       },
+    ],
+  },
+  {
+    group: "Code hosting",
+    sections: [
       {
         key: "github",
         label: "GitHub",
@@ -158,7 +178,7 @@ const APP_NAV: NavNode[] = [
     ],
   },
   {
-    group: "Agents",
+    group: "AI harness",
     sections: [
       {
         key: "agent-claude",
@@ -174,31 +194,28 @@ const APP_NAV: NavNode[] = [
       },
     ],
   },
-  // Top-level beside those two groups, not inside Agents: it reports on every
-  // provider at once, and on the API services alongside them.
   {
-    key: "usage",
-    label: "Usage",
-    icon: <BoltIcon size={ICON_SIZE} />,
-    render: () => <UsageSection />,
+    group: "Environment",
+    sections: [environmentEntry(false), terminalEntry],
   },
+  // Usage reports on every provider at once, and on the API services alongside
+  // them, so it sits with the extras rather than under any one harness.
   {
-    key: "english-tutor",
-    label: "English tutor",
-    icon: <PencilIcon size={ICON_SIZE} />,
-    render: () => <EnglishTutorSection />,
-  },
-  {
-    key: "environment",
-    label: "Environment",
-    icon: <KeyIcon size={ICON_SIZE} />,
-    render: () => <EnvironmentSection />,
-  },
-  {
-    key: "terminal",
-    label: "Terminal",
-    icon: <TerminalIcon size={ICON_SIZE} />,
-    render: () => <TerminalSection />,
+    group: "Extra",
+    sections: [
+      {
+        key: "english-tutor",
+        label: "English tutor",
+        icon: <PencilIcon size={ICON_SIZE} />,
+        render: () => <EnglishTutorSection />,
+      },
+      {
+        key: "usage",
+        label: "Usage",
+        icon: <BoltIcon size={ICON_SIZE} />,
+        render: () => <UsageSection />,
+      },
+    ],
   },
   {
     group: "Workflow defaults",
@@ -214,12 +231,7 @@ const REPO_NAV: NavNode[] = [
     icon: <LinkIcon size={ICON_SIZE} />,
     render: (repo) => <RepoTrackerSection repo={repo} />,
   },
-  {
-    key: "environment",
-    label: "Environment",
-    icon: <KeyIcon size={ICON_SIZE} />,
-    render: (repo) => <EnvironmentSection repo={repo} />,
-  },
+  environmentEntry(true),
   {
     group: "Workflow defaults",
     sections: [triageEntry(true), workEntry(true), reviewEntry(true)],
@@ -258,16 +270,22 @@ export function SettingsView() {
   const navigate = useNavigate();
 
   // Land on a deep-linked section (e.g. `/settings?section=actions`) when given.
-  const { section: initialSection } = useSearch({ strict: false }) as { section?: string };
-  const [scope, setScope] = useState<Scope>("app");
-  const [section, setSection] = useState<string>(() => resolveSection(APP_NAV, initialSection).key);
+  const {
+    section: initialSection,
+    scope: initialScope,
+    repo: initialRepo,
+  } = useSearch({ strict: false }) as { section?: string; scope?: "repo"; repo?: string };
+  const [scope, setScope] = useState<Scope>(initialScope ?? "app");
+  const [section, setSection] = useState<string>(
+    () => resolveSection(initialScope === "repo" ? REPO_NAV : APP_NAV, initialSection).key,
+  );
 
   // Which repo we're *editing* under the Repo scope. Its own state, with its own
   // picker: Settings is a page, reached from anywhere, and "whose settings am I
   // editing" was never the same question as "what am I looking at". It falls
   // back to the first registered project whenever the current pick isn't a known
   // repo (removed from the registry, or nothing picked yet).
-  const [settingsRepo, setSettingsRepo] = useState("");
+  const [settingsRepo, setSettingsRepo] = useState(initialRepo ?? "");
   useEffect(() => {
     if (settingsRepo && repos.some((r) => r.name === settingsRepo)) return;
     setSettingsRepo(repos[0]?.name ?? "");

@@ -47,6 +47,7 @@ export const demoRepos = (): Repo[] =>
     name,
     tracker: `Linear · ${LINEAR_ORG.name}`,
     provider: "Linear",
+    connection: `linear:${LINEAR_ORG.slug}`,
     agents: [...jobs.values()].filter((j) => j.repo === name && jobState(j) === "active").length,
     path: REPO_PATH[name],
     location: "Local",

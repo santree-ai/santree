@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo } from "react";
 import type { Repo, RepoLocation, Task, Worktree, WorktreePr } from "../../bindings";
 import { type AgentEntry, agentKey } from "../../features/agents/registry";
 import { useAgentEntries } from "../../features/agents/useAgents";
+import { reviewTreeId } from "../../features/reviews/checkoutSource";
 import { mergeWorktrees } from "../../features/trees/model";
 import { stackWorktrees } from "../../features/trees/worktreeGrouping";
 import {
@@ -41,6 +42,7 @@ import {
   parseLinearGroupBy,
   useBaseWorktreesByRepo,
   usePendingWorktreeMoves,
+  usePrCheckoutRemovals,
   useRepos,
   useSetting,
   useTasksByRepo,
@@ -600,10 +602,23 @@ export function useProjectTree(location: RepoLocation): ProjectTreeModel {
     () => groupAgentsByWorktree(entries ?? EMPTY_ENTRIES, seen, nowMs),
     [entries, seen, nowMs],
   );
-  const agentsByPr = useMemo(
-    () => groupAgentsByPr(entries ?? EMPTY_ENTRIES, seen, nowMs),
-    [entries, seen, nowMs],
-  );
+  // A PR whose checkout is being deleted has no place for its reviews to be
+  // running in, so its agents leave the rail at the click — not when the
+  // sessions are torn down and re-read. Two routes to the same PR: a review
+  // checkout's own removal, and the deletion of the worktree that has its id.
+  const removingPrs = usePrCheckoutRemovals();
+  const agentsByPr = useMemo(() => {
+    const byPr = groupAgentsByPr(entries ?? EMPTY_ENTRIES, seen, nowMs);
+    for (const key of byPr.keys()) {
+      const at = key.lastIndexOf("#");
+      const slug = key.slice(0, at);
+      const goneTree =
+        slug.split("/").length === 2 &&
+        pendingDeletes.has(reviewTreeId({ repo: slug, number: Number(key.slice(at + 1)) }));
+      if (removingPrs.has(key) || goneTree) byPr.delete(key);
+    }
+    return byPr;
+  }, [entries, seen, nowMs, removingPrs, pendingDeletes]);
 
   const worktreesFor = useCallback(
     (repo: string): Worktree[] | undefined => {

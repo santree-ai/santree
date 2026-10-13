@@ -29,6 +29,7 @@ function pr(over: Partial<ReviewPr> = {}): ReviewPr {
     commentCount: 0,
     aiDraftCount: 0,
     reviewers: [],
+    reviewedBy: [],
     updatedAt: "2026-08-05T00:00:00Z",
     createdAt: "2026-08-01T00:00:00Z",
     waitingSince: "2026-08-01T00:00:00Z",

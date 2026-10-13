@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail, Result};
 
 use santree_core::domain::{Repo, RepoLocation, TicketProvider};
 
+use crate::connection::{self, ConnectionRef};
 use crate::daedalus::host::DaedalusHost;
 use crate::db::Db;
 use crate::git::{self, Checkout};
@@ -25,16 +26,9 @@ use crate::tracker;
 /// links (one per issue with an active agent worktree) rather than a stored
 /// column, so it always reflects reality.
 pub async fn list(db: &Db) -> Result<Vec<Repo>> {
-    type RepoRow = (
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    );
+    type RepoRow = (String, String, Option<String>, Option<String>, String);
     let rows = sqlx::query_as::<_, RepoRow>(
-        "SELECT r.name, r.tracker, r.path, r.linear_org_slug, r.jira_cloud_id, r.location
+        "SELECT r.name, r.tracker, r.path, r.connection, r.location
          FROM repos r ORDER BY r.rowid",
     )
     .fetch_all(db)
@@ -43,45 +37,53 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
     // rows go through the one predicate that excludes them everywhere else — they
     // are throwaway detached trees, not agents the user has working.
     let counts = worktree_counts(db).await?;
-    // The provider and its label have to name what the repo's reads actually go
-    // to, so both come from the resolvers those reads use rather than a copy.
+    // The label names the connection the repo's reads go to, so it comes from the
+    // connections themselves rather than a copy of how they are resolved.
     let orgs = linear::orgs_by_name(db).await?;
     let sites = jira::sites_by_name(db).await?;
 
     Ok(rows
         .into_iter()
-        .map(
-            |(name, stored_tracker, path, linked_slug, linked_cloud_id, location)| {
-                let provider = tracker::resolve(
-                    linked_cloud_id.is_some(),
-                    linked_slug.is_some(),
-                    !orgs.is_empty(),
-                    !sites.is_empty(),
-                );
-                let label = match provider {
-                    Some(TicketProvider::Jira) => {
-                        jira::resolved_site(&sites, linked_cloud_id.as_deref())
-                            .map(|(_, site)| format!("Jira · {site}"))
-                    }
-                    Some(TicketProvider::Linear) => {
-                        linear::resolved_org(&orgs, linked_slug.as_deref())
-                            .map(|(_, org)| format!("Linear · {org}"))
-                    }
-                    None => None,
+        .map(|(name, stored_tracker, path, stored, location)| {
+            let linked = stored.as_deref().and_then(ConnectionRef::parse);
+            let named = linked.as_ref().and_then(|c| {
+                let known = match c.provider {
+                    TicketProvider::Linear => &orgs,
+                    TicketProvider::Jira => &sites,
                 };
-                Repo {
-                    agents: path
-                        .as_deref()
-                        .map_or(0, |path| worktrees_at(&counts, path)),
-                    name,
-                    tracker: label.unwrap_or(stored_tracker),
-                    provider,
-                    path,
-                    location: RepoLocation::from_db(&location),
-                }
-            },
-        )
+                let display = &known.iter().find(|(key, _)| *key == c.key)?.1;
+                Some((
+                    c.provider,
+                    c.id(),
+                    format!("{} · {display}", tracker::name(c.provider)),
+                ))
+            });
+            let (provider, connection, label) = match named {
+                Some((p, id, label)) => (Some(p), Some(id), Some(label)),
+                None => (None, None, None),
+            };
+            Repo {
+                agents: path
+                    .as_deref()
+                    .map_or(0, |path| worktrees_at(&counts, path)),
+                name,
+                tracker: label.unwrap_or(stored_tracker),
+                provider,
+                connection,
+                path,
+                location: RepoLocation::from_db(&location),
+            }
+        })
         .collect())
+}
+
+/// One registered repo, as [`list`] draws it.
+async fn get(db: &Db, name: &str) -> Result<Repo> {
+    list(db)
+        .await?
+        .into_iter()
+        .find(|r| r.name == name)
+        .ok_or_else(|| anyhow!("repo '{name}' is not registered"))
 }
 
 /// Every worktree link as `(repo path, issue id)` — the raw material both agent
@@ -262,21 +264,12 @@ pub async fn add(db: &Db, path: String) -> Result<Repo> {
         }
     };
 
-    // Usually 0 for a fresh repo, but re-adding an already-registered one
-    // (the call is idempotent) can have existing worktree links.
-    let agents = worktrees_at(&worktree_counts(db).await?, &toplevel);
-
-    let provider = tracker::provider(db, &name).await?;
+    // A repo added while there is exactly one connection takes it; with several
+    // it waits to be told which.
+    connection::adopt_sole(db, &name).await?;
 
     log::info!("registered repository {name} at {toplevel}");
-    Ok(Repo {
-        name,
-        tracker,
-        provider,
-        agents,
-        path: Some(toplevel),
-        location: RepoLocation::Local,
-    })
+    get(db, &name).await
 }
 
 /// Register a checkout that lives on Daedalus. Nothing here touches this
@@ -322,16 +315,9 @@ pub async fn add_daedalus(db: &Db, server_path: &str, remote: Option<&str>) -> R
         }
     };
 
-    let provider = tracker::provider(db, &name).await?;
+    connection::adopt_sole(db, &name).await?;
     log::info!("registered Daedalus repository {name}");
-    Ok(Repo {
-        name,
-        tracker,
-        provider,
-        agents: worktrees_at(&worktree_counts(db).await?, server_path),
-        path: Some(server_path.to_string()),
-        location: RepoLocation::Daedalus,
-    })
+    get(db, &name).await
 }
 
 /// The server paths of every registered Daedalus repo — what the workspace

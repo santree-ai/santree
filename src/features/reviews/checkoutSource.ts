@@ -17,7 +17,18 @@
  * under a ticket's own worktree (AK-276, say) that the user started before the
  * PR existed. That one wins: it is already work, and it is already in Trees.
  */
-import type { ReviewCheckout, ReviewPr, Worktree } from "../../bindings";
+import type { AgentKind, ReviewCheckout, ReviewPr, Worktree } from "../../bindings";
+
+/** The providers that can review a pull request, in menu order. */
+export const REVIEW_AGENTS: AgentKind[] = ["Codex", "Claude"];
+
+/** The provider-neutral terminal key for a PR's AI review. Parsed back out by the
+ * Agents panel (`registry.ts`), so the shape is a shared convention. It lives with
+ * the other minters here so the sidebar's removal flow can name a PR's sessions
+ * without importing the whole review pane. */
+export function aiReviewTermKey(pr: Pick<ReviewPr, "repo" | "number">): string {
+  return `ai-review:${pr.repo}#${pr.number}`;
+}
 
 /** Collision-free, path-safe id for a PR's checkout — **the same string the
  *  backend's `review_worktree_id` mints**, so a pull request's worktree has one

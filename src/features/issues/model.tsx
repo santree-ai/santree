@@ -359,9 +359,13 @@ export function IssuesProvider({
   children,
   actionable,
   teams = NO_TEAMS,
+  scopeRepo: scopeOverride = null,
 }: {
   children: ReactNode;
   actionable?: ActionableControl;
+  /** The project to read through when the page has picked a source; otherwise
+   *  the Work scope's. */
+  scopeRepo?: string | null;
   /** The Tickets page's team pick (team keys; empty is every team): the graph
    *  and the inspector read the same slice the list shows. The page resolves
    *  the pick against the teams it has, so a stale key never arrives here. */
@@ -372,7 +376,8 @@ export function IssuesProvider({
   // question; which project a ticket starts in is another, and `askRepo` below
   // is the only thing that answers the second. Conflating them is what let a
   // ticket land in whichever project the view happened to be pointed at.
-  const scopeRepo = useWorkScopeRepo();
+  const defaultScope = useWorkScopeRepo();
+  const scopeRepo = scopeOverride ?? defaultScope;
   const candidates = useOrgSiblings(scopeRepo);
   const askRepo = useWorkRepoGate();
   const {

@@ -12,6 +12,7 @@
  * costs a read of its own, so it is asked for the first time the menu opens
  * rather than once per row of an inbox that can run to dozens.
  */
+
 import { useNavigate } from "@tanstack/react-router";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useState } from "react";
@@ -19,9 +20,12 @@ import { type ReactNode, useState } from "react";
 import type { ReviewPr } from "../../bindings";
 import { reviewTreeId } from "../../features/reviews/checkoutSource";
 import { ticketIdFor } from "../../features/reviews/ticket";
+import {
+  useCheckoutRemoved,
+  useRemoveReviewCheckout,
+} from "../../features/reviews/useRemovePrCheckout";
 import { useWorktreeDeletion } from "../../features/trees/useWorktreeDeletion";
 import {
-  useRemoveReviewWorkspace,
   useReviewCheckout,
   useTicketIssueUrl,
   useTicketProvider,
@@ -35,7 +39,7 @@ import { ConfirmDialog, ContextMenu, type ContextMenuItem } from "../primitives"
 
 export function ReviewPrMenu({ pr, children }: { pr: ReviewPr; children: ReactNode }) {
   const navigate = useNavigate();
-  const { requestTreeFocus } = useAppUi();
+  const { requestTreeFocus, pendingDeletes } = useAppUi();
   // The registry's own answer, filled by the inbox that lists this row. A PR
   // from a repo never cloned has none, and nothing here can reach a checkout
   // for it — every read below is off with an empty repo.
@@ -48,15 +52,26 @@ export function ReviewPrMenu({ pr, children }: { pr: ReviewPr; children: ReactNo
   const linkFor = useTicketIssueUrl(repo);
   const provider = useTicketProvider(repo);
   const { deleteWorktree } = useWorktreeDeletion(repo);
-  const removeReview = useRemoveReviewWorkspace(repo);
+  const removeReview = useRemoveReviewCheckout(repo);
+  const checkoutRemoved = useCheckoutRemoved(repo);
 
   // The same three-way match `usePrCheckout` makes: a tree cut for the PR, one
   // cut for its ticket before the PR existed, or any worktree on its branch.
+  // A checkout whose deletion has been asked for is already gone as far as this
+  // menu goes: offering it again is how a second delete came back as an error.
+  // (A review checkout leaves through its own cache patch; a worktree through
+  // `pendingDeletes`, the register the whole sidebar hides deleted rows by — and
+  // the review read can name the same worktree, so it is held to it too.)
   const treeId = reviewTreeId(pr);
   const linkedId = worktreePrs.find((candidate) => candidate.url === pr.url)?.issueId;
   const worktree =
-    worktrees.find((w) => w.id === treeId || w.id === linkedId || w.branch === pr.headRef) ?? null;
-  const checkout = worktree ?? review?.worktree ?? null;
+    worktrees.find(
+      (w) =>
+        !pendingDeletes.has(w.id) &&
+        (w.id === treeId || w.id === linkedId || w.branch === pr.headRef),
+    ) ?? null;
+  const liveReview = review && !pendingDeletes.has(review.worktree.id) ? review : null;
+  const checkout = worktree ?? liveReview?.worktree ?? null;
   const ticket = ticketIdFor(pr);
   const ticketUrl = ticket ? linkFor(ticket) : null;
 
@@ -173,8 +188,15 @@ export function ReviewPrMenu({ pr, children }: { pr: ReviewPr; children: ReactNo
         // Fire and close, as the worktree row's own menu does: the removal runs
         // in the background and rolls back with a toast on error.
         onConfirm={() => {
-          if (worktree) deleteWorktree(worktree.id);
-          else removeReview.mutate({ prRepo: pr.repo, number: pr.number, headSha: pr.headSha });
+          if (worktree) {
+            // The PR's AI reviews run in the worktree "Open as tree" cut (it is
+            // the same id the review checkout has), so they go with it. A
+            // ticket's own worktree on this branch is somewhere else.
+            deleteWorktree(
+              worktree.id,
+              worktree.id === treeId ? () => checkoutRemoved(pr) : undefined,
+            );
+          } else removeReview.remove(pr);
           return Promise.resolve();
         }}
         onClose={() => setConfirming(false)}

@@ -30,8 +30,10 @@ export function tabsToCloseForWorktree(tabs: TerminalTab[], id: string): Termina
 }
 
 export interface WorktreeDeletion {
-  /** Delete one worktree and its branch, in the background. */
-  deleteWorktree: (id: string) => void;
+  /** Delete one worktree and its branch, in the background. `onRemoved` runs once
+   *  it is gone, after its terminals are closed — for a caller with more of its
+   *  own to tear down (a PR's AI reviews). */
+  deleteWorktree: (id: string, onRemoved?: () => void) => void;
   /** Delete several at once, in parallel. Survivors of a partial failure
    *  reappear; the ones that did delete stay hidden. */
   deleteWorktrees: (ids: string[]) => void;
@@ -59,10 +61,13 @@ export function useWorktreeDeletion(repo: string): WorktreeDeletion {
   );
 
   const deleteWorktree = useCallback(
-    (id: string) => {
+    (id: string, onRemoved?: () => void) => {
       addPendingDeletes([id]);
       removeOne(id, {
-        onSuccess: () => closeTerminals([id]),
+        onSuccess: () => {
+          closeTerminals([id]);
+          onRemoved?.();
+        },
         onError: () => removePendingDelete(id),
       });
     },

@@ -44,6 +44,7 @@ import {
 import { fileIconUrl, folderIconUrl } from "./fileIcons";
 import { IndentGuides, ROW_MIN_H, TREE_GROUP } from "./IndentGuides";
 import type { FileScope } from "./model";
+import { RefreshWorktreeButton } from "./RefreshWorktreeButton";
 
 /** One shared empty list rather than a fresh `[]` per render: it is the identity
  *  the memos below key on, and a new array every time re-runs all of them. */
@@ -160,6 +161,7 @@ export function ChangesList({
           </span>
           <div className="flex items-center gap-1.5">
             <ViewToggle tree={tree} onChange={setTree} />
+            <RefreshWorktreeButton repo={repo} worktreeId={worktreeId} />
             {!readOnly && (
               <button
                 type="button"

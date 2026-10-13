@@ -441,10 +441,17 @@ src/
   `BackgroundLaunch.repo`, `QueuedLaunch.repo`, `TreeFocus.repo`, and
   `CreateWorktreeVars.repo` (a var, not a hook argument — the answer arrives at
   click time).
-- **A repo reads one tracker, resolved in one place.** `tracker::resolve` decides
-  it: an explicit `jira_cloud_id` or `linear_org_slug` link wins (binding one
-  clears the other in the same write), and an unlinked repo takes whichever
-  tracker is connected, Linear first. That answer ships as `Repo.provider`, read
+- **A repo reads one tracker, resolved in one place.** `repos.connection` holds
+  it, as a provider-qualified id (`linear:<org slug>`, `jira:<cloud id>`;
+  `connection.rs`), and there is no fallback: a repo reads the connection it is
+  linked to, or none. The database links the waiting repos when an install makes
+  its first connection (triggers in `0038`), `connection::adopt_sole` does the same
+  for a repo added while exactly one exists, and with several the user picks
+  (Settings → Repo → Ticket tracker). Linking one clears the other provider's link
+  by construction (one column). `repos.linear_org_slug` / `jira_cloud_id` are dead
+  columns. Anything that groups repos "by tracker" (the Tickets fold, the Work
+  gate's candidates) keys on `Repo.connection`, never on the `tracker` display
+  label. That answer ships as `Repo.provider`, read
   through `useTicketProvider(repo)`. Every provider-neutral command — issues,
   triage, detail, state, comments, `pr_tickets`, the work and investigate prompts
   — dispatches through `tracker::*`; calling `linear::` or `jira::` directly for

@@ -327,8 +327,10 @@
   border-top: 0;
 }
 
-/* The palette's focused field already has a caret and an accent search icon.
-   A full rectangular ring inside the dialog reads like a selected table cell. */
+/* A search field inside an overlay (the palette, the shortcuts list, the
+   find bar) already has a caret and a search icon, and ⌘F / ⌘K focus it from
+   the keyboard, so the global ring would always show. A full rectangular ring
+   inside the overlay reads like a selected table cell. */
 .overlay-search-input:focus-visible {
   outline: none;
 }

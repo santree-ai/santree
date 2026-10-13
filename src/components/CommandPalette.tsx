@@ -83,7 +83,7 @@ const SETTINGS_SECTIONS: { key: string; label: string; keywords?: string }[] = [
   { key: "prompts", label: "Prompts", keywords: "template" },
   { key: "usage", label: "Usage", keywords: "tokens cost limits" },
   { key: "english-tutor", label: "English tutor", keywords: "writing coach" },
-  { key: "environment", label: "Environment", keywords: "env vars" },
+  { key: "environment", label: "Variables", keywords: "environment env vars" },
   { key: "terminal", label: "Terminal", keywords: "shell font" },
 ];
 

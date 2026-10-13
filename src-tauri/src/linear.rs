@@ -16,11 +16,13 @@ use serde::Deserialize;
 
 use santree_core::domain::{
     ApiBudgetKind, ApiBudgetWindow, CycleRef, LinearApiBudget, LinearConnection, LinearOrg,
-    LinearStatus, LinearTeam, ProjectMilestoneRef, Task, TaskStatus, TeamRef, TicketRef,
-    TriageComment, TriageDetail, TriageSchedule, TriageShift, TriageTicket, WorkflowState,
+    LinearStatus, LinearTeam, ProjectMilestoneRef, Task, TaskStatus, TeamRef, TicketProvider,
+    TicketRef, TriageComment, TriageDetail, TriageSchedule, TriageShift, TriageTicket,
+    WorkflowState,
 };
 use santree_core::{layout, linear as core_linear};
 
+use crate::connection;
 use crate::db::{now_ms, Db};
 use crate::gql::{self, Connection};
 use crate::oauth::{self, GrantedScope, Tokens};
@@ -141,8 +143,7 @@ async fn save_tokens(slug: &str, tokens: Tokens) -> Result<()> {
     oauth::save_tokens("linear", slug, tokens).await
 }
 
-/// Every connected org as `(slug, name)`, ordered by name — the order the "first
-/// org" fallback in [`resolved_org`] is defined against.
+/// Every connected org as `(slug, name)`, ordered by name.
 pub(crate) async fn orgs_by_name(db: &Db) -> Result<Vec<(String, String)>> {
     Ok(
         sqlx::query_as::<_, (String, String)>("SELECT slug, name FROM linear_orgs ORDER BY name")
@@ -155,8 +156,8 @@ pub(crate) async fn orgs_by_name(db: &Db) -> Result<Vec<(String, String)>> {
 pub async fn list_orgs(db: &Db) -> Result<Vec<LinearOrg>> {
     // Read once for the whole list: the mode is app-wide, the grant is per-org.
     let read_only = read_only_mode(db).await?;
-    // Its own query rather than `orgs_by_name`: that one feeds `resolved_org`, whose
-    // (slug, name) shape several callers depend on.
+    // Its own query rather than `orgs_by_name`, whose (slug, name) shape several
+    // callers depend on.
     let rows = sqlx::query_as::<_, (String, String, String, String)>(
         "SELECT slug, name, scopes, auth FROM linear_orgs ORDER BY name",
     )
@@ -171,20 +172,6 @@ pub async fn list_orgs(db: &Db) -> Result<Vec<LinearOrg>> {
             name,
         })
         .collect())
-}
-
-/// The org a repo resolves to, given every connected org and the repo's stored
-/// link: that link when it still names a connected org, else the first org. The one
-/// definition of the fallback — `resolve_org_slug` sends the repo's queries to this
-/// org and `repo::list` labels the repo with it, so the two must not diverge (a repo
-/// row reading "Linear · Acme" while every query went to another workspace).
-pub(crate) fn resolved_org<'a>(
-    orgs: &'a [(String, String)],
-    linked: Option<&str>,
-) -> Option<&'a (String, String)> {
-    linked
-        .and_then(|slug| orgs.iter().find(|(s, _)| s == slug))
-        .or_else(|| orgs.first())
 }
 
 pub(crate) async fn org_row(db: &Db, slug: &str) -> Result<Option<OrgRow>> {
@@ -388,38 +375,13 @@ pub(crate) async fn repo_connection(db: &Db, repo: &str) -> Result<Option<Linear
     Ok(org_row(db, &slug).await?.map(|row| row.connection()))
 }
 
-/// The org slug a repo should use — see [`resolved_org`].
+/// The org slug a repo's queries go to: the Linear org its connection names, if
+/// that is what it is linked to.
 pub(crate) async fn resolve_org_slug(db: &Db, repo: &str) -> Result<Option<String>> {
-    let linked: Option<Option<String>> =
-        sqlx::query_scalar("SELECT linear_org_slug FROM repos WHERE name = ?")
-            .bind(repo)
-            .fetch_optional(db)
-            .await?;
-    let orgs = orgs_by_name(db).await?;
-    Ok(resolved_org(&orgs, linked.flatten().as_deref()).map(|(slug, _)| slug.clone()))
-}
-
-/// Bind (or clear, with `None`) the Linear org a repo uses. Updates the existing
-/// repo row only — binding an org for an unregistered repo used to INSERT a
-/// half-populated row (NULL path/tracker) that showed up as a phantom repo.
-pub async fn set_repo_org(db: &Db, repo: &str, slug: Option<String>) -> Result<()> {
-    // A repo has one tracker: linking an org takes it off Jira, while clearing
-    // the link (back to the default org) leaves a Jira link alone.
-    let affected = sqlx::query(
-        "UPDATE repos SET linear_org_slug = ?,
-           jira_cloud_id = CASE WHEN ? IS NULL THEN jira_cloud_id ELSE NULL END
-         WHERE name = ?",
-    )
-    .bind(slug.clone())
-    .bind(slug)
-    .bind(repo)
-    .execute(db)
-    .await?
-    .rows_affected();
-    if affected == 0 {
-        bail!("repo '{repo}' is not registered");
-    }
-    Ok(())
+    Ok(connection::of(db, repo)
+        .await?
+        .filter(|c| c.provider == TicketProvider::Linear)
+        .map(|c| c.key))
 }
 
 // ── Token refresh ──────────────────────────────────────────────────────────
@@ -3479,11 +3441,11 @@ mod tests {
     use super::{
         apply_subtask_dependencies, cached_team_facts, cycle_ref, entity_not_found, facts_of,
         header_window, image_spans, inbox_filter, map_issue, map_related,
-        migrate_tokens_to_keychain, parse_ms, record_budget, resolve_org_slug, resolved_org,
-        scope_from_setting, scope_of, splice_images, split_identifier, AssignedTriageData,
-        CommentNode, ImageCache, IssueDetailNode, IssueNode, RelatedIssue, RelationNode,
-        SchedQueryData, StateNode, TeamFacts, TeamScope, TicketLookupNode, TriageRow,
-        TriageTeamRules, TtlCache, BUDGETS, IMAGE_HOST,
+        migrate_tokens_to_keychain, parse_ms, record_budget, resolve_org_slug, scope_from_setting,
+        scope_of, splice_images, split_identifier, AssignedTriageData, CommentNode, ImageCache,
+        IssueDetailNode, IssueNode, RelatedIssue, RelationNode, SchedQueryData, StateNode,
+        TeamFacts, TeamScope, TicketLookupNode, TriageRow, TriageTeamRules, TtlCache, BUDGETS,
+        IMAGE_HOST,
     };
     use crate::gql::{Connection, GqlError, GraphQlErrors, PageInfo};
     use anyhow::anyhow;
@@ -4412,30 +4374,69 @@ mod tests {
         assert!(task.project_milestone.is_none());
     }
 
-    // ── Repo → org resolution ─────────────────────────────────────────────
+    // ── Repo → org resolution
 
-    #[test]
-    fn an_explicit_link_wins_and_a_stale_one_falls_back() {
-        let orgs = vec![
-            ("alpha".to_string(), "Alpha".to_string()),
-            ("zulu".to_string(), "Zulu".to_string()),
-        ];
+    /// A repo's queries go to the Linear org its connection names, and to none
+    /// when it is linked to Jira or to nothing.
+    #[tokio::test]
+    async fn queries_go_to_the_org_the_repo_is_linked_to() {
+        let dir = std::env::temp_dir().join(format!("santree-org-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = crate::db::init(dir.join("test.db")).await.unwrap();
+
+        for (slug, name) in [("zzz", "Alpha"), ("aaa", "Zulu")] {
+            sqlx::query("INSERT INTO linear_orgs (slug, name, expires_at) VALUES (?, ?, 0)")
+                .bind(slug)
+                .bind(name)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO repos (name, tracker, path) VALUES ('acme/app', 'GitHub Issues', '/tmp/acme-app')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // Two orgs and no link: no org is guessed.
+        assert_eq!(resolve_org_slug(&db, "acme/app").await.unwrap(), None);
         assert_eq!(
-            resolved_org(&orgs, Some("zulu")).map(|(s, _)| s.as_str()),
-            Some("zulu")
+            crate::repo::list(&db).await.unwrap()[0].tracker,
+            "GitHub Issues"
         );
-        // Defensive: `repos.linear_org_slug` is FK'd `ON DELETE SET NULL`, so a link
-        // to a disconnected org shouldn't exist — if one ever did, both callers would
-        // still agree on the fallback rather than one querying a dead workspace.
+
+        crate::connection::link(&db, "acme/app", Some("linear:aaa"))
+            .await
+            .unwrap();
         assert_eq!(
-            resolved_org(&orgs, Some("gone")).map(|(s, _)| s.as_str()),
-            Some("alpha")
+            resolve_org_slug(&db, "acme/app").await.unwrap().as_deref(),
+            Some("aaa")
         );
+        // The list names the org the queries go to.
         assert_eq!(
-            resolved_org(&orgs, None).map(|(s, _)| s.as_str()),
-            Some("alpha")
+            crate::repo::list(&db).await.unwrap()[0].tracker,
+            "Linear · Zulu"
         );
-        assert_eq!(resolved_org(&[], Some("zulu")), None);
+
+        // Linked to Jira, the repo has no Linear org.
+        sqlx::query(
+            "INSERT INTO jira_sites (cloud_id, site_name, site_url, expires_at)
+             VALUES ('c1', 'Site', 'https://x.atlassian.net', 0)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        crate::connection::set(
+            &db,
+            "acme/app",
+            &crate::connection::ConnectionRef::jira("c1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolve_org_slug(&db, "acme/app").await.unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An MCP org lists as one, and the GraphQL path refuses it by name before it
@@ -4485,58 +4486,6 @@ mod tests {
 
         assert_eq!(connection_of("oauth"), LinearConnection::OAuth);
         assert_eq!(connection_of("something new"), LinearConnection::OAuth);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The invariant the repo list's tracker column promises: the workspace it
-    /// names is the one the repo's issue queries actually go to.
-    #[tokio::test]
-    async fn the_repo_list_names_the_org_its_queries_resolve_to() {
-        let dir = std::env::temp_dir().join(format!("santree-org-resolve-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let db = crate::db::init(dir.join("test.db")).await.unwrap();
-
-        // Not in slug order — the fallback is "first by *name*".
-        for (slug, name) in [("zzz", "Alpha"), ("aaa", "Zulu")] {
-            sqlx::query("INSERT INTO linear_orgs (slug, name, expires_at) VALUES (?, ?, 0)")
-                .bind(slug)
-                .bind(name)
-                .execute(&db)
-                .await
-                .unwrap();
-        }
-        sqlx::query(
-            "INSERT INTO repos (name, tracker, path) VALUES ('acme/app', 'GitHub Issues', '/tmp/acme-app')",
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        // Unlinked: the resolver and the list must land on the *same* first org —
-        // first by name, which is neither the first by slug nor by insertion.
-        assert_eq!(
-            resolve_org_slug(&db, "acme/app").await.unwrap().as_deref(),
-            Some("zzz")
-        );
-        assert_eq!(
-            crate::repo::list(&db).await.unwrap()[0].tracker,
-            "Linear · Alpha"
-        );
-
-        // …and with an explicit link, both follow it.
-        sqlx::query("UPDATE repos SET linear_org_slug = 'aaa' WHERE name = 'acme/app'")
-            .execute(&db)
-            .await
-            .unwrap();
-        assert_eq!(
-            resolve_org_slug(&db, "acme/app").await.unwrap().as_deref(),
-            Some("aaa")
-        );
-        assert_eq!(
-            crate::repo::list(&db).await.unwrap()[0].tracker,
-            "Linear · Zulu"
-        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

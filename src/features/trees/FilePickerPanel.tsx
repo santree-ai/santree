@@ -43,7 +43,6 @@ import { useStartAiReviewInWorktree, useStartWorkInWorktree } from "../reviews/u
 import { AllFilesList } from "./AllFilesList";
 import { GitPanel } from "./GitPanel";
 import { availableFileTabs, BASE_ID, type FileTab, useTrees } from "./model";
-import { RefreshWorktreeButton } from "./RefreshWorktreeButton";
 import { SessionHistory } from "./SessionHistory";
 import { SplitEditor } from "./SplitEditor";
 import { useResumeSessionInWorktree } from "./useResumeSession";
@@ -57,12 +56,12 @@ export function changesDot(status: ChangedFile[] | undefined): string | null {
   return (status?.length ?? 0) > 0 ? "var(--accent)" : null;
 }
 
-/** Six 32px tabs (192px), the five 4px gaps between them (20px), the refresh and
- *  collapse controls with the 2px between them (58px), and the strip's own 8px of
- *  padding each side come to 286px exactly; below that the strip overflows before
- *  the panel ever reaches its collapse threshold. Adding a pane — or another
- *  control to the header — means raising this. */
-const MIN_W = 286;
+/** Six 32px tabs (192px), the five 4px gaps between them (20px), the collapse
+ *  control (28px), and the strip's own 8px of padding each side come to 256px
+ *  exactly; below that the strip overflows before the panel ever reaches its
+ *  collapse threshold. Adding a pane — or another control to the header — means
+ *  raising this. */
+const MIN_W = 256;
 /** Wide enough for the ticket pane to be readable — an issue description at 320px
  *  is a column of five-word lines. */
 const MAX_W = 680;
@@ -87,10 +86,6 @@ const TABS: SidePanelTab<FileTab>[] = [
   // {@link QueueAction}), so the buttons and their destination read as one thing.
   { tab: "aiWork", label: "AI work queue", icon: <SparklesIcon size={15} /> },
 ];
-
-/** The panes whose content is read off the disk, and so the ones the refresh
- *  button belongs on. */
-const LOCAL_PANES = new Set<FileTab>(["files", "changes", "history"]);
 
 export function FilePickerPanel() {
   const {
@@ -279,13 +274,6 @@ export function FilePickerPanel() {
       ),
   };
 
-  // Only on the panes that read the disk. Beside the ticket or the pull request
-  // it would be a control that does nothing you can see — those are external
-  // reads, and the status bar's own Refresh (⌘⇧R) is what re-pulls them.
-  const refresh = LOCAL_PANES.has(fileTab) ? (
-    <RefreshWorktreeButton repo={repo} worktreeId={activeId} />
-  ) : null;
-
   return (
     <SidePanel
       tabs={tabs}
@@ -300,7 +288,6 @@ export function FilePickerPanel() {
       max={MAX_W}
       resetTo={DEFAULT_W}
       ariaLabel="Worktree panel"
-      action={refresh}
     >
       {/* A total map rather than a ternary cascade: every pane is named by its own
           tab, so a new `FileTab` is a compile error here instead of silently

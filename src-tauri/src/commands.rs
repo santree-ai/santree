@@ -3029,15 +3029,17 @@ pub async fn linear_orgs(db: State<'_, Db>) -> CmdResult<Vec<LinearOrg>> {
     Ok(linear::list_orgs(&db).await?)
 }
 
-/// Bind (or clear) the Linear org a repo uses.
+/// Link a repo to a ticket connection — `linear:<org slug>` or `jira:<cloud id>`,
+/// the ids `Repo.connection` carries — or, with `None`, take it off its tracker.
+/// The id is parsed and must name a connection that exists.
 #[tauri::command]
 #[specta::specta]
-pub async fn set_repo_linear_org(
+pub async fn set_repo_connection(
     repo: String,
-    slug: Option<String>,
+    connection: Option<String>,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    Ok(linear::set_repo_org(&db, &repo, slug).await?)
+    Ok(crate::connection::link(&db, &repo, connection.as_deref()).await?)
 }
 
 /// The repo's assigned Linear issues as a positioned dependency graph — live when
@@ -3175,17 +3177,6 @@ pub async fn jira_auth_status(repo: String, db: State<'_, Db>) -> CmdResult<Jira
 #[specta::specta]
 pub async fn jira_sites(db: State<'_, Db>) -> CmdResult<Vec<JiraSite>> {
     Ok(jira::list_sites(&db).await?)
-}
-
-/// Bind (or clear) the Jira site a repo uses.
-#[tauri::command]
-#[specta::specta]
-pub async fn set_repo_jira_site(
-    repo: String,
-    cloud_id: Option<String>,
-    db: State<'_, Db>,
-) -> CmdResult<()> {
-    Ok(jira::set_repo_site(&db, &repo, cloud_id).await?)
 }
 
 /// Run the Jira OAuth flow; returns the updated site list.

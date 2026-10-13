@@ -36,7 +36,7 @@ import {
   PrMergedIcon,
 } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
-import { Button, Pill } from "../../components/primitives";
+import { Button, Pill, Spinner } from "../../components/primitives";
 import { usePrDetail } from "../../lib/queries";
 import { splitRepoSlug } from "../../lib/repo";
 import { useAppUi } from "../../state/AppContext";
@@ -140,8 +140,8 @@ export function ReviewHeader({
                 title={treeAction.title}
                 className="flex-none"
               >
-                <BranchIcon size={11} />
-                {treeAction.label}
+                {checkout.opening ? <Spinner size={11} /> : <BranchIcon size={11} />}
+                {checkout.opening ? "Creating…" : treeAction.label}
               </Button>
             )}
             {checkout && !checkout.canOpen && (

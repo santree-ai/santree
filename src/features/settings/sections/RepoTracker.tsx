@@ -1,31 +1,25 @@
-/** The per-repo Ticket tracker section: which tracker supplies this repo's
- *  tickets, which of its connected orgs or sites, and — for Jira, which has no
- *  triage state of its own — the query that fills its triage queue.
+/** The per-repo Ticket tracker section: which connection — a Linear org or a Jira
+ *  site — supplies this repo's tickets, and, for Jira (which has no triage state
+ *  of its own), the query that fills its triage queue.
  *
- *  A repo reads from one tracker. The switch at the top picks which tracker's
- *  options you are looking at; binding an org or a site in them is what moves the
- *  repo — the backend clears the other tracker's link in the same write, so the
- *  two can never both claim it. */
+ *  A repo reads from exactly one connection, and several repos may share one.
+ *  Picking a different one moves the repo; there is no default to fall back to, so
+ *  a repo linked to none has no tickets. */
 
 import { type ReactNode, useId, useState } from "react";
 
 import type { TicketProvider } from "../../../bindings";
-import { TrackerLogo } from "../../../components/icons";
-import { Button, ChevronSelect, Segmented } from "../../../components/primitives";
+import { Button, ChevronSelect } from "../../../components/primitives";
 import {
   DEFAULT_JIRA_TRIAGE_JQL,
   JIRA_TRIAGE_JQL_KEY,
+  useConnections,
   useJiraConnect,
-  useJiraSites,
-  useJiraStatus,
   useLinearConnect,
-  useLinearOrgs,
-  useLinearStatus,
-  useSetRepoJiraSite,
-  useSetRepoLinearOrg,
+  useRepos,
+  useSetRepoConnection,
   useSetSetting,
   useSetting,
-  useTicketProvider,
 } from "../../../lib/queries";
 import { JIRA_BRAND, LINEAR_BRAND } from "../../../theme/colors";
 import { Heading, SELECT_CLASS } from "../widgets";
@@ -33,149 +27,86 @@ import { jiraBadge } from "./Jira";
 import { linearBadge } from "./Linear";
 
 export function RepoTrackerSection({ repo }: { repo: string }) {
-  const active = useTicketProvider(repo);
-  // A pick only holds for the repo it was made on: switching the repo being
-  // edited lands on that repo's own tracker.
-  const [picked, setPicked] = useState<{ repo: string; provider: TicketProvider } | null>(null);
-  const shown = picked?.repo === repo ? picked.provider : active;
-  const setShown = (provider: TicketProvider) => setPicked({ repo, provider });
+  const connections = useConnections();
+  const { data: repos } = useRepos();
+  const current = repos?.find((r) => r.name === repo);
+  const setConnection = useSetRepoConnection();
+  const linearConnect = useLinearConnect();
+  const jiraConnect = useJiraConnect();
+  const labelId = useId();
+
+  // A provider with nothing connected can be connected from here: the picker
+  // only lists what exists.
+  const missing: TicketProvider[] = (["Linear", "Jira"] as const).filter(
+    (p) => !connections.some((c) => c.provider === p),
+  );
 
   return (
     <>
       <Heading
         title={`Ticket tracker · ${repo}`}
-        subtitle="Choose where this repo's tickets come from. A repo reads from one tracker at a time."
+        subtitle="Choose where this repo's tickets come from. A repo reads from one tracker at a time, and several repos can share one."
       />
-      <Segmented<TicketProvider>
-        className="mb-3 w-[200px]"
-        value={shown}
-        onChange={setShown}
-        options={[
-          { value: "Linear", label: "Linear", icon: <TrackerLogo provider="Linear" size={11} /> },
-          { value: "Jira", label: "Jira", icon: <TrackerLogo provider="Jira" size={11} /> },
-        ]}
-      />
-      {shown === "Linear" ? (
-        <LinearPicker repo={repo} active={active === "Linear"} />
-      ) : (
-        <JiraPicker repo={repo} active={active === "Jira"} />
-      )}
-    </>
-  );
-}
-
-function LinearPicker({ repo, active }: { repo: string; active: boolean }) {
-  const { data: orgs = [] } = useLinearOrgs();
-  const { data: status } = useLinearStatus(repo);
-  const setOrg = useSetRepoLinearOrg();
-  const connect = useLinearConnect();
-  const labelId = useId();
-
-  if (orgs.length === 0) {
-    return (
-      <ConnectCard
-        badge={linearBadge}
-        name="Linear"
-        brand={LINEAR_BRAND}
-        pending={connect.isPending}
-        onConnect={() => connect.mutate()}
-      />
-    );
-  }
-  return (
-    <PickerCard
-      labelId={labelId}
-      title="Linear organization"
-      hint={
-        active ? (
-          <>
-            Tickets for <span className="font-mono text-fg-3">{repo}</span> come from this org.
-          </>
-        ) : (
-          "This repo reads from Jira. Choose an org to move it to Linear."
-        )
-      }
-    >
-      <ChevronSelect
-        value={active ? (status?.orgSlug ?? "") : ""}
-        onChange={(slug) => setOrg.mutate({ repo, slug })}
-        className={SELECT_CLASS}
-        wrapperClassName="flex-1"
-        aria-labelledby={labelId}
-      >
-        {!active && (
-          <option value="" disabled className="bg-input">
-            Choose an org…
-          </option>
-        )}
-        {orgs.map((org) => (
-          <option key={org.slug} value={org.slug} className="bg-input">
-            {org.name} ({org.slug})
-          </option>
-        ))}
-      </ChevronSelect>
-      {/* Only while Linear is the tracker: clearing the link goes back to the
-          default org, which from Jira would be a move rather than a reset. */}
-      {active && (
-        <Button onClick={() => setOrg.mutate({ repo, slug: null })}>Reset to default</Button>
-      )}
-    </PickerCard>
-  );
-}
-
-function JiraPicker({ repo, active }: { repo: string; active: boolean }) {
-  const { data: sites = [] } = useJiraSites();
-  const { data: status } = useJiraStatus(repo);
-  const setSite = useSetRepoJiraSite();
-  const connect = useJiraConnect();
-  const labelId = useId();
-
-  if (sites.length === 0) {
-    return (
-      <ConnectCard
-        badge={jiraBadge}
-        name="Jira"
-        brand={JIRA_BRAND}
-        pending={connect.isPending}
-        onConnect={() => connect.mutate()}
-      />
-    );
-  }
-  return (
-    <>
-      <PickerCard
-        labelId={labelId}
-        title="Jira site"
-        hint={
-          active ? (
-            <>
-              Tickets for <span className="font-mono text-fg-3">{repo}</span> come from this site.
-            </>
-          ) : (
-            "This repo reads from Linear. Choose a site to move it to Jira."
-          )
-        }
-      >
-        <ChevronSelect
-          value={active ? (status?.cloudId ?? "") : ""}
-          onChange={(cloudId) => setSite.mutate({ repo, cloudId })}
-          className={SELECT_CLASS}
-          wrapperClassName="flex-1"
-          aria-labelledby={labelId}
+      {connections.length > 0 && (
+        <PickerCard
+          labelId={labelId}
+          title="Connection"
+          hint={
+            current?.connection ? (
+              <>
+                Tickets for <span className="font-mono text-fg-3">{repo}</span> come from this
+                connection.
+              </>
+            ) : (
+              <>
+                <span className="font-mono text-fg-3">{repo}</span> isn't linked to a tracker, so it
+                has no tickets. Choose one.
+              </>
+            )
+          }
         >
-          {!active && (
-            <option value="" disabled className="bg-input">
-              Choose a site…
+          <ChevronSelect
+            value={current?.connection ?? ""}
+            onChange={(connection) =>
+              setConnection.mutate({ repo, connection: connection || null })
+            }
+            className={SELECT_CLASS}
+            wrapperClassName="flex-1"
+            aria-labelledby={labelId}
+          >
+            <option value="" className="bg-input">
+              No tracker
             </option>
+            {connections.map((c) => (
+              <option key={c.id} value={c.id} className="bg-input">
+                {c.label}
+              </option>
+            ))}
+          </ChevronSelect>
+        </PickerCard>
+      )}
+      {current?.provider === "Jira" && <TriageQueryCard repo={repo} />}
+      {missing.map((provider) => (
+        <div key={provider} className="mt-3">
+          {provider === "Linear" ? (
+            <ConnectCard
+              badge={linearBadge}
+              name="Linear"
+              brand={LINEAR_BRAND}
+              pending={linearConnect.isPending}
+              onConnect={() => linearConnect.mutate()}
+            />
+          ) : (
+            <ConnectCard
+              badge={jiraBadge}
+              name="Jira"
+              brand={JIRA_BRAND}
+              pending={jiraConnect.isPending}
+              onConnect={() => jiraConnect.mutate()}
+            />
           )}
-          {sites.map((site) => (
-            <option key={site.cloudId} value={site.cloudId} className="bg-input">
-              {site.siteName}
-            </option>
-          ))}
-        </ChevronSelect>
-      </PickerCard>
-      {active && <TriageQueryCard repo={repo} />}
+        </div>
+      ))}
     </>
   );
 }
@@ -287,7 +218,7 @@ function ConnectCard({
       <div className="min-w-0 flex-1">
         <div className="text-[12.5px] font-medium text-fg-3">{name} isn't connected</div>
         <div className="mt-[3px] text-[11.5px] text-muted-3">
-          Connect it to pull this repo's assigned issues.
+          Connect it to pull assigned issues into your projects.
         </div>
       </div>
       {/* Brand-colored primary, as the Integrations cards do: the one deliberate

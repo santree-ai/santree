@@ -19,6 +19,7 @@ use serde::Deserialize;
 
 use santree_core::domain::{LegacyCliMigration, LinearOrg};
 
+use crate::connection::{self, ConnectionRef};
 use crate::db::Db;
 use crate::linear;
 use crate::repo;
@@ -97,21 +98,12 @@ fn read_cli_config(
 /// santree-CLI configuration left in a registered repo, when acting on it is
 /// possible: `already_connected` when the workspace is connected and the repo
 /// just needs linking, otherwise an importable credential exists. `None` when
-/// there's no legacy config, no usable credential, or the repo already has an
-/// explicit workspace link (nothing to adopt — which is also what keeps
-/// re-adding an already-migrated repo quiet).
+/// there's no legacy config, no usable credential, or the repo is already linked
+/// to that workspace (nothing to adopt).
 pub async fn probe(db: &Db, repo: &str) -> Result<Option<LegacyCliMigration>> {
     let Some(path) = repo::path(db, repo).await? else {
         bail!("repo '{repo}' is not registered");
     };
-    let linked: Option<Option<String>> =
-        sqlx::query_scalar("SELECT linear_org_slug FROM repos WHERE name = ?")
-            .bind(repo)
-            .fetch_optional(db)
-            .await?;
-    if linked.flatten().is_some() {
-        return Ok(None);
-    }
     let found = tokio::task::spawn_blocking(move || {
         read_cli_config(Path::new(&path), cli_config_dir().as_deref())
     })
@@ -120,6 +112,13 @@ pub async fn probe(db: &Db, repo: &str) -> Result<Option<LegacyCliMigration>> {
     let Some((slug, tokens)) = found else {
         return Ok(None);
     };
+    // Already on the workspace the CLI recorded: nothing left to adopt, which is
+    // also what keeps re-adding an already-migrated repo quiet. A repo that sits on
+    // another connection (the only one there was when it was added) is still
+    // offered the CLI's workspace.
+    if connection::of(db, repo).await? == Some(ConnectionRef::linear(slug.as_str())) {
+        return Ok(None);
+    }
     // For a connected org the app's stored name is the truth (the frontend
     // names it in the "linked to <workspace>" toast); the CLI's stored name
     // only labels the import dialog.
@@ -159,7 +158,7 @@ pub async fn migrate(db: &Db, repo: &str) -> Result<LinearOrg> {
         anyhow!("the santree CLI auth store has no credential for workspace '{slug}'")
     })?;
     let org = linear::import_cli_credential(db, &slug, tokens.refresh_token).await?;
-    linear::set_repo_org(db, repo, Some(org.slug.clone())).await?;
+    connection::set(db, repo, &ConnectionRef::linear(org.slug.clone())).await?;
     tokio::task::spawn_blocking(move || {
         if let Some(dir) = cli_config_dir() {
             scrub_cli_tokens(&dir, &slug);
@@ -352,20 +351,18 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
-        let hit = probe(&db, "legacy").await.unwrap().unwrap();
-        assert!(hit.already_connected);
-        assert_eq!(hit.org_slug, slug);
+        // The org was the only connection, so the repo took it: already linked to
+        // the CLI's workspace, nothing to adopt.
+        assert_eq!(probe(&db, "legacy").await.unwrap(), None);
 
-        sqlx::query("UPDATE repos SET linear_org_slug = ? WHERE name = 'legacy'")
-            .bind(slug)
+        // On another connection, the CLI's workspace is still on offer.
+        sqlx::query("UPDATE repos SET connection = 'linear:elsewhere' WHERE name = 'legacy'")
             .execute(&db)
             .await
             .unwrap();
-        assert_eq!(
-            probe(&db, "legacy").await.unwrap(),
-            None,
-            "an explicitly linked repo has nothing left to adopt"
-        );
+        let hit = probe(&db, "legacy").await.unwrap().unwrap();
+        assert!(hit.already_connected);
+        assert_eq!(hit.org_slug, slug);
 
         assert!(
             probe(&db, "ghost").await.is_err(),

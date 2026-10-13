@@ -11,7 +11,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ReviewPr } from "../../bindings";
+import type { ReviewPr, Worktree } from "../../bindings";
 
 const model = vi.hoisted(() => ({
   active: {
@@ -148,6 +148,7 @@ vi.mock("../../lib/queries", () => ({
   useRemoveWorktreeTab: () => ({ mutate: vi.fn() }),
 }));
 
+import { worktree as fxWorktree } from "../../test/fixtures";
 import { ReviewDetail } from "./ReviewDetail";
 import { aiTab, type ReviewMainTab, type ReviewTabs } from "./useReviewTabs";
 
@@ -155,11 +156,17 @@ import { aiTab, type ReviewMainTab, type ReviewTabs } from "./useReviewTabs";
  *  the AI review from opening. */
 const checkout = {
   repo: "acme/app",
-  worktree: null,
+  worktree: null as Worktree | null,
   worktreeId: "",
-  source: { worktree: null, worktreeId: "", repo: "acme/app", isReview: false },
+  source: {
+    worktree: null as Worktree | null,
+    worktreeId: "",
+    repo: "acme/app",
+    isReview: false,
+  },
   openAsTree: vi.fn(),
   opening: false,
+  known: true,
   canOpen: true,
 };
 
@@ -185,6 +192,8 @@ beforeEach(() => {
   // Most cases run against a PR with nothing checked out; the ones that need a
   // checkout set it themselves.
   checkout.worktreeId = "";
+  checkout.source = { worktree: null, worktreeId: "", repo: "acme/app", isReview: false };
+  checkout.known = true;
 });
 
 describe("ReviewDetail", () => {
@@ -252,6 +261,7 @@ describe("ReviewDetail", () => {
   it("mounts a stored review session only once its tab is picked", () => {
     storedProviders = ["Codex"];
     checkout.worktreeId = "wt-1";
+    checkout.source = { ...checkout.source, worktree: fxWorktree("wt-1"), worktreeId: "wt-1" };
     render(<ReviewDetail />);
     expect(ai.mounts).toBe(0);
 
@@ -259,6 +269,25 @@ describe("ReviewDetail", () => {
 
     expect(ai.mounts).toBe(1);
     expect(screen.getByTestId("ai-review-pane")).toBeInTheDocument();
+  });
+
+  /** Reported: back on a PR whose review had a checkout, picking its AI review
+   *  tab asked "Create a worktree?" from scratch. The checkout an AI review cuts
+   *  is the hidden kind — the PR's own worktree lookup never lists it — so the
+   *  question has to be put to the source the panes read, which names either. */
+  it("starts a stored review on the checkout an earlier review cut, without asking again", () => {
+    storedProviders = ["Codex"];
+    checkout.source = {
+      worktree: fxWorktree("review-1"),
+      worktreeId: "review-1",
+      repo: "acme/app",
+      isReview: true,
+    };
+    render(<ReviewDetail />);
+
+    fireEvent.click(screen.getByRole("button", { name: "ai:Codex" }));
+
+    expect(ai.mounts).toBe(1);
   });
 
   /** A draft is a decision you have not made; a published comment is already on

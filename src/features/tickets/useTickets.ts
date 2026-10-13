@@ -2,10 +2,10 @@
  * The Tickets page's data: every ticket the viewer can see, once, folded into
  * one ordered, groupable list.
  *
- * Tickets belong to a Linear org, not to a repo. A registered repo resolves to
- * one org, and several repos routinely resolve to the same one — so reading
- * "the tasks of each repo" yields the same tickets once per repo. The fold
- * therefore keys a ticket by (org, id) and lists it once; the repos it came
+ * Tickets belong to a connection (a Linear org or a Jira site), not to a repo. A
+ * registered repo is linked to one, and several repos routinely share it — so
+ * reading "the tasks of each repo" yields the same tickets once per repo. The
+ * fold therefore keys a ticket by (connection, id) and lists it once; the repos it came
  * from are kept on the row as the places it could be *started*, which is the
  * only moment a repo enters the picture. A ticket that has already been
  * started has a home: the repo holding its worktree (or, failing that, a PR).
@@ -16,7 +16,7 @@
  */
 import { useMemo } from "react";
 
-import type { Task, TeamRef, Worktree, WorktreePr } from "../../bindings";
+import type { Task, TeamRef, TicketProvider, Worktree, WorktreePr } from "../../bindings";
 import { groupByMilestone, type MilestoneGroup } from "../../components/WorkSignals";
 import {
   type Attention,
@@ -28,11 +28,13 @@ import {
   useSeenAgents,
 } from "../../lib/attention";
 import {
+  useConnections,
   useRepos,
   useTasksByRepo,
   useWorktreePrsByRepo,
   useWorktreesByRepo,
 } from "../../lib/queries";
+import type { Connection } from "../../lib/tracker";
 import { PROJECT_FALLBACK } from "../../theme/colors";
 import type { AgentEntry } from "../agents/registry";
 import { useAgentEntries } from "../agents/useAgents";
@@ -41,12 +43,27 @@ import { useAgentEntries } from "../agents/useAgents";
  *  it does doesn't hand the memos below a fresh array identity. */
 const EMPTY_ENTRIES: AgentEntry[] = [];
 
+/** One connection the page draws tickets from — a Linear org or a Jira site. */
+export interface TicketSource {
+  /** The connection's id (`Repo.connection`). */
+  id: string;
+  provider: TicketProvider;
+  /** `Linear · Acme`: the provider, then the workspace or site. */
+  label: string;
+  /** Its rows after the actionable filter, tallied before the source pick so a
+   *  source keeps its count while another one is showing. */
+  count: number;
+}
+
 /** One ticket, with everything the row paints from already joined on. */
 export interface TicketRow {
+  /** The connection the ticket belongs to; `provider` is that connection's. */
+  connection: string;
+  provider: TicketProvider | null;
   /** Where an action on this ticket runs: the repo holding its worktree (or
    *  PR), else the first of `repos`. */
   repo: string;
-  /** Every registered repo whose org lists this ticket — the places it can be
+  /** Every registered repo whose connection lists this ticket — the places it can be
    *  started — in registration order. */
   repos: string[];
   task: Task;
@@ -100,6 +117,13 @@ export interface TicketsData {
   /** The team pick in force: keys from `teams`, or `[]` for all of them — which
    *  is what a pick naming no team on the page falls back to. */
   picked: string[];
+  /** Every connection with a row on the page, by label, whatever the pick. */
+  sources: TicketSource[];
+  /** The source pick in force (a connection id), or `null` for every source. */
+  source: string | null;
+  /** A project linked to the picked source, for what reads through one project
+   *  (the graph); `null` when every source is showing. */
+  sourceRepo: string | null;
   summary: TicketsSummary;
   /** At least one repo's tickets are still in flight — render skeletons. */
   loading: boolean;
@@ -125,9 +149,14 @@ function firstBlocker(task: Task, byId: Map<string, Task>): string | null {
 export interface TicketFoldInput {
   /** Registration order — the order repos are offered as start targets. */
   repos: string[];
-  /** The org each repo resolves to (its `tracker` label). Repos sharing a value
-   *  carry the same tickets; a repo missing here is treated as the unnamed org. */
-  orgOf?: Map<string, string>;
+  /** The connection each repo is linked to (`Repo.connection`). Repos sharing a
+   *  value carry the same tickets; a repo missing here is treated as the unnamed
+   *  connection. */
+  connectionOf?: Map<string, string>;
+  /** What each connection is, for the source switcher and the row marks. */
+  sourceOf?: Map<string, { provider: TicketProvider; label: string }>;
+  /** The source pick, by connection id; `null` shows every source. */
+  source?: string | null;
   tasks: Map<string, Task[]>;
   worktrees: Map<string, Worktree[]>;
   prs: Map<string, WorktreePr[]>;
@@ -156,17 +185,20 @@ export function buildTicketGroups(input: TicketFoldInput): {
   groups: TicketProjectGroup[];
   teams: TicketTeam[];
   picked: string[];
+  sources: TicketSource[];
+  /** The source pick in force: `null` unless it names a source with tickets. */
+  source: string | null;
   summary: TicketsSummary;
 } {
-  const orgOf = (repo: string) => input.orgOf?.get(repo) ?? "";
+  const connectionKey = (repo: string) => input.connectionOf?.get(repo) ?? "";
 
-  // Blockers are org-level facts, so the lookup that names them spans every
-  // repo of the org rather than the one a row happened to be read from.
+  // Blockers are connection-level facts, so the lookup that names them spans every
+  // repo of the connection rather than the one a row happened to be read from.
   const tasksByOrg = new Map<string, Map<string, Task>>();
   for (const repo of input.repos) {
     const tasks = input.tasks.get(repo);
     if (!tasks) continue;
-    const org = orgOf(repo);
+    const org = connectionKey(repo);
     const byId = tasksByOrg.get(org) ?? new Map<string, Task>();
     for (const task of tasks) byId.set(task.id, task);
     tasksByOrg.set(org, byId);
@@ -187,7 +219,7 @@ export function buildTicketGroups(input: TicketFoldInput): {
   for (const repo of input.repos) {
     const tasks = input.tasks.get(repo);
     if (!tasks) continue;
-    const org = orgOf(repo);
+    const org = connectionKey(repo);
     const byId = tasksByOrg.get(org) ?? new Map<string, Task>();
     const worktreeById = new Map((input.worktrees.get(repo) ?? []).map((w) => [w.id, w]));
     const prsByTicket = new Map<string, WorktreePr[]>();
@@ -203,6 +235,8 @@ export function buildTicketGroups(input: TicketFoldInput): {
       const existing = rows.get(key);
       if (!existing) {
         rows.set(key, {
+          connection: org,
+          provider: input.sourceOf?.get(org)?.provider ?? null,
           repo,
           repos: [repo],
           task,
@@ -234,12 +268,33 @@ export function buildTicketGroups(input: TicketFoldInput): {
         : IDLE;
   }
 
+  // The sources on the page, tallied over every row before the pick is applied.
+  // A pick that names no source here shows every source, for the reason a stale
+  // team pick does below.
+  const sourcesById = new Map<string, TicketSource>();
+  for (const row of rows.values()) {
+    const info = input.sourceOf?.get(row.connection);
+    if (!info) continue;
+    const source = sourcesById.get(row.connection) ?? { id: row.connection, ...info, count: 0 };
+    source.count += 1;
+    sourcesById.set(row.connection, source);
+  }
+  const sources = [...sourcesById.values()].sort((a, b) =>
+    a.label.localeCompare(b.label, undefined, { sensitivity: "base" }),
+  );
+  const source = input.source && sourcesById.has(input.source) ? input.source : null;
+  // Everything below — the teams, the groups, the summary — describes the picked
+  // source, so a team of another source isn't offered for a page that shows none.
+  const shownRows = source
+    ? new Map([...rows].filter(([, row]) => row.connection === source))
+    : rows;
+
   // The teams on the page, tallied over every row before the pick is applied —
   // the switcher names them all, with a count each, whichever one is showing.
   // A team's name comes from the first row that carried one: a blocker reached
   // through a relation knows only its key.
   const teamsByKey = new Map<string, TicketTeam>();
-  for (const row of rows.values()) {
+  for (const row of shownRows.values()) {
     const ref = row.task.team;
     if (!ref) continue;
     const team = teamsByKey.get(ref.key) ?? { key: ref.key, name: null, count: 0 };
@@ -263,7 +318,7 @@ export function buildTicketGroups(input: TicketFoldInput): {
   // take the switcher's order, applied below.
   const byProject = new Map<string, TicketRow[]>();
   const summary: TicketsSummary = { total: 0, projects: 0, ready: 0, blocked: 0 };
-  for (const [key, row] of rows) {
+  for (const [key, row] of shownRows) {
     if (shown.size > 0 && !(row.task.team && shown.has(row.task.team.key))) continue;
     const org = key.slice(0, key.indexOf("|"));
     const groupKey = [row.task.team?.key, org, row.task.project].filter(Boolean).join(" ");
@@ -298,7 +353,7 @@ export function buildTicketGroups(input: TicketFoldInput): {
   // Projects are counted by name: the number answers "how much of my work is
   // in play", and the same project name in two orgs is still one line of work.
   summary.projects = new Set(groups.map((g) => g.project)).size;
-  return { groups, teams, picked, summary };
+  return { groups, teams, picked, sources, source, summary };
 }
 
 /**
@@ -309,15 +364,28 @@ export function buildTicketGroups(input: TicketFoldInput): {
  * viewer's own queue, off it also shows the context tickets the queue depends on.
  * `teams` is the menu's pick — team keys, or `[]` for every team.
  */
-export function useTickets(actionableOnly: boolean, teams: string[]): TicketsData {
+export function useTickets(
+  actionableOnly: boolean,
+  teams: string[],
+  source: string | null = null,
+): TicketsData {
   const { data: repoList } = useRepos();
   const repos = useMemo(() => (repoList ?? []).map((r) => r.name), [repoList]);
-  // `tracker` names the org the repo's queries actually go to (see repo.rs), so
-  // it is the fold's org key.
-  const orgOf = useMemo(
-    () => new Map((repoList ?? []).map((r) => [r.name, r.tracker])),
+  // The connection the repo's queries actually go to is the fold's key. A repo
+  // linked to none has no tickets, so it keeps a key of its own.
+  const connectionOf = useMemo(
+    () => new Map((repoList ?? []).map((r) => [r.name, r.connection ?? r.name])),
     [repoList],
   );
+
+  const sourceOf = useMemo(() => {
+    const map = new Map<string, { provider: TicketProvider; label: string }>();
+    for (const r of repoList ?? []) {
+      if (r.connection && r.provider)
+        map.set(r.connection, { provider: r.provider, label: r.tracker });
+    }
+    return map;
+  }, [repoList]);
 
   const tasksByRepo = useTasksByRepo(repos);
   const worktreesByRepo = useWorktreesByRepo(repos);
@@ -330,34 +398,57 @@ export function useTickets(actionableOnly: boolean, teams: string[]): TicketsDat
   // instant it decays there rather than at the next unrelated re-render.
   const nowMs = useDecayClock(entries ?? EMPTY_ENTRIES);
 
-  return useMemo(
-    () => ({
-      ...buildTicketGroups({
-        repos,
-        orgOf,
-        tasks: tasksByRepo,
-        worktrees: worktreesByRepo,
-        prs: prsByRepo,
-        agents: entries ?? EMPTY_ENTRIES,
-        seen,
-        nowMs,
-        actionableOnly,
-        teams,
-      }),
-      loading: repoList === undefined || repos.some((repo) => !tasksByRepo.has(repo)),
-    }),
-    [
-      repoList,
+  return useMemo(() => {
+    const fold = buildTicketGroups({
       repos,
-      orgOf,
-      tasksByRepo,
-      worktreesByRepo,
-      prsByRepo,
-      entries,
+      connectionOf,
+      sourceOf,
+      source,
+      tasks: tasksByRepo,
+      worktrees: worktreesByRepo,
+      prs: prsByRepo,
+      agents: entries ?? EMPTY_ENTRIES,
       seen,
       nowMs,
       actionableOnly,
       teams,
-    ],
-  );
+    });
+    return {
+      ...fold,
+      sourceRepo: fold.source
+        ? ((repoList ?? []).find((r) => r.connection === fold.source)?.name ?? null)
+        : null,
+      loading: repoList === undefined || repos.some((repo) => !tasksByRepo.has(repo)),
+    };
+  }, [
+    repoList,
+    repos,
+    connectionOf,
+    sourceOf,
+    source,
+    tasksByRepo,
+    worktreesByRepo,
+    prsByRepo,
+    entries,
+    seen,
+    nowMs,
+    actionableOnly,
+    teams,
+  ]);
+}
+
+/**
+ * Connections that exist but no project is linked to. The page reads tickets
+ * through a project, so such a connection has none to show; the page says so
+ * instead of leaving it out as though it were empty.
+ */
+export function useUnlinkedConnections(): Connection[] {
+  const { data: repos } = useRepos();
+  const connections = useConnections();
+  return useMemo(() => {
+    // Until the registry has answered, nothing is known to be unlinked.
+    if (!repos) return [];
+    const linked = new Set(repos.map((r) => r.connection));
+    return connections.filter((c) => !linked.has(c.id));
+  }, [repos, connections]);
 }

@@ -1,4 +1,4 @@
-/** Settings → Environment: variables (and `.env` file references) santree injects
+/** Settings → Environment → Variables: variables (and `.env` file references) santree injects
  *  into every terminal it spawns — triage, worktree agents, the Terminal tab, and
  *  Claude tabs. App scope applies everywhere; a repo scope adds/overrides for that
  *  repo (resolved + merged in the backend, repo winning). See `env.rs`. */
@@ -64,7 +64,7 @@ export function EnvironmentSection({ repo }: { repo?: string }) {
   return (
     <>
       <Heading
-        title="Environment"
+        title="Variables"
         subtitle={
           repo
             ? "Variables for this repo, merged over your app-level ones (repo wins). Injected into every terminal santree starts here."

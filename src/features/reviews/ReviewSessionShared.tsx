@@ -1,9 +1,9 @@
 import type { AgentKind, ReviewPr, ReviewTarget } from "../../bindings";
 import { AgentIcon, TrashIcon, WarningIcon } from "../../components/icons";
 import { Button } from "../../components/primitives";
-import { useRemoveReviewWorkspace } from "../../lib/queries";
 import { useReviewsModel } from "./model";
 import { ticketIdFor } from "./ticket";
+import { useRemoveReviewCheckout } from "./useRemovePrCheckout";
 
 /** The identity review commands take, derived from the already-loaded list row. */
 export function reviewTargetFor(pr: ReviewPr): ReviewTarget {
@@ -38,7 +38,7 @@ export function ReviewFooter({
   extra?: React.ReactNode;
 }) {
   const { repo } = useReviewsModel();
-  const { mutate: removeWorkspace, isPending } = useRemoveReviewWorkspace(repo);
+  const { remove, pending } = useRemoveReviewCheckout(repo);
 
   return (
     <div className="flex-none border-t border-hairline bg-raised">
@@ -60,11 +60,9 @@ export function ReviewFooter({
           <Button
             size="sm"
             variant="ghost"
-            disabled={isPending}
-            title="Delete the local checkout of this PR. It's recreated the next time you open this tab."
-            onClick={() =>
-              removeWorkspace({ prRepo: pr.repo, number: pr.number, headSha: pr.headSha })
-            }
+            disabled={pending}
+            title="Delete the local checkout of this PR and end its AI reviews. Reviewing it again cuts a new one."
+            onClick={() => remove(pr)}
           >
             <TrashIcon size={10} />
             Remove checkout

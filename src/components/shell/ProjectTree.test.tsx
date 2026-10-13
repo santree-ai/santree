@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReviewInbox, TicketRef } from "../../bindings";
+import type { ReviewInbox, ReviewPr, TicketRef } from "../../bindings";
 import { BULK_TOGGLE_HINT } from "../../lib/disclosure";
 import type { LinearGroupBy } from "../../lib/queries";
 import type { TreeFocus } from "../../state/AppContext";
@@ -232,6 +232,7 @@ function group(key: string, label: string, n: number): ProjectReviews["groups"][
       url: `https://github.com/acme/app/pull/${key}-${i + 1}`,
       repo: "acme/app",
       headRef: "feature",
+      reviewedBy: [] as ReviewPr["reviewedBy"],
       additions: 10,
       deletions: 2,
       changedFiles: 1,
@@ -438,10 +439,12 @@ describe("ProjectSection reviews section", () => {
       screen.getByRole("button", { name: "Collapse review group Assigned to me" }),
     ).toHaveTextContent("2");
     expect(
-      screen.getByRole("button", { name: "Open Assigned to me 1, small change" }),
+      screen.getByRole("button", { name: "Open Assigned to me 1, small change, no review yet" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Open Team · Engineering 1, small change" }),
+      screen.getByRole("button", {
+        name: "Open Team · Engineering 1, small change, no review yet",
+      }),
     ).toBeInTheDocument();
   });
 
@@ -497,7 +500,9 @@ describe("ProjectSection reviews section", () => {
       },
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Open Assigned to me 1, small change" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open Assigned to me 1, small change, no review yet" }),
+    );
     expect(onOpenPrInInbox).toHaveBeenCalled();
     expect(onSelectWorktree).not.toHaveBeenCalled();
   });
@@ -519,10 +524,12 @@ describe("ProjectSection reviews section", () => {
     );
 
     const draftRow = screen.getByRole("button", {
-      name: "Open Assigned to me 2 (draft), small change",
+      name: "Open Assigned to me 2 (draft), small change, no review yet",
     });
     expect(band(draftRow)).toHaveTextContent("draft");
-    const readyRow = screen.getByRole("button", { name: "Open Assigned to me 1, small change" });
+    const readyRow = screen.getByRole("button", {
+      name: "Open Assigned to me 1, small change, no review yet",
+    });
     expect(band(readyRow)).not.toHaveTextContent("draft");
   });
 
@@ -546,7 +553,9 @@ describe("ProjectSection reviews section", () => {
       },
     );
 
-    const largeRow = screen.getByRole("button", { name: "Open Assigned to me 2, large change" });
+    const largeRow = screen.getByRole("button", {
+      name: "Open Assigned to me 2, large change, no review yet",
+    });
     expect(largeRow).toHaveAttribute(
       "title",
       expect.stringContaining("Large change · 40 files, 3,000 additions and 300 deletions"),
@@ -555,7 +564,9 @@ describe("ProjectSection reviews section", () => {
     expect(bars).toHaveAttribute("aria-label", "Large change");
     expect(bars?.parentElement).toHaveAttribute("aria-hidden", "true");
 
-    const smallRow = screen.getByRole("button", { name: "Open Assigned to me 1, small change" });
+    const smallRow = screen.getByRole("button", {
+      name: "Open Assigned to me 1, small change, no review yet",
+    });
     expect(smallRow).toHaveAttribute(
       "title",
       expect.stringContaining("Small change · 1 file, 10 additions and 2 deletions"),
@@ -675,7 +686,9 @@ describe("ProjectSection reviews nesting", () => {
     expect(screen.queryByRole("button", { name: /project Platform/ })).not.toBeInTheDocument();
     // …and the rows are still there, at the gutter the heading would have used.
     expect(
-      screen.getByRole("button", { name: "Open AK-1 Assigned to me 1, small change" }),
+      screen.getByRole("button", {
+        name: "Open AK-1 Assigned to me 1, small change, no review yet",
+      }),
     ).toBeInTheDocument();
   });
 
@@ -813,7 +826,7 @@ describe("ProjectSection stacked PRs", () => {
     expect(rows[1].previousElementSibling?.getAttribute("aria-hidden")).toBe("true");
 
     expect(
-      screen.getByRole("button", { name: "Open Assigned to me 2, small change" }),
+      screen.getByRole("button", { name: "Open Assigned to me 2, small change, no review yet" }),
     ).toHaveAttribute("title", expect.stringContaining("Stacked on user/parent"));
   });
 });
@@ -888,6 +901,7 @@ describe("ProjectTree reviews rows", () => {
       id,
       project: REPO,
       viewerReview: null,
+      reviewedBy: [] as ReviewPr["reviewedBy"],
       headCommittedAt: "2026-08-24T10:00:00Z",
       additions: 10,
       deletions: 2,
@@ -921,6 +935,29 @@ describe("ProjectTree reviews rows", () => {
     reviews.inbox = inbox({ requested: [waiting("a"), waiting("b")] });
     render(<LocalTree />);
     expect(band(screen.getByRole("button", { name: /app reviews/ }))).toHaveTextContent("2");
+  });
+
+  /** A PR nobody has reviewed is the one to pick first: it gets the filled dot, and
+   *  a PR a colleague already looked at a quiet ring that names them. */
+  it("marks a PR waiting for a first review apart from one a colleague reviewed", () => {
+    const reviewer = (name: string) => ({ kind: "User", name, avatarUrl: "" });
+    const taken = {
+      ...waiting("b"),
+      reviewedBy: [reviewer("ana"), reviewer("bo"), reviewer("cy"), reviewer("di")],
+      viewerReview: { state: "Commented", submittedAt: "2026-08-24T09:30:00Z" },
+    } as ReviewInbox["requested"][number];
+    reviews.inbox = inbox({ requested: [waiting("a"), taken] });
+    localStorage.setItem("santree.shell.projectTree.reviewsOpen", JSON.stringify({ [REPO]: true }));
+    const { container } = render(<LocalTree />);
+    const first = screen.getByRole("button", { name: /^Open a,.*no review yet$/ });
+    expect(first).toHaveAttribute("title", expect.stringContaining("Waiting for a first review"));
+    const reviewed = screen.getByRole("button", {
+      name: /^Open b,.*reviewed by ana and 3 more$/,
+    });
+    expect(reviewed.getAttribute("title")).toContain("Reviewed by ana, bo, cy +1 more");
+    expect(reviewed.getAttribute("title")).toContain("Updated since your review");
+    expect(container.querySelectorAll('[data-review-mark="first"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-review-mark="reviewed"]')).toHaveLength(1);
   });
 
   /** The route carries the scope *and* the pane, so a reload lands back on the
@@ -979,6 +1016,7 @@ describe("ProjectTree selection follows the visible destination", () => {
       repo: REPO,
       headRef: "feature",
       viewerReview: null,
+      reviewedBy: [] as ReviewPr["reviewedBy"],
       headCommittedAt: "2026-08-24T10:00:00Z",
       additions: 10,
       deletions: 2,

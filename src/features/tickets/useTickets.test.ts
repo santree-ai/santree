@@ -107,9 +107,9 @@ describe("buildTicketGroups", () => {
   it("keeps the same identifier apart when it belongs to two orgs", () => {
     const { groups, summary } = fold({
       repos: ["one", "two"],
-      orgOf: new Map([
-        ["one", "Linear · Acme"],
-        ["two", "Linear · Globex"],
+      connectionOf: new Map([
+        ["one", "linear:acme"],
+        ["two", "linear:globex"],
       ]),
       tasks: new Map([
         ["one", [task("A-1", "Alpha")]],
@@ -117,7 +117,7 @@ describe("buildTicketGroups", () => {
       ]),
     });
 
-    expect(groups.map((g) => g.key)).toEqual(["Linear · Acme Alpha", "Linear · Globex Alpha"]);
+    expect(groups.map((g) => g.key)).toEqual(["linear:acme Alpha", "linear:globex Alpha"]);
     expect(summary).toMatchObject({ total: 2, projects: 1 });
   });
 

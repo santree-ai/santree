@@ -255,6 +255,7 @@ function toReviewPr(seed: PrSeed, now: number): ReviewPr {
     waitingSince: iso(now - seed.waitingAgo),
     headCommittedAt: iso(now - seed.pushedAgo),
     viewerReview: null,
+    reviewedBy: [],
   };
 }
 

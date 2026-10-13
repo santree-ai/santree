@@ -44,12 +44,15 @@ import { ticketIdFor } from "../../features/reviews/ticket";
 import { BULK_TOGGLE_HINT, isBulkToggle } from "../../lib/disclosure";
 import {
   type LinearGroupBy,
+  needsViewerReview,
   type ReviewGroup,
   type ReviewProjectCounts,
   useMergeQueue,
 } from "../../lib/queries";
+import { accentVar } from "../../theme/colors";
 import { ChevronDownIcon, ChevronRightIcon, GitHubLogo, MergeQueueIcon } from "../icons";
 import { MarkdownTitle } from "../Markdown";
+import { Dot } from "../primitives";
 import { RepoTrackerLogo } from "../RepoTrackerLogo";
 import {
   BAND_LABEL_X,
@@ -691,8 +694,23 @@ function ReviewPrRow({
   // Everything the row can't spare a column for lives here, the way `WorktreeRow`
   // keeps its branch name one hover away. The base branch earns a line only on a
   // stacked PR, where "what did this come off" is the question the elbow raises.
+  // Priority, not status: a PR nobody has looked at is waiting for a first pass,
+  // which is where your review counts most. `reviewedBy` is everyone but you, the
+  // author and bots. (Every row here still needs *you* — `awaitingReviewPrs` — so
+  // "you already reviewed" is only ever "an older head", said in the tooltip.)
+  const reviewers = pr.reviewedBy.map((r) => r.name);
+  const firstReview = reviewers.length === 0;
+  const reviewNote = firstReview
+    ? "Waiting for a first review"
+    : `Reviewed by ${reviewers.slice(0, 3).join(", ")}${reviewers.length > 3 ? ` +${reviewers.length - 3} more` : ""}`;
+  const reviewAria = firstReview
+    ? "no review yet"
+    : `reviewed by ${reviewers[0]}${reviewers.length > 1 ? ` and ${reviewers.length - 1} more` : ""}`;
+  const sinceYours = pr.viewerReview && needsViewerReview(pr) ? "Updated since your review" : null;
   const title = [
     pr.title,
+    reviewNote,
+    sinceYours,
     `${pr.repo}#${pr.number}`,
     // Words, not `+3,000 −300`: the tooltip is also the row's accessible
     // description, and the signs don't survive a screen reader.
@@ -721,7 +739,7 @@ function ReviewPrRow({
             <button
               type="button"
               onClick={onOpen}
-              aria-label={`Open ${pr.title}${pr.isDraft ? " (draft)" : ""}, ${size.toLowerCase()} change`}
+              aria-label={`Open ${pr.title}${pr.isDraft ? " (draft)" : ""}, ${size.toLowerCase()} change, ${reviewAria}`}
               title={title}
               className="absolute inset-0 cursor-pointer"
             />
@@ -739,6 +757,23 @@ function ReviewPrRow({
             <MarkdownTitle className="min-w-0 flex-1 truncate text-[13px] leading-5 font-medium text-fg-2">
               {pr.title}
             </MarkdownTitle>
+            {/* Decorative: the row's name and tooltip say it in words. A filled
+              accent dot is a PR nobody has reviewed yet; a quiet hollow ring is one
+              a colleague already has. */}
+            <span
+              aria-hidden
+              data-review-mark={firstReview ? "first" : "reviewed"}
+              className="flex flex-none items-center"
+            >
+              {firstReview ? (
+                <Dot color={accentVar} />
+              ) : (
+                <span
+                  className="flex-none rounded-full border border-muted-4"
+                  style={{ width: 7, height: 7 }}
+                />
+              )}
+            </span>
             {/* Decorative, like the ticket mark beside it: the row's name and
               tooltip already say it's a draft. */}
             {pr.isDraft && (

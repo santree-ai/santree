@@ -1,7 +1,7 @@
 //! Provider-neutral ticket dispatch.
 //!
 //! [`TicketTracker`] is implemented by both Linear and Jira; the free functions
-//! resolve which provider a repo uses and delegate.
+//! resolve which provider a repo's connection belongs to and delegate.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -145,26 +145,6 @@ impl TicketTracker for JiraTracker {
 
 // ── Dispatch ────────────────────────────────────────────────────────────────
 
-/// Which provider a repo's tickets come from. An explicit link wins; an unlinked
-/// repo uses whichever provider is connected, Linear first when both are — so
-/// installs that predate Jira keep resolving exactly as they did.
-pub fn resolve(
-    jira_linked: bool,
-    linear_linked: bool,
-    has_linear: bool,
-    has_jira: bool,
-) -> Option<TicketProvider> {
-    if jira_linked {
-        Some(TicketProvider::Jira)
-    } else if linear_linked || has_linear {
-        Some(TicketProvider::Linear)
-    } else if has_jira {
-        Some(TicketProvider::Jira)
-    } else {
-        None
-    }
-}
-
 /// The provider's name as prompts and ticket details spell it.
 pub fn name(provider: TicketProvider) -> &'static str {
     match provider {
@@ -173,21 +153,10 @@ pub fn name(provider: TicketProvider) -> &'static str {
     }
 }
 
+/// Which provider a repo's tickets come from: the one its connection belongs to.
+/// There is no guess for a repo without a connection (see [`crate::connection`]).
 pub async fn provider(db: &Db, repo: &str) -> Result<Option<TicketProvider>> {
-    let row: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT jira_cloud_id, linear_org_slug FROM repos WHERE name = ?")
-            .bind(repo)
-            .fetch_optional(db)
-            .await?;
-    let (jira_link, linear_link) = row.unwrap_or((None, None));
-    let has_linear = !crate::linear::orgs_by_name(db).await?.is_empty();
-    let has_jira = !crate::jira::sites_by_name(db).await?.is_empty();
-    Ok(resolve(
-        jira_link.is_some(),
-        linear_link.is_some(),
-        has_linear,
-        has_jira,
-    ))
+    Ok(crate::connection::of(db, repo).await?.map(|c| c.provider))
 }
 
 async fn repo_tracker(db: &Db, repo: &str) -> Result<Option<Box<dyn TicketTracker>>> {
@@ -270,33 +239,4 @@ pub fn invalidate_all_caches() {
     crate::linear::invalidate_all_caches();
     crate::linear_mcp::tracker::invalidate_all_caches();
     crate::jira::invalidate_all_caches();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_explicit_link_decides_the_tracker() {
-        assert_eq!(resolve(true, false, true, true), Some(TicketProvider::Jira));
-        assert_eq!(
-            resolve(false, true, false, true),
-            Some(TicketProvider::Linear)
-        );
-    }
-
-    /// An install that predates Jira must keep reading Linear once a Jira site
-    /// is connected too, until a repo is linked to that site.
-    #[test]
-    fn an_unlinked_repo_prefers_linear_then_jira() {
-        assert_eq!(
-            resolve(false, false, true, true),
-            Some(TicketProvider::Linear)
-        );
-        assert_eq!(
-            resolve(false, false, false, true),
-            Some(TicketProvider::Jira)
-        );
-        assert_eq!(resolve(false, false, false, false), None);
-    }
 }

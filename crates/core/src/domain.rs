@@ -436,6 +436,11 @@ pub struct Repo {
     /// The ticket tracker this repo's tickets come from; `None` when nothing is
     /// connected. The same resolution the backend dispatches reads through.
     pub provider: Option<TicketProvider>,
+    /// The connection those tickets come from, as its provider-qualified id
+    /// (`linear:<org slug>`, `jira:<cloud id>`); `None` when the repo is linked to
+    /// none. Repos sharing a value share a ticket namespace — it is what a ticket
+    /// is keyed by, never the display label in `tracker`.
+    pub connection: Option<String>,
     /// Number of agents currently active on this repo.
     pub agents: u32,
     /// Absolute path on disk of the repo's git checkout. Always set in
@@ -1298,6 +1303,9 @@ pub struct ReviewPr {
     pub ai_draft_count: u32,
     /// Reviewers requested on the PR (people and teams).
     pub reviewers: Vec<Reviewer>,
+    /// People who have already submitted a review — not you, not the PR's author,
+    /// not a bot. Empty means nobody has looked at it yet.
+    pub reviewed_by: Vec<Reviewer>,
     /// ISO-8601 timestamp of the last update.
     pub updated_at: String,
     /// ISO-8601 timestamp the PR was opened.

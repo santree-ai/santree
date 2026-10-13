@@ -39,6 +39,7 @@ vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 vi.mock("../../state/AppContext", () => ({
   useApp: () => ({}),
   useAppUi: () => ({
+    pendingLaunches: [],
     addPendingLaunches: vi.fn(),
     removePendingLaunch: vi.fn(),
     requestTreeFocus: vi.fn(),
@@ -84,19 +85,14 @@ vi.mock("../../lib/queries", () => ({
   // `usePrCheckout` falls back to a registered project named after the PR's slug
   // when the inbox didn't attribute one — the rule the header used to apply.
   useRepos: () => ({ data: [] }),
-  useWorktrees: (repo: string) => ({ data: repo ? world.worktrees : [] }),
-  useWorktreePrs: () => ({ data: [] }),
-  useReviewCheckout: () => ({ data: world.reviewCheckout }),
-  useCreateWorktree: () => ({ mutate: vi.fn(), isPending: false }),
+  useWorktrees: (repo: string) => ({ data: repo ? world.worktrees : [], isFetched: true }),
+  useWorktreePrs: () => ({ data: [], isFetched: true }),
+  useReviewCheckout: () => ({ data: world.reviewCheckout, isFetched: true }),
+  useReviewWorkspaceCutting: () => false,
+  useCreateWorktree: () => ({ mutateAsync: vi.fn() }),
   // "Keep as a worktree" — the only thing the tree action does once the PR is
   // already checked out, since there is one checkout per PR to keep.
   usePromoteReviewWorktree: () => ({ mutate: vi.fn(), isPending: false }),
-  // The checkout bar's third action: a review checkout is a worktree Trees does
-  // not list, so this bar is the only place it can be removed from.
-  useRemoveReviewWorkspace: () => ({
-    mutate: (v: unknown) => world.removed.push(v),
-    isPending: false,
-  }),
   usePullRemoteWorktree: () => ({
     mutate: (id: string) => world.pulls.push(id),
     isPending: false,
@@ -105,6 +101,16 @@ vi.mock("../../lib/queries", () => ({
     world.statusCalls.push([repo, id]);
     return { data: world.status };
   },
+}));
+
+// The checkout bar's third action: a review checkout is a worktree Trees does
+// not list, so this bar is the only place it can be removed from.
+vi.mock("./useRemovePrCheckout", () => ({
+  useRemoveReviewCheckout: () => ({
+    remove: (pr: ReviewPr) =>
+      world.removed.push({ prRepo: pr.repo, number: pr.number, headSha: pr.headSha }),
+    pending: false,
+  }),
 }));
 
 import { changesDot } from "../trees/FilePickerPanel";

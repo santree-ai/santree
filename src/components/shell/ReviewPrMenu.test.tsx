@@ -21,11 +21,17 @@ const data = vi.hoisted(() => ({
   checkoutAskedFor: [] as string[],
   deleteWorktree: vi.fn(),
   removeReview: vi.fn(),
+  checkoutRemoved: vi.fn(),
+  /** Worktree ids whose deletion has been asked for — the sidebar's register. */
+  pendingDeletes: new Set<string>(),
 }));
 
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => nav.navigate }));
 vi.mock("../../state/AppContext", () => ({
-  useAppUi: () => ({ requestTreeFocus: nav.requestTreeFocus }),
+  useAppUi: () => ({
+    requestTreeFocus: nav.requestTreeFocus,
+    pendingDeletes: data.pendingDeletes,
+  }),
 }));
 vi.mock("../../lib/queries", () => ({
   useWorktrees: () => ({ data: data.worktrees }),
@@ -36,7 +42,10 @@ vi.mock("../../lib/queries", () => ({
   },
   useTicketIssueUrl: () => (id: string) => `https://linear.app/acme/issue/${id}`,
   useTicketProvider: () => "Linear",
-  useRemoveReviewWorkspace: () => ({ mutate: data.removeReview }),
+}));
+vi.mock("../../features/reviews/useRemovePrCheckout", () => ({
+  useRemoveReviewCheckout: () => ({ remove: data.removeReview, pending: false }),
+  useCheckoutRemoved: () => data.checkoutRemoved,
 }));
 vi.mock("../../features/trees/useWorktreeDeletion", () => ({
   useWorktreeDeletion: () => ({ deleteWorktree: data.deleteWorktree }),
@@ -70,6 +79,7 @@ function pr(over: Partial<ReviewPr> = {}): ReviewPr {
     commentCount: 0,
     aiDraftCount: 0,
     reviewers: [],
+    reviewedBy: [],
     updatedAt: "2026-08-05T00:00:00Z",
     createdAt: "2026-08-01T00:00:00Z",
     waitingSince: "2026-08-01T00:00:00Z",
@@ -94,6 +104,7 @@ beforeEach(() => {
   data.worktrees = [];
   data.review = null;
   data.checkoutAskedFor = [];
+  data.pendingDeletes = new Set();
 });
 
 describe("ReviewPrMenu", () => {
@@ -136,7 +147,19 @@ describe("ReviewPrMenu", () => {
     const dialog = screen.getByRole("dialog", { name: "Delete worktree" });
     expect(dialog).toHaveTextContent("AK-12");
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    expect(data.deleteWorktree).toHaveBeenCalledWith("AK-12");
+    expect(data.deleteWorktree).toHaveBeenCalledWith("AK-12", undefined);
+  });
+
+  /** A delete used to stay on offer until the refetch landed, and a second one
+   *  came back as an error. Once it is asked for, the checkout is gone from the
+   *  menu — by either route. */
+  it("stops offering a checkout whose deletion is already under way", () => {
+    data.worktrees = [worktree("AK-12", { branch: "user/some-branch" })];
+    data.review = { repo: "web", worktree: worktree("AK-12") };
+    data.pendingDeletes = new Set(["AK-12"]);
+    show(pr());
+    open();
+    expect(rows()).toEqual(["Open on GitHub", "Copy PR number", "Copy link", "Copy branch"]);
   });
 
   /** Trees doesn't list a review checkout, so there is nowhere to open it —
@@ -148,10 +171,6 @@ describe("ReviewPrMenu", () => {
     expect(rows()).not.toContain("Open worktree");
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete review checkout" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    expect(data.removeReview).toHaveBeenCalledWith({
-      prRepo: "acme/web",
-      number: 41,
-      headSha: "abc1234",
-    });
+    expect(data.removeReview).toHaveBeenCalledWith(expect.objectContaining({ number: 41 }));
   });
 });

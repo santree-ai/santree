@@ -56,6 +56,7 @@ function tabsModel(over: Partial<TabsModel> = {}): TabsModel {
       source: { worktree: null, worktreeId: "", repo: "acme/app", isReview: false },
       openAsTree: vi.fn(),
       opening: false,
+      known: true,
       canOpen: true,
     },
     rows: [],

@@ -676,6 +676,11 @@ export const commands = {
 	aiDraftCount: number,
 	/**  Reviewers requested on the PR (people and teams). */
 	reviewers: Reviewer[],
+	/**
+	 *  People who have already submitted a review — not you, not the PR's author,
+	 *  not a bot. Empty means nobody has looked at it yet.
+	 */
+	reviewedBy: Reviewer[],
 	/**  ISO-8601 timestamp of the last update. */
 	updatedAt: string,
 	/**  ISO-8601 timestamp the PR was opened. */
@@ -1160,8 +1165,12 @@ export const commands = {
 	 *  only in a response, never on request (see `linear::api_budget`).
 	 */
 	linearApiBudget: () => typedError<LinearApiBudget[], CmdError>(__TAURI_INVOKE("linear_api_budget")),
-	/**  Bind (or clear) the Linear org a repo uses. */
-	setRepoLinearOrg: (repo: string, slug: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_repo_linear_org", { repo, slug })),
+	/**
+	 *  Link a repo to a ticket connection — `linear:<org slug>` or `jira:<cloud id>`,
+	 *  the ids `Repo.connection` carries — or, with `None`, take it off its tracker.
+	 *  The id is parsed and must name a connection that exists.
+	 */
+	setRepoConnection: (repo: string, connection: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_repo_connection", { repo, connection })),
 	/**
 	 *  The repo's assigned Linear issues as a positioned dependency graph — live when
 	 *  an org is connected, else empty.
@@ -1184,8 +1193,6 @@ export const commands = {
 	jiraAuthStatus: (repo: string) => typedError<JiraStatus, CmdError>(__TAURI_INVOKE("jira_auth_status", { repo })),
 	/**  Every connected Jira Cloud site. */
 	jiraSites: () => typedError<JiraSite[], CmdError>(__TAURI_INVOKE("jira_sites")),
-	/**  Bind (or clear) the Jira site a repo uses. */
-	setRepoJiraSite: (repo: string, cloudId: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_repo_jira_site", { repo, cloudId })),
 	/**  Run the Jira OAuth flow; returns the updated site list. */
 	jiraConnect: () => typedError<JiraSite[], CmdError>(__TAURI_INVOKE("jira_connect")),
 	/**
@@ -3260,6 +3267,13 @@ export type Repo = {
 	 *  connected. The same resolution the backend dispatches reads through.
 	 */
 	provider: TicketProvider | null,
+	/**
+	 *  The connection those tickets come from, as its provider-qualified id
+	 *  (`linear:<org slug>`, `jira:<cloud id>`); `None` when the repo is linked to
+	 *  none. Repos sharing a value share a ticket namespace — it is what a ticket
+	 *  is keyed by, never the display label in `tracker`.
+	 */
+	connection: string | null,
 	/**  Number of agents currently active on this repo. */
 	agents: number,
 	/**
@@ -3599,6 +3613,11 @@ export type ReviewPr = {
 	aiDraftCount: number,
 	/**  Reviewers requested on the PR (people and teams). */
 	reviewers: Reviewer[],
+	/**
+	 *  People who have already submitted a review — not you, not the PR's author,
+	 *  not a bot. Empty means nobody has looked at it yet.
+	 */
+	reviewedBy: Reviewer[],
 	/**  ISO-8601 timestamp of the last update. */
 	updatedAt: string,
 	/**  ISO-8601 timestamp the PR was opened. */

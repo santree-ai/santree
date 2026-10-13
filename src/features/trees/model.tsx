@@ -553,6 +553,12 @@ const FILE_BY_WT_KEY = "santree-trees-file-by-worktree";
 const PR_VIEW_BY_WT_KEY = "santree-trees-pr-view-by-worktree";
 const ISSUE_VIEW_BY_WT_KEY = "santree-trees-issue-view-by-worktree";
 
+/** A worktree's slot in the layout store. The project is part of the key because
+ *  worktree ids are not unique across projects: every project's main checkout is
+ *  `BASE_ID`, so keyed by id alone, opening one project's checkout fit another's
+ *  split to the wrong tabs and wrote the collapsed result back. */
+const layoutSurface = (repo: string, worktreeId: string) => `${repo}\u0000${worktreeId}`;
+
 const TreesContext = createContext<TreesModel | null>(null);
 
 export function TreesProvider({ children }: { children: ReactNode }) {
@@ -724,7 +730,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   );
   // Shows the tab in that worktree's layout whether or not it is on screen: a
   // run being followed lands on its tab whenever the worktree is next opened.
-  const setTabFor = layouts.selectIn;
+  const selectIn = layouts.selectIn;
+  const setTabFor = useCallback(
+    (worktreeId: string, tab: MainTab) => selectIn(layoutSurface(repo, worktreeId), tab),
+    [selectIn, repo],
+  );
   // The setters below come from `usePersistedState`, which returns `useState`'s
   // own setter — stable for the component's life, so listing it changes nothing
   // at runtime. Biome only knows that guarantee for a literal `useState` call.
@@ -985,7 +995,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // where it was.
   const layoutReady =
     !!activeId && tabsFetched && prsFetched && (ticketId === null || activeTicket !== undefined);
-  const split = useSplitLayout(layouts, activeId, openTabs, layoutReady);
+  const split = useSplitLayout(layouts, layoutSurface(repo, activeId), openTabs, layoutReady);
 
   const value = useMemo<TreesModel>(() => {
     const active =

@@ -18,6 +18,7 @@ const git = vi.hoisted(() => ({
   ok: vi.fn(async () => ({ status: "ok" as const, data: "main" })),
 }));
 const codex = vi.hoisted(() => ({ account: vi.fn() }));
+const reviewRemoval = vi.hoisted(() => ({ remove: vi.fn() }));
 // `useTriageRepo` runs through the real hooks — two setting reads, the repo
 // list and an optimistic write — so those commands are stubbed against an
 // in-memory settings table rather than mocked one hook at a time.
@@ -63,6 +64,7 @@ vi.mock("../bindings", () => ({
     pullRemoteWorktree: git.ok,
     updateBaseBranch: git.ok,
     codexAccount: codex.account,
+    removeReviewWorkspace: reviewRemoval.remove,
     getSetting: settings.getSetting,
     setSetting: settings.setSetting,
     listRepos: vi.fn(async () => ({ status: "ok" as const, data: settings.repos })),
@@ -112,6 +114,7 @@ import {
   usePushWorktree,
   useRefreshExternal,
   useRefreshWorktree,
+  useRemoveReviewWorkspace,
   useTriageRepo,
   useUpdateBaseBranch,
   useWorktreeBaseChanges,
@@ -128,6 +131,7 @@ describe("reviewCountsByProject", () => {
         id,
         project,
         viewerReview: null,
+        reviewedBy: [] as ReviewPr["reviewedBy"],
         headCommittedAt: "2026-08-24T10:00:00Z",
       }) as ReviewPr;
     const reviewed = {
@@ -179,6 +183,7 @@ describe("reviewGroupsByProject", () => {
       title: id,
       project: "acme/web",
       viewerReview: null,
+      reviewedBy: [] as ReviewPr["reviewedBy"],
       headCommittedAt: "2026-08-24T10:00:00Z",
       waitingSince: "2026-08-24T09:00:00Z",
       updatedAt: "2026-08-24T10:00:00Z",
@@ -670,6 +675,32 @@ describe("git mutations: what they refresh", () => {
     expect(keys).toContain(key(queryKeys.worktreeStatus(repo, "AK-1")));
     expect(keys).toContain(key(queryKeys.moveChangesPreview(repo, "AK-1")));
     expect(keys).toContain(key(queryKeys.baseWorktree(repo)));
+  });
+});
+
+describe("useRemoveReviewWorkspace", () => {
+  const checkout = { repo: "acme/app", worktree: { id: "review-4-acme-3-app-7" } };
+  const key = queryKeys.reviewCheckout("acme/app", "acme/app", 7);
+  const vars = { prRepo: "acme/app", number: 7, headSha: "abc" };
+
+  /** Reported: a deleted PR checkout stayed on offer in the sidebar menu until a
+   *  refetch, so a second delete came back as an error. The offer comes from this
+   *  read, so the read has to drop it at the click and bring it back on failure. */
+  it("drops the checkout from its read at the click, and restores it if the removal fails", async () => {
+    const qc = makeClient();
+    qc.setQueryData(key, checkout);
+    let fail: (reason: Error) => void = () => {};
+    reviewRemoval.remove.mockReturnValue(new Promise((_, reject) => (fail = reject)));
+    const { result } = renderHook(() => useRemoveReviewWorkspace("acme/app"), {
+      wrapper: wrapper(qc),
+    });
+
+    act(() => result.current.mutate(vars));
+    await waitFor(() => expect(qc.getQueryData(key)).toBeNull());
+
+    fail(new Error("boom"));
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(qc.getQueryData(key)).toEqual(checkout);
   });
 });
 

@@ -42,3 +42,25 @@ export function trackerFeatures(
   }
   return { snoozeUnavailable: null, threadedComments: true, memberTeamsOnly: false };
 }
+
+/** A connected ticket tracker account. */
+export interface Connection {
+  /** `linear:<org slug>` or `jira:<cloud id>` — what `Repo.connection` holds. */
+  id: string;
+  provider: TicketProvider;
+  /** The workspace or site's own name. */
+  name: string;
+  /** `Linear · Acme`, for lists. */
+  label: string;
+}
+
+/** How a connection is named wherever one is listed: the provider, then the
+ *  workspace or site — the same spelling the backend gives `Repo.tracker`. */
+export const connectionLabel = (provider: TicketProvider, name: string): string =>
+  `${provider} · ${name}`;
+
+/** The provider a connection id (`linear:<slug>`, `jira:<cloud id>`) belongs to. */
+export const connectionProvider = (id: string): TicketProvider | null => {
+  const prefix = id.slice(0, id.indexOf(":"));
+  return prefix === "linear" ? "Linear" : prefix === "jira" ? "Jira" : null;
+};

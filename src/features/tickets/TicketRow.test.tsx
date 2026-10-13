@@ -60,6 +60,8 @@ const worktree: Worktree = {
 
 function row(overrides: Partial<Row> = {}): Row {
   return {
+    connection: "linear:acme",
+    provider: "Linear",
     repo: "acme/app",
     repos: ["acme/app"],
     task,

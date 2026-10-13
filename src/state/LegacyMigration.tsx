@@ -13,7 +13,7 @@ import { createContext, type ReactNode, useCallback, useContext, useMemo, useSta
 
 import type { LegacyCliMigration } from "../bindings";
 import { ConfirmDialog } from "../components/primitives";
-import { probeLegacyCli, useLegacyCliMigrate, useSetRepoLinearOrg } from "../lib/queries";
+import { probeLegacyCli, useLegacyCliMigrate, useSetRepoConnection } from "../lib/queries";
 import { toast } from "./toast";
 
 interface LegacyMigrationApi {
@@ -33,7 +33,7 @@ export function useLegacyMigration(): LegacyMigrationApi {
 export function LegacyMigrationProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState<{ repo: string; info: LegacyCliMigration } | null>(null);
   const migrate = useLegacyCliMigrate();
-  const setRepoOrg = useSetRepoLinearOrg();
+  const setConnection = useSetRepoConnection();
 
   const offer = useCallback(
     async (repo: string): Promise<boolean> => {
@@ -49,8 +49,8 @@ export function LegacyMigrationProvider({ children }: { children: ReactNode }) {
         // say so: metadata.json ships with the repo, so a silently-applied
         // choice would let a cloned repo pick its workspace unnoticed. A
         // failure still red-toasts via the global mutation handler.
-        await setRepoOrg
-          .mutateAsync({ repo, slug: info.orgSlug })
+        await setConnection
+          .mutateAsync({ repo, connection: `linear:${info.orgSlug}` })
           .then(() => {
             toast.success(`Linked to “${info.orgName}”, from the repo's santree CLI config.`, {
               title: "Linear workspace",
@@ -62,7 +62,7 @@ export function LegacyMigrationProvider({ children }: { children: ReactNode }) {
       setPending({ repo, info });
       return true;
     },
-    [setRepoOrg],
+    [setConnection],
   );
 
   const api = useMemo(() => ({ offer }), [offer]);

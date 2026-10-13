@@ -41,6 +41,7 @@ vi.mock("../../lib/queries", () => ({
   useSetting: () => ({ data: mocked.view }),
   useSetSetting: () => ({ mutate: mocked.setSetting }),
   useStageAction: () => ({ mutate: mocked.stage, mutateAsync: mocked.stage }),
+  useRefreshWorktree: () => ({ refresh: vi.fn(), fetching: false }),
 }));
 vi.mock("./model", () => ({ useTrees: () => mocked, BASE_ID: "__base__" }));
 vi.mock("./CommitBox", () => ({ CommitBox: () => <div>Commit controls</div> }));

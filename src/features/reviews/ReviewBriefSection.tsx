@@ -36,13 +36,8 @@ import { toast } from "../../state/toast";
 import { alpha, palette, readingRoleMeta, watchOutMeta } from "../../theme/colors";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
-import { aiReviewTermKey } from "./AiReviewSessionPane";
 import { reviewBriefStale } from "./briefStale";
-import { REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
-
-/** The agents that can run a review, in the order the picker lists them. Mirrors
- *  {@link ReviewDetail}'s own list — one catalogue for "who can review". */
-const REVIEW_AGENTS: AgentKind[] = ["Codex", "Claude"];
+import { aiReviewTermKey, REVIEW_AGENTS, REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
 
 export function ReviewBriefSection({
   pr,

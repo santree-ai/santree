@@ -29,7 +29,7 @@
 import { memo } from "react";
 import type { TicketProvider } from "../../bindings";
 import { Avatar } from "../../components/Avatar";
-import { BranchIcon, CheckIcon, PlayIcon, QueueIcon } from "../../components/icons";
+import { BranchIcon, CheckIcon, PlayIcon, QueueIcon, TrackerLogo } from "../../components/icons";
 import { MarkdownTitle } from "../../components/Markdown";
 import { ticketItems } from "../../components/menuRows";
 import { PrChips } from "../../components/PrChip";
@@ -174,6 +174,7 @@ function menuFor(
 export const TicketRow = memo(function TicketRow({
   row,
   indent,
+  showSource = false,
   active = false,
   queued = false,
   onOpen,
@@ -184,6 +185,8 @@ export const TicketRow = memo(function TicketRow({
   row: Row;
   /** Where the key starts: the label column of the heading the row hangs under. */
   indent: number;
+  /** Mark the row with its connection's logo (the list draws more than one). */
+  showSource?: boolean;
   /** This is the ticket the inspector is showing. */
   active?: boolean;
   /** The ticket is in the launch queue. */
@@ -270,6 +273,14 @@ export const TicketRow = memo(function TicketRow({
         <span className="w-14 flex-none truncate font-mono text-[11px] text-muted-4">
           {task.id}
         </span>
+        {showSource && row.provider && (
+          <span
+            className="flex w-3 flex-none justify-center text-muted-4"
+            title={`${row.provider} ticket`}
+          >
+            <TrackerLogo provider={row.provider} size={10} />
+          </span>
+        )}
         <StatusGlyph status={task.status} size={12} />
         <MarkdownTitle className="block min-w-0 flex-1 truncate text-[13px] text-fg-2">
           {task.title}

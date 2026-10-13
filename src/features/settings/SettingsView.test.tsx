@@ -80,6 +80,15 @@ describe("Settings → nav", () => {
     expect(screen.getByText("server banner")).toBeInTheDocument();
   });
 
+  it("groups the user scope by what each provider is for", () => {
+    render(<SettingsView />);
+    expect(groupItems("Issue trackers")).toEqual(["Linear", "Jira"]);
+    expect(groupItems("Code hosting")).toEqual(["GitHub", "Daedalus"]);
+    expect(groupItems("AI harness")).toEqual(["Claude Code", "Codex"]);
+    expect(groupItems("Environment")).toEqual(["Variables", "Terminal"]);
+    expect(groupItems("Extra")).toEqual(["English tutor", "Usage"]);
+  });
+
   it("opens the pane the nav item names", () => {
     render(<SettingsView />);
     fireEvent.click(screen.getByRole("button", { name: "GitHub" }));

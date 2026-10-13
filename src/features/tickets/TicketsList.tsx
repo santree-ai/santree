@@ -123,9 +123,13 @@ function TicketSkeleton() {
 export function TicketsList({
   groups,
   loading,
+  showSource = false,
 }: {
   groups: TicketProjectGroup[];
   loading: boolean;
+  /** Mark each row with its connection's logo — set once the page draws more than
+   *  one, when the id alone no longer says where a ticket lives. */
+  showSource?: boolean;
 }) {
   const { requestTreeFocus } = useAppUi();
   const navigate = useNavigate();
@@ -224,7 +228,7 @@ export function TicketsList({
     return (
       <EmptyState
         title="No tickets"
-        subtitle="Connect a repo to Linear, or turn off the actionable-only filter to see the tickets you're not assigned."
+        subtitle="Link a project to a ticket tracker, or turn off the actionable-only filter to see the tickets you're not assigned."
       />
     );
   }
@@ -241,8 +245,9 @@ export function TicketsList({
       const home = row.repos.length > 0;
       return (
         <TicketRow
-          key={row.task.id}
+          key={`${row.connection}|${row.task.id}`}
           row={row}
+          showSource={showSource}
           indent={indent}
           active={home && row.task.id === focusId}
           queued={home && !!selected[row.task.id]}

@@ -41,6 +41,7 @@ vi.mock("../../lib/queries", () => ({
   useSetting: () => ({ data: settings.view }),
   useSetSetting: () => ({ mutate: vi.fn() }),
   useStageAction: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
+  useRefreshWorktree: () => ({ refresh: vi.fn(), fetching: false }),
 }));
 
 beforeEach(() => {

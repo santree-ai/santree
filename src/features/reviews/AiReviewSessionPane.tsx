@@ -36,17 +36,11 @@ import {
 import { agentProvider, sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed } from "../terminal/agentSeed";
 import { useHookInjection } from "../terminal/useHookInjection";
-import { REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
+import { aiReviewTermKey, REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
 import { useReviewsModel } from "./model";
 import { ReviewFooter, reviewTargetFor } from "./ReviewSessionShared";
 import { ReviewTerminal } from "./ReviewTerminal";
 import { useReviewSessionLatch } from "./useReviewSessionLatch";
-
-/** The provider-neutral terminal key for a PR's AI review. Parsed back out by the
- * Agents panel (`registry.ts`), so the shape is a shared convention. */
-export function aiReviewTermKey(pr: ReviewPr): string {
-  return `ai-review:${pr.repo}#${pr.number}`;
-}
 
 export function AiReviewSessionPane({
   pr,

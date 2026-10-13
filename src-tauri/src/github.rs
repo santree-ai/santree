@@ -691,6 +691,7 @@ const PR_FIELDS: &str = r"
     comments { totalCount }
     additions deletions changedFiles
     viewerLatestReview { state submittedAt }
+    latestReviews(first: 10) { nodes { state author { __typename login avatarUrl } } }
     commits(last: 1) { nodes { commit { oid committedDate statusCheckRollup { state } } } }
     reviewRequests(first: 20) {
       nodes {
@@ -778,6 +779,14 @@ struct CommitWrap {
 #[derive(Deserialize)]
 struct CommitNode {
     commit: CommitWrap,
+}
+
+/// One reviewer's latest review of a PR, for who has looked at it.
+#[derive(Deserialize)]
+struct ReviewerNode {
+    state: Option<String>,
+    /// `None` for a deleted account.
+    author: Option<Actor>,
 }
 
 #[derive(Deserialize)]
@@ -871,6 +880,10 @@ struct PrNode {
     created_at: String,
     #[serde(rename = "viewerLatestReview")]
     viewer_latest_review: Option<LatestReviewNode>,
+    /// Each reviewer's latest review. Defaults to empty so a payload from before
+    /// the field was selected still decodes.
+    #[serde(default, rename = "latestReviews")]
+    latest_reviews: Connection<ReviewerNode>,
     commits: Connection<CommitNode>,
     #[serde(rename = "reviewRequests")]
     review_requests: Connection<ReviewRequestNode>,
@@ -979,6 +992,26 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
         });
     let waiting_since = viewer_requested_at(&n.timeline_items.nodes, viewer)
         .unwrap_or_else(|| n.created_at.clone());
+    // People who have already reviewed: submitted reviews only (a pending one is
+    // a draft nobody has seen), and not the viewer, the PR's own author or a bot
+    // — a Copilot pass or a CI app is not someone having looked at it.
+    let reviewed_by = n
+        .latest_reviews
+        .nodes
+        .into_iter()
+        .filter(|r| r.state.as_deref().is_some_and(|s| s != "PENDING"))
+        .filter_map(|r| r.author)
+        .filter(|a| {
+            !a.is_bot()
+                && !a.login.eq_ignore_ascii_case(&viewer.login)
+                && !a.login.eq_ignore_ascii_case(&author)
+        })
+        .map(|a| Reviewer {
+            kind: ReviewerKind::User,
+            name: a.login,
+            avatar_url: a.avatar_url,
+        })
+        .collect();
     let reviewers = n
         .review_requests
         .nodes
@@ -1026,6 +1059,7 @@ fn to_review_pr(n: PrNode, viewer: &ViewerCtx) -> ReviewPr {
         // inbox lands. GitHub has no concept of drafts that have not been sent.
         ai_draft_count: 0,
         reviewers,
+        reviewed_by,
         updated_at: n.updated_at,
         created_at: n.created_at,
         waiting_since,
@@ -4089,6 +4123,12 @@ mod tests {
               "comments": { "totalCount": 7 },
               "additions": 120, "deletions": 34, "changedFiles": 9,
               "viewerLatestReview": { "state": "APPROVED", "submittedAt": "2026-08-28T10:00:00Z" },
+              "latestReviews": { "nodes": [
+                { "state": "APPROVED", "author": { "__typename": "User", "login": "grace", "avatarUrl": "https://a/3.png" } },
+                { "state": "COMMENTED", "author": { "__typename": "Bot", "login": "copilot", "avatarUrl": "https://a/4.png" } },
+                { "state": "PENDING", "author": { "__typename": "User", "login": "linus", "avatarUrl": "https://a/5.png" } },
+                { "state": "APPROVED", "author": { "__typename": "User", "login": "santiago", "avatarUrl": "https://a/1.png" } }
+              ] },
               "commits": { "nodes": [{ "commit": {
                 "oid": "deadbee", "committedDate": "2026-08-29T11:00:00Z",
                 "statusCheckRollup": { "state": "FAILURE" } } }] },
@@ -4125,6 +4165,10 @@ mod tests {
         assert_eq!(review.submitted_at, "2026-08-28T10:00:00Z");
         // The timeline event naming the viewer dates the wait, not `createdAt`.
         assert_eq!(pr.waiting_since, "2026-08-28T08:00:00Z");
+        // Only a person who submitted a review counts as having looked at it: not
+        // a bot, a draft one, or the PR's own author.
+        let reviewed: Vec<&str> = pr.reviewed_by.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(reviewed, ["grace"]);
         // A user, a team, and a mannequin that is neither.
         let reviewers: Vec<(&str, ReviewerKind)> = pr
             .reviewers

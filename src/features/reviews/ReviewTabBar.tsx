@@ -42,16 +42,9 @@ import { liveTabFor } from "../agents/registry";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
 import { useTabSessions } from "../trees/useTabSessions";
-import { aiReviewTermKey } from "./AiReviewSessionPane";
-import { REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
+import { aiReviewTermKey, REVIEW_AGENTS, REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
 import { useReviewsModel } from "./model";
-import {
-  aiTab,
-  checkoutTab,
-  REVIEW_AGENTS,
-  type ReviewMainTab,
-  type ReviewTabs,
-} from "./useReviewTabs";
+import { aiTab, checkoutTab, type ReviewMainTab, type ReviewTabs } from "./useReviewTabs";
 import { useWorktreeGate } from "./WorktreeGate";
 
 export function ReviewTabBar({
@@ -152,7 +145,10 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
   const codexAccount = useCodexAccount(codexHealth?.available === true).data;
   const codexReady = !!codexHealth?.available && !!codexAccount?.connected;
   const ready = (agent: AgentKind) => (agent === "Codex" ? codexReady : claudeReady);
+  // Terminals and agents run in the PR's own worktree; a review reads whichever
+  // checkout exists, including the hidden kind an earlier review cut.
   const checkedOut = tabs.checkout.worktree !== null;
+  const reviewable = tabs.checkout.source.worktree !== null;
   const askForWorktree = useWorktreeGate();
 
   const review = (agent: AgentKind) => {
@@ -160,7 +156,12 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
     // An AI review reads real code, so it needs the PR checked out — and cutting
     // that checkout is the thing worth asking about. With one already on disk
     // there is nothing to ask: the review just opens.
-    if (checkedOut) {
+    // Until both reads have answered, "nothing on disk" would be a guess (and
+    // the dialog it opens a duplicate), so the click waits for them.
+    if (!tabs.checkout.known) return;
+    // Or one already open, still cutting its checkout: asking again would be a
+    // second dialog for the create it is in the middle of.
+    if (reviewable || tabs.mounted.includes(agent)) {
       tabs.openReview(agent);
       close();
       return;

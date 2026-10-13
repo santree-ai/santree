@@ -322,6 +322,7 @@ export function toReviewPr(seed: PrSeed, now: number, o: PrOverlay = {}): Review
     waitingSince: iso(now - seed.waitingAgo),
     headCommittedAt: iso(o.pushedAt ?? now - seed.pushedAgo),
     viewerReview: null,
+    reviewedBy: [],
   };
 }
 

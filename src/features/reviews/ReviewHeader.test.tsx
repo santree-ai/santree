@@ -14,8 +14,9 @@ const state = vi.hoisted(() => ({
   /** The AI review's checkout, when one has been cut. What decides whether the
    *  tree action is offering to check anything out at all. */
   reviewCheckout: undefined as unknown,
+  /** The create, as `mutateAsync` sees it: resolves with the worktree it made. */
   mutate: vi.fn(),
-
+  pendingLaunches: [] as unknown[],
   addPendingLaunches: vi.fn(),
   removePendingLaunch: vi.fn(),
   requestTreeFocus: vi.fn(),
@@ -26,15 +27,17 @@ vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }))
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("../../lib/queries", () => ({
   useRepos: () => ({ data: state.repos }),
-  useWorktrees: () => ({ data: state.worktrees }),
-  useWorktreePrs: () => ({ data: state.worktreePrs }),
-  useCreateWorktree: () => ({ mutate: state.mutate, isPending: false }),
+  useWorktrees: () => ({ data: state.worktrees, isFetched: true }),
+  useWorktreePrs: () => ({ data: state.worktreePrs, isFetched: true }),
+  useCreateWorktree: () => ({ mutateAsync: state.mutate }),
   usePrDetail: () => ({ data: state.detail }),
-  useReviewCheckout: () => ({ data: state.reviewCheckout }),
+  useReviewCheckout: () => ({ data: state.reviewCheckout, isFetched: true }),
+  useReviewWorkspaceCutting: () => false,
   usePromoteReviewWorktree: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 vi.mock("../../state/AppContext", () => ({
   useAppUi: () => ({
+    pendingLaunches: state.pendingLaunches,
     addPendingLaunches: state.addPendingLaunches,
     removePendingLaunch: state.removePendingLaunch,
     requestTreeFocus: state.requestTreeFocus,
@@ -88,6 +91,7 @@ const pr = {
   commentCount: 0,
   aiDraftCount: 0,
   reviewers: [],
+  reviewedBy: [],
   updatedAt: "2026-08-24T10:00:00Z",
   createdAt: "2026-08-23T10:00:00Z",
   waitingSince: "2026-08-23T10:00:00Z",
@@ -107,6 +111,8 @@ beforeEach(() => {
   state.worktreePrs = [];
   state.detail = undefined;
   state.reviewCheckout = undefined;
+  state.pendingLaunches = [];
+  state.mutate.mockResolvedValue(fxWorktree("created"));
   vi.clearAllMocks();
 });
 
@@ -253,10 +259,40 @@ describe("ReviewHeader tree action", () => {
         launch: { type: "pr", prRepo: pr.repo, branch: pr.headRef },
         agent: null,
       }),
-      expect.any(Object),
     );
     // The origin has no project field to fill in, which is the point.
     expect(state.mutate.mock.calls[0][0]).not.toHaveProperty("project");
+  });
+
+  /** Reported: starting checkouts for several PRs only ever produced the last.
+   *  The view is keyed per PR, so choosing the next PR unmounts the one whose
+   *  create is still running — and a per-call `onSuccess`/`onError` dies with it.
+   *  The continuation has to be the promise's, and the "creating" state has to
+   *  live in app state a remounted view can read. */
+  it("finishes the create after the view is gone, and shows it as creating on return", async () => {
+    let resolveCreate: (tree: Worktree) => void = () => {};
+    state.mutate.mockReturnValue(new Promise<Worktree>((resolve) => (resolveCreate = resolve)));
+    const { unmount } = render(
+      <WorktreeGateProvider>
+        <Header pr={pr} />
+      </WorktreeGateProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open as tree" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create worktree" }));
+    await waitFor(() => expect(state.mutate).toHaveBeenCalled());
+    unmount();
+
+    resolveCreate(existing);
+    await waitFor(() => expect(state.removePendingLaunch).toHaveBeenCalledWith(reviewTreeId(pr)));
+    // Not pulled into the tree: the click already took the user there, and by now
+    // they may be on another PR.
+    expect(state.requestTreeFocus).not.toHaveBeenCalled();
+
+    // Back on the PR while another start is under way: the placeholder is the
+    // app-wide record, so the button says so rather than offering a second.
+    state.pendingLaunches = [{ repo: "acme/app", id: reviewTreeId(pr) }];
+    render(<Header pr={pr} />);
+    expect(screen.getByRole("button", { name: "Creating…" })).toBeDisabled();
   });
 
   it("disables tree creation when the PR's repository is not registered locally", () => {
