@@ -39,6 +39,7 @@ const data = vi.hoisted(() => ({
   readOnly: false,
   /** What the connection can do: an MCP-connected Linear org has no snooze. */
   features: {
+    triage: true,
     snoozeUnavailable: null as string | null,
     threadedComments: true,
     memberTeamsOnly: false,

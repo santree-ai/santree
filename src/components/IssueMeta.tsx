@@ -30,9 +30,14 @@ export function IssueMeta({
       <div
         className={`flex items-center gap-1.5 ${dense ? "text-[10.5px]" : "text-[11px]"} text-muted-3`}
       >
-        <Avatar name={detail.author} src={detail.authorAvatarUrl} size={dense ? 15 : 17} />
-        {detail.author}
-        <span className="text-muted-5">·</span>
+        {/* TickTick names no author, so its line is just the date. */}
+        {detail.author && (
+          <>
+            <Avatar name={detail.author} src={detail.authorAvatarUrl} size={dense ? 15 : 17} />
+            {detail.author}
+            <span className="text-muted-5">·</span>
+          </>
+        )}
         <RelativeTime ms={detail.createdAtMs} />
       </div>
       <IssueProperties

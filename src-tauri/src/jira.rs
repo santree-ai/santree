@@ -400,13 +400,13 @@ async fn site_session(db: &Db, cloud_id: String) -> Result<Session<'_>> {
 
 type Slot<T> = std::sync::Arc<tokio::sync::Mutex<Option<(Instant, std::sync::Arc<T>)>>>;
 
-struct TtlCache<T> {
+pub(crate) struct TtlCache<T> {
     ttl: Duration,
     slots: std::sync::Mutex<HashMap<String, Slot<T>>>,
 }
 
 impl<T> TtlCache<T> {
-    fn new(ttl: Duration) -> Self {
+    pub(crate) fn new(ttl: Duration) -> Self {
         Self {
             ttl,
             slots: Default::default(),
@@ -422,7 +422,11 @@ impl<T> TtlCache<T> {
             .clone()
     }
 
-    async fn get_or_fetch<F, Fut>(&self, key: &str, fetch: F) -> Result<(std::sync::Arc<T>, bool)>
+    pub(crate) async fn get_or_fetch<F, Fut>(
+        &self,
+        key: &str,
+        fetch: F,
+    ) -> Result<(std::sync::Arc<T>, bool)>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
@@ -439,14 +443,14 @@ impl<T> TtlCache<T> {
         Ok((value, false))
     }
 
-    fn invalidate(&self, key: &str) {
+    pub(crate) fn invalidate(&self, key: &str) {
         self.slots
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(key);
     }
 
-    fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.slots.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
@@ -1503,12 +1507,14 @@ pub async fn connect(db: &Db) -> Result<Vec<JiraSite>> {
         .map(|(k, v)| format!("{k}={}", oauth::urlencode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    oauth::open_browser(&format!("{AUTHORIZE_URL}?{query}"));
+    let authorize_url = format!("{AUTHORIZE_URL}?{query}");
 
     let expected_state = state.clone();
-    let code = tokio::task::spawn_blocking(move || oauth::wait_for_code(&expected_state, "Jira"))
-        .await
-        .context("oauth listener task")??;
+    let code = tokio::task::spawn_blocking(move || {
+        oauth::wait_for_code(&expected_state, "Jira", &authorize_url)
+    })
+    .await
+    .context("oauth listener task")??;
 
     let (access_token, refresh_token, expires_at, scopes) =
         exchange_code(&code, &redirect_uri, &verifier).await?;

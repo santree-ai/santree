@@ -30,6 +30,7 @@ import {
   PrIcon,
   TelescopeIcon,
   TerminalIcon,
+  TickTickLogo,
 } from "../../components/icons";
 import { Dropdown, Tabs } from "../../components/primitives";
 import { ServerBanner } from "../../components/shell/ServerBanner";
@@ -49,6 +50,7 @@ import { LinearSection } from "./sections/Linear";
 import { PromptsSection } from "./sections/Prompts";
 import { RepoTrackerSection } from "./sections/RepoTracker";
 import { TerminalSection } from "./sections/Terminal";
+import { TickTickSection } from "./sections/TickTick";
 import { UsageSection } from "./sections/Usage";
 import { WorkSection } from "./sections/Work";
 
@@ -157,6 +159,12 @@ const APP_NAV: NavNode[] = [
         label: "Jira",
         icon: <JiraLogo size={ICON_SIZE} />,
         render: () => <JiraSection />,
+      },
+      {
+        key: "ticktick",
+        label: "TickTick",
+        icon: <TickTickLogo size={ICON_SIZE} />,
+        render: () => <TickTickSection />,
       },
     ],
   },

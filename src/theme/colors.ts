@@ -71,6 +71,9 @@ export const LINEAR_BRAND = "var(--linear-brand)";
 /** Jira's brand blue (the `--jira-brand` token), for the Jira logo/badge. */
 export const JIRA_BRAND = "var(--jira-brand)";
 
+/** TickTick's brand blue (the `--ticktick-brand` token), for the TickTick mark. */
+export const TICKTICK_BRAND = "var(--ticktick-brand)";
+
 /** Daedalus's brand coral (the `--daedalus-brand` token), the fill of its mark. */
 export const DAEDALUS_BRAND = "var(--daedalus-brand)";
 

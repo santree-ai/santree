@@ -44,6 +44,7 @@
 import { useState } from "react";
 
 import { agentKey } from "../../features/agents/registry";
+import { ticketHandle } from "../../lib/tracker";
 import type { TreeFocusPane } from "../../state/AppContext";
 import { BranchIcon } from "../icons";
 import { MarkdownTitle } from "../Markdown";
@@ -167,7 +168,7 @@ export function WorktreeRow({
                       e.stopPropagation();
                       onOpenPage("issue");
                     }}
-                    title={`${task.id} — open the ticket`}
+                    title={`${ticketHandle(task.id)} — open the ticket`}
                     aria-label={`Open the ticket for ${w.title || w.id}`}
                     className={MARK_CLASS}
                   >

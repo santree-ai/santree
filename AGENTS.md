@@ -442,10 +442,10 @@ src/
   `CreateWorktreeVars.repo` (a var, not a hook argument — the answer arrives at
   click time).
 - **A repo reads one tracker, resolved in one place.** `repos.connection` holds
-  it, as a provider-qualified id (`linear:<org slug>`, `jira:<cloud id>`;
-  `connection.rs`), and there is no fallback: a repo reads the connection it is
+  it, as a provider-qualified id (`linear:<org slug>`, `jira:<cloud id>`,
+  `ticktick:me`; `connection.rs`), and there is no fallback: a repo reads the connection it is
   linked to, or none. The database links the waiting repos when an install makes
-  its first connection (triggers in `0038`), `connection::adopt_sole` does the same
+  its first connection (triggers in `0038`, recounted in `0039`), `connection::adopt_sole` does the same
   for a repo added while exactly one exists, and with several the user picks
   (Settings → Repo → Ticket tracker). Linking one clears the other provider's link
   by construction (one column). `repos.linear_org_slug` / `jira_cloud_id` are dead
@@ -465,6 +465,15 @@ src/
   sends it to `linear_mcp` (docs/linear-mcp.md). A list that spans projects hands its selection over
   with the row's project (`issues/model` `openTicket`): looking an id up in one
   project and falling back to its first ticket showed a different ticket.
+- **TickTick has no ticket key.** A task is reached only by (list, task), so its
+  ticket id is `<listId>.<taskId>` (`santree_core::ticktick::split_id` is the guard
+  before any request path; no `:`, which `tree:<id>:tab:` splits on). People see
+  the handle `tt-<last 6 of the task id>` (`ticketHandle`), which also names the
+  branch; the worktree id stays the full id. One account per install
+  (`ticktick:me`: the API has no identity endpoint), OAuth with no refresh token
+  or a pasted personal API token, both a keychain bearer. Subtasks block their
+  parent; there are no states beyond Todo / Done / Won't do, no triage, no teams.
+  Which lists a repo reads is its `ticktick_lists` setting (unset = all open).
 - **One right panel, four hosts.** `components/SidePanel` is the chrome — icon
   strip, underline, dots, drag region, edge resize, collapse-to-nothing — and each
   view supplies its own panes, dots and model (`trees/FilePickerPanel`,
@@ -594,12 +603,13 @@ src/
   symlink-escape); branch/ref names must not start with `-` (flag injection).
   `issue_id`, `base`, session ids all cross this line — never `Path::join` or
   shell them raw. A ticket id bound for Jira passes `jira::is_issue_key` before
-  it reaches JQL or a request path.
+  it reaches JQL or a request path, and one bound for TickTick passes
+  `santree_core::ticktick::split_id` before it reaches a request path.
 - **Match hosts/URLs by parse at the sink, never by string prefix** —
   `url.host_str() == Some("uploads.linear.app")`, not
   `starts_with("https://uploads.linear.app")` (a prefix also matches
   `…app.evil.com`). Same for any allowlist.
-- **App-owned secrets** (Linear and Jira tokens) belong in the OS keychain, not plaintext
+- **App-owned secrets** (Linear, Jira and TickTick tokens) belong in the OS keychain, not plaintext
   SQLite. Don't add new plaintext-secret columns. (Distinct from `COMPLIANCE.md`,
   which bars *agent-CLI* creds — this is our own OAuth.)
 - **Nothing an agent writes reaches GitHub without a click.** The AI review's MCP
@@ -748,6 +758,11 @@ version.
   AppleScript that paints the DMG background and places the icons — with
   `CI=true` the bundler otherwise passes `--skip-jenkins` and ships a
   default-looking DMG (background.png present but no `.DS_Store` to use it).
+- TickTick's OAuth client secret is compiled in by `option_env!` from the
+  `release` environment's `TICKTICK_CLIENT_SECRET` (the build step's env), not
+  committed. Drop it from `release.yml` and the release still builds, but ships
+  without "Sign in with TickTick" (`oauthAvailable` false; the token path stays).
+  Locally it comes from a cargo `[env]` outside the repo.
 - The version-free `santree-macos.dmg` asset exists for the website's
   `releases/latest/download/…` link. Stop uploading it and the download button
   404s on the next release.

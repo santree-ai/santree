@@ -31,6 +31,7 @@ import {
   WORK_AGENT_KEY,
   WORK_MODEL_KEY,
 } from "../../lib/queries";
+import { ticketHandle } from "../../lib/tracker";
 import { statusLabel } from "../../theme/colors";
 import { useIssues } from "./model";
 import { TaskNotes } from "./TaskNotes";
@@ -157,7 +158,7 @@ function QueueCard({
           className="flex min-w-0 flex-1 cursor-pointer flex-col gap-1 text-left"
         >
           <span className="flex items-center gap-2">
-            <span className="font-mono text-[11px] text-muted-2">{task.id}</span>
+            <span className="font-mono text-[11px] text-muted-2">{ticketHandle(task.id)}</span>
             <span className="flex items-center gap-1.5 text-[10.5px] text-muted-3">
               <StatusGlyph status={task.status} size={11} />
               {statusLabel[task.status]}
@@ -174,7 +175,7 @@ function QueueCard({
         <button
           type="button"
           onClick={onRemove}
-          aria-label={`Remove ${task.id} from the queue`}
+          aria-label={`Remove ${ticketHandle(task.id)} from the queue`}
           title="Remove from the queue"
           className="-mt-0.5 -mr-1 flex flex-none cursor-pointer items-center rounded p-1 text-muted-4 hover:bg-hover hover:text-fg-2"
         >
@@ -183,7 +184,7 @@ function QueueCard({
       </div>
       {chainBase && (
         <div className="px-3 pt-1.5 font-mono text-[10.5px] text-muted-3">
-          ⛓ branches off {chainBase}
+          ⛓ branches off {ticketHandle(chainBase)}
         </div>
       )}
       <div className="flex items-center gap-2 px-3 pt-2">
@@ -191,7 +192,7 @@ function QueueCard({
         <ChevronSelect
           value={agent}
           onChange={(v) => onAgent(v as AgentKind)}
-          aria-label={`Agent for ${task.id}`}
+          aria-label={`Agent for ${ticketHandle(task.id)}`}
           className="h-6 rounded-md border border-line-2 bg-raised pr-7 pl-2 font-mono text-[11px] text-fg-2"
           wrapperClassName="flex-none"
         >

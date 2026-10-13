@@ -22,7 +22,7 @@ import { RelativeTime } from "../../components/RelativeTime";
 import { StatusGlyph } from "../../components/WorkSignals";
 import { WorktreeStats } from "../../components/WorktreeStats";
 import { useTriageDetail } from "../../lib/queries";
-import { trackerOf } from "../../lib/tracker";
+import { ticketHandle, trackerOf } from "../../lib/tracker";
 import { palette, raisedActiveStyle, statusColor, statusLabel } from "../../theme/colors";
 import { BlockerRow } from "./BlockerRow";
 import { useIssues } from "./model";
@@ -145,7 +145,7 @@ export function IssuePanel() {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
         <div className="mb-1.5 flex items-center gap-2">
-          <span className="font-mono text-[11px] text-muted-2">{focus.id}</span>
+          <span className="font-mono text-[11px] text-muted-2">{ticketHandle(focus.id)}</span>
           <span className="flex items-center gap-1.5 text-[11px] text-muted-2">
             <StatusGlyph status={focus.status} size={12} />
             {statusLabel[focus.status]}
@@ -172,9 +172,14 @@ export function IssuePanel() {
         <IssueProperties facts={factsOfTask(focus, ready)} dense className="mt-2" />
         {ready && (
           <div className="mt-2 flex items-center gap-1.5 text-[10.5px] text-muted-3">
-            <Avatar name={ready.author} src={ready.authorAvatarUrl} size={15} />
-            {ready.author}
-            <span className="text-muted-5">·</span>
+            {/* TickTick names no author, so its line is just the date. */}
+            {ready.author && (
+              <>
+                <Avatar name={ready.author} src={ready.authorAvatarUrl} size={15} />
+                {ready.author}
+                <span className="text-muted-5">·</span>
+              </>
+            )}
             <RelativeTime ms={ready.createdAtMs} />
           </div>
         )}

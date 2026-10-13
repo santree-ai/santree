@@ -133,7 +133,8 @@ function CommentItem({
 }) {
   const [replying, setReplying] = useState(false);
   const readOnly = useTrackerReadOnly(repo);
-  // Jira comments are flat, so a Jira ticket offers no Reply to post into one.
+  // Jira's and TickTick's comments are flat, so their tickets offer no Reply
+  // to post into one.
   const threaded = useTrackerFeatures(repo).threadedComments;
   return (
     <div

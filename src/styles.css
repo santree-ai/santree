@@ -185,6 +185,11 @@
      current blue rather than the classic #0052cc, which sinks into the dark
      theme's background at icon size. */
   --jira-brand: #1868db;
+  /* TickTick's two brand colours, straight from its app icon: the blue ring
+     (`TICKTICK_BRAND`, the mark's tint) and the yellow check, which only the
+     branded mark draws. */
+  --ticktick-brand: #4772fa;
+  --ticktick-check: #ffb000;
   /* Daedalus's brand coral and the ink drawn on it — `DAEDALUS_BRAND` /
      `DAEDALUS_ON_BRAND` and the `DaedalusLogo` tile, straight from its app
      icon. Shared by both themes, like the tile itself. */

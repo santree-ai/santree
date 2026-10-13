@@ -157,6 +157,16 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
       canWrite: false,
     }),
 
+    // ── TickTick ──────────────────────────────────────────────────────────
+    // Same reason: a real connected TickTick account stays out of a capture.
+    ticktick_status: () => ({
+      connected: false,
+      via: null,
+      oauthAvailable: false,
+      canWrite: false,
+    }),
+    ticktick_lists: () => [],
+
     // ── Daedalus ──────────────────────────────────────────────────────────
     // No agent, so a real home server's name never reaches a capture.
     daedalus_status: () => ({ kind: "AgentMissing" }),

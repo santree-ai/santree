@@ -52,6 +52,7 @@ vi.mock("./sections/GitHub", () => ({ GitHubSection: () => <div>GitHub pane</div
 vi.mock("./sections/Daedalus", () => ({ DaedalusSection: () => <div>Daedalus pane</div> }));
 vi.mock("./sections/Linear", () => ({ LinearSection: () => <div>Linear pane</div> }));
 vi.mock("./sections/Jira", () => ({ JiraSection: () => <div>Jira pane</div> }));
+vi.mock("./sections/TickTick", () => ({ TickTickSection: () => <div>TickTick pane</div> }));
 vi.mock("./sections/Prompts", () => ({ PromptsSection: () => <div>Prompts pane</div> }));
 vi.mock("./sections/RepoTracker", () => ({
   RepoTrackerSection: () => <div>Repo tracker pane</div>,
@@ -82,7 +83,7 @@ describe("Settings → nav", () => {
 
   it("groups the user scope by what each provider is for", () => {
     render(<SettingsView />);
-    expect(groupItems("Issue trackers")).toEqual(["Linear", "Jira"]);
+    expect(groupItems("Issue trackers")).toEqual(["Linear", "Jira", "TickTick"]);
     expect(groupItems("Code hosting")).toEqual(["GitHub", "Daedalus"]);
     expect(groupItems("AI harness")).toEqual(["Claude Code", "Codex"]);
     expect(groupItems("Environment")).toEqual(["Variables", "Terminal"]);

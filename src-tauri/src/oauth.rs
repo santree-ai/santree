@@ -245,8 +245,15 @@ pub fn pkce_challenge(verifier: &str) -> String {
 
 // ── Localhost callback listener ──────────────────────────────────────────
 
-/// Bind the OAuth callback port and wait for the authorization code.
-pub fn wait_for_code(expected_state: &str, provider_name: &str) -> Result<String> {
+/// Bind the OAuth callback port, send the browser to `authorize_url`, and wait for
+/// the authorization code. The bind comes first: a browser sent off while another
+/// process holds the port would deliver the code to that process, and TickTick's
+/// flow has no PKCE to make a stolen code worthless.
+pub fn wait_for_code(
+    expected_state: &str,
+    provider_name: &str,
+    authorize_url: &str,
+) -> Result<String> {
     let listener = TcpListener::bind(("127.0.0.1", OAUTH_PORT)).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
             anyhow!(
@@ -256,6 +263,7 @@ pub fn wait_for_code(expected_state: &str, provider_name: &str) -> Result<String
             anyhow::Error::new(e).context("binding oauth port")
         }
     })?;
+    open_browser(authorize_url);
     accept_code(&listener, expected_state, Instant::now() + OAUTH_TIMEOUT)
 }
 

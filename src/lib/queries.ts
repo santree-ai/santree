@@ -60,6 +60,7 @@ import type {
   Settings,
   TicketProvider,
   TicketRef,
+  TickTickStatus,
   TriageComment,
   TriageDetail,
   TriageSession,
@@ -79,7 +80,9 @@ import {
   type Connection,
   connectionLabel,
   connectionProvider,
+  TICKTICK_CONNECTION,
   type TrackerFeatures,
+  tickTickTaskUrl,
   trackerFeatures,
 } from "./tracker";
 
@@ -454,6 +457,9 @@ export const queryKeys = {
   jiraStatusPrefix: ["jira-status"] as const,
   jiraStatus: (repo: string) => ["jira-status", repo] as const,
   jiraSites: ["jira-sites"] as const,
+  /** One TickTick account per install, so its status isn't per repo. */
+  ticktickStatus: ["ticktick-status"] as const,
+  ticktickLists: ["ticktick-lists"] as const,
   claudeUsage: ["claude-usage"] as const,
 };
 
@@ -740,6 +746,11 @@ export const parseLinearScope = (raw: string | null | undefined): LinearScope =>
 /** A Jira repo's triage queue, as JQL (repo-scoped). Read by Rust
  *  (`jira::TRIAGE_JQL_KEY`), so the two declarations have to agree. */
 export const JIRA_TRIAGE_JQL_KEY = "jira_triage_jql";
+
+/** The TickTick lists a repo reads, as a JSON array of list ids (repo-scoped);
+ *  unset or empty is every open list. Read by Rust (`ticktick::LISTS_KEY`), so
+ *  the two declarations have to agree. */
+export const TICKTICK_LISTS_KEY = "ticktick_lists";
 
 /** What an unset query runs — the placeholder for `jira::DEFAULT_TRIAGE_JQL`,
  *  whose copy is the one the backend actually sends. */
@@ -1093,6 +1104,8 @@ export const useSetSetting = () =>
         : []),
       // A Jira repo's queue *is* this query, so a new one is a different queue.
       ...(a.key === JIRA_TRIAGE_JQL_KEY ? [queryKeys.triageTicketsPrefix] : []),
+      // A TickTick repo's tickets are its lists' tasks.
+      ...(a.key === TICKTICK_LISTS_KEY ? [queryKeys.tasksPrefix] : []),
     ],
   });
 
@@ -1514,7 +1527,7 @@ export const useSetBinaryPath = (name: string) =>
     ],
   });
 
-// ── Ticket trackers: Linear and Jira connections, and what a repo reads ──────
+// ── Ticket trackers: Linear, Jira and TickTick connections, and what a repo reads
 // Everything that talks to a tracker except Triage (which has its own cache
 // policy, further down): the OAuth connections, the org or site a repo is bound
 // to, and the issues.
@@ -1554,17 +1567,32 @@ export const useJiraSites = () =>
     staleTime: SETTING_STALE_TIME,
   });
 
+/** Whether the install's TickTick account is connected, and how. */
+export const useTickTickStatus = () =>
+  useUnwrappedQuery(queryKeys.ticktickStatus, () => commands.ticktickStatus(), {
+    staleTime: SETTING_STALE_TIME,
+  });
+
+/** The TickTick account's lists, for a repo's list picker. Empty when nothing
+ *  is connected; `enabled` keeps it from costing a request until a picker shows. */
+export const useTickTickLists = (enabled = true) =>
+  useUnwrappedQuery(queryKeys.ticktickLists, () => commands.ticktickLists(), {
+    staleTime: SETTING_STALE_TIME,
+    enabled,
+  });
+
 /**
- * Whether any tracker — a Linear workspace or a Jira site — is connected, or
- * `null` until that is known. An unknown is not a no: one connection answers
- * yes, but a no waits for both reads. The chrome's one reading of it (the rail's
- * connect prompt, Triage's disabled state).
+ * Whether any tracker — a Linear workspace, a Jira site or the TickTick
+ * account — is connected, or `null` until that is known. An unknown is not a
+ * no: one connection answers yes, but a no waits for every read. The chrome's
+ * one reading of it (the rail's connect prompt, Triage's disabled state).
  */
 export const useTrackerConnected = (): boolean | null => {
   const { data: orgs } = useLinearOrgs();
   const { data: sites } = useJiraSites();
-  if ((orgs?.length ?? 0) > 0 || (sites?.length ?? 0) > 0) return true;
-  return orgs === undefined || sites === undefined ? null : false;
+  const { data: ticktick } = useTickTickStatus();
+  if ((orgs?.length ?? 0) > 0 || (sites?.length ?? 0) > 0 || ticktick?.connected) return true;
+  return orgs === undefined || sites === undefined || ticktick === undefined ? null : false;
 };
 
 /**
@@ -1579,6 +1607,8 @@ export const useTrackerReadOnly = (repo: string) => {
   const provider = useTicketProvider(repo);
   const { data: linear } = useLinearStatus(repo);
   const { data: jira } = useJiraStatus(repo);
+  const { data: ticktick } = useTickTickStatus();
+  if (provider === "TickTick") return ticktick?.connected === true && ticktick.canWrite === false;
   const status = provider === "Jira" ? jira : linear;
   return status?.authenticated === true && status.canWrite === false;
 };
@@ -1599,7 +1629,8 @@ export const useTrackerFeatures = (repo: string): TrackerFeatures => {
 /**
  * A ticket's page in its tracker, built from what the repo is bound to rather
  * than fetched: Linear's `linear.app/<slug>/issue/<id>` (Linear routes that
- * without the title slug its own links carry), Jira's `<site>/browse/<key>`. A
+ * without the title slug its own links carry), Jira's `<site>/browse/<key>`,
+ * TickTick's web app off the id itself (it carries its list). A
  * builder rather than one url, because a list hands the same repo's builder to
  * every row; it answers `null` until the status read lands, or when nothing is
  * bound.
@@ -1611,7 +1642,12 @@ export const useTicketIssueUrl = (repo: string): ((id: string) => string | null)
   let base: string | null = null;
   if (provider === "Jira" && jira?.siteUrl) base = `${jira.siteUrl.replace(/\/+$/, "")}/browse`;
   if (provider === "Linear" && linear?.orgSlug) base = `https://linear.app/${linear.orgSlug}/issue`;
-  return useCallback((id: string) => (base ? `${base}/${encodeURIComponent(id)}` : null), [base]);
+  const ticktick = provider === "TickTick";
+  return useCallback(
+    (id: string) =>
+      ticktick ? tickTickTaskUrl(id) : base ? `${base}/${encodeURIComponent(id)}` : null,
+    [base, ticktick],
+  );
 };
 
 /** Every read a new tracker connection can move: which tracker and org or site
@@ -1623,6 +1659,8 @@ const TRACKER_READS: QueryKey[] = [
   queryKeys.linearOrgs,
   queryKeys.jiraStatusPrefix,
   queryKeys.jiraSites,
+  queryKeys.ticktickStatus,
+  queryKeys.ticktickLists,
   queryKeys.tasksPrefix,
   queryKeys.triageTicketsPrefix,
   queryKeys.triageSchedulePrefix,
@@ -1674,6 +1712,53 @@ export const useJiraConnect = () => {
   });
 };
 
+/** Seat a fresh TickTick status in the cache and refresh every tracker read —
+ *  what both ways of connecting do on success. */
+function onTickTickConnected(qc: QueryClient, status: TickTickStatus) {
+  qc.setQueryData(queryKeys.ticktickStatus, status);
+  for (const queryKey of TRACKER_READS) qc.invalidateQueries({ queryKey });
+  toast.success("TickTick connected.", { title: "Connected" });
+}
+
+/** Run the TickTick OAuth flow in the browser. */
+export const useTickTickConnect = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => unwrap(commands.ticktickConnect()),
+    onSuccess: (status) => onTickTickConnected(qc, status),
+  });
+};
+
+/** Connect TickTick with a personal API token, which the backend checks against
+ *  the API before keeping it in the keychain. */
+export const useTickTickConnectToken = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (token: string) => unwrap(commands.ticktickConnectToken(token)),
+    onSuccess: (status) => onTickTickConnected(qc, status),
+  });
+};
+
+/** Forget the TickTick account. Optimistic: the card reads disconnected at
+ *  once, and the repos that read it come off it on settle (the backend's
+ *  trigger unlinks them). */
+export const useTickTickDisconnect = () =>
+  useOptimisticMutation<void, null>({
+    mutationKey: ["ticktick-disconnect"],
+    mutationFn: () => unwrap(commands.ticktickDisconnect()),
+    optimistic: (qc) => {
+      const prev = qc.getQueryData<TickTickStatus>(queryKeys.ticktickStatus);
+      if (prev === undefined) return () => {};
+      qc.setQueryData<TickTickStatus>(queryKeys.ticktickStatus, {
+        ...prev,
+        connected: false,
+        via: null,
+      });
+      return () => qc.setQueryData(queryKeys.ticktickStatus, prev);
+    },
+    invalidate: () => TRACKER_READS,
+  });
+
 /** Move a repo's registry row onto `connection` at once, so the tracker picker
  *  and every mark reading `Repo.provider` move with the click. The label
  *  (`Repo.tracker`) reconciles on settle. Returns the rollback. */
@@ -1688,11 +1773,14 @@ function patchRepoConnection(qc: QueryClient, repo: string, connection: string |
   return () => qc.setQueryData(queryKeys.repos, prev);
 }
 
-/** Every connected ticket tracker account — Linear orgs and Jira sites — as the
- *  ids a repo is linked by. Empty until both reads have answered. */
+/** Every connected ticket tracker account — Linear orgs, Jira sites and the
+ *  TickTick account — as the ids a repo is linked by. Each joins the list as
+ *  its read answers. */
 export function useConnections(): Connection[] {
   const { data: orgs } = useLinearOrgs();
   const { data: sites } = useJiraSites();
+  const { data: ticktick } = useTickTickStatus();
+  const ticktickConnected = ticktick?.connected === true;
   return useMemo(
     () => [
       ...(orgs ?? []).map((o) => ({
@@ -1707,8 +1795,19 @@ export function useConnections(): Connection[] {
         name: s.siteName,
         label: connectionLabel("Jira", s.siteName),
       })),
+      // One account per install, with no name of its own to add.
+      ...(ticktickConnected
+        ? [
+            {
+              id: TICKTICK_CONNECTION,
+              provider: "TickTick" as const,
+              name: "TickTick",
+              label: "TickTick",
+            },
+          ]
+        : []),
     ],
-    [orgs, sites],
+    [orgs, sites, ticktickConnected],
   );
 }
 
@@ -1724,6 +1823,7 @@ export const useSetRepoConnection = () =>
       queryKeys.repos,
       queryKeys.linearStatusPrefix,
       queryKeys.jiraStatusPrefix,
+      queryKeys.ticktickStatus,
       queryKeys.tasksPrefix,
       queryKeys.triageTickets(args.repo),
       queryKeys.triageSchedule(args.repo),

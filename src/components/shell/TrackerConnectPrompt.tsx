@@ -2,12 +2,13 @@
  * The rail's way to a ticket tracker while none is connected.
  *
  * santree's work is a tracker's tickets: the Tickets list, the triage queue and
- * every ticket start read from a connected Linear workspace or Jira site, and
+ * every ticket start read from a connected Linear workspace, Jira site or
+ * TickTick account, and
  * without one each of them shows an empty state that reads like "nothing to do".
  * This says why instead, once, above everything it explains, and takes you to the
  * place each tracker is connected (Settings → Integrations).
  *
- * Nothing renders until both connection reads have answered, so a cold start
+ * Nothing renders until every connection read has answered, so a cold start
  * never flashes a warning at an install that is connected.
  */
 import { useNavigate } from "@tanstack/react-router";
@@ -18,6 +19,7 @@ import { TrackerLogo, WarningIcon } from "../icons";
 const TRACKERS = [
   { provider: "Linear", section: "linear" },
   { provider: "Jira", section: "jira" },
+  { provider: "TickTick", section: "ticktick" },
 ] as const;
 
 export function TrackerConnectPrompt() {
@@ -32,7 +34,8 @@ export function TrackerConnectPrompt() {
         No ticket tracker connected
       </p>
       <p className="pt-0.5 pb-2 text-[11px] leading-4 text-muted-4">
-        Tickets, triage and starting work all need a Linear workspace or a Jira site.
+        Tickets, triage and starting work all need a Linear workspace, a Jira site or a TickTick
+        account.
       </p>
       <div className="flex gap-1.5">
         {TRACKERS.map(({ provider, section }) => (

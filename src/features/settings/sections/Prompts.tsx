@@ -81,6 +81,7 @@ import {
   useTriageDetail,
 } from "../../../lib/queries";
 import { shortRepoName } from "../../../lib/repoName";
+import { ticketHandle } from "../../../lib/tracker";
 import { usePersistedState } from "../../../lib/usePersistedState";
 import { highlightJinja, highlightRendered, stripRenderMarks } from "../jinjaHighlight";
 import {
@@ -1120,7 +1121,7 @@ function PreviewPane({
               <option value="">Sample ticket</option>
               {tasks.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.id} — {t.title}
+                  {ticketHandle(t.id)} — {t.title}
                 </option>
               ))}
             </ChevronSelect>

@@ -45,6 +45,7 @@ import {
   WORK_ASK_BASE_KEY,
   WORK_QUEUE_KEY,
 } from "../../lib/queries";
+import { ticketHandle } from "../../lib/tracker";
 import { useAgentRuns } from "../../state/AgentRuns";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { toast } from "../../state/toast";
@@ -903,7 +904,7 @@ export function IssuesProvider({
     (id: string) => {
       startResolved(
         id,
-        `Starting ${id}`,
+        `Starting ${ticketHandle(id)}`,
         (t, repo) => {
           requestLaunch(repo, t.id);
           navigate({ to: "/trees", search: { project: repo, tree: t.id } });
@@ -921,12 +922,12 @@ export function IssuesProvider({
     (id: string) => {
       startResolved(
         id,
-        `Running ${id}`,
+        `Running ${ticketHandle(id)}`,
         (t, repo) => {
           // The launch host needs the project too: it is off-screen by
           // definition, so there is no view to read it from.
           requestLaunch(repo, t.id);
-          toast.success(`Running ${t.id} in the background…`);
+          toast.success(`Running ${ticketHandle(t.id)} in the background…`);
         },
         true,
       );

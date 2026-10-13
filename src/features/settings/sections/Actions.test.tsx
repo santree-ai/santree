@@ -105,6 +105,7 @@ vi.mock("../../../lib/queries", () => ({
 /** What the triage org's connection can do; `memberTeamsOnly` is an org
  *  connected through Linear's MCP server. */
 let features = {
+  triage: true,
   snoozeUnavailable: null as string | null,
   threadedComments: true,
   memberTeamsOnly: false,
@@ -130,7 +131,12 @@ describe("app-scope Triage settings", () => {
     linearOn = true;
     settingValues = {};
     teamRules = { rotation: true, assigned: true, member: false, picked: [], hidden: [] };
-    features = { snoozeUnavailable: null, threadedComments: true, memberTeamsOnly: false };
+    features = {
+      triage: true,
+      snoozeUnavailable: null,
+      threadedComments: true,
+      memberTeamsOnly: false,
+    };
     setRules.mockClear();
   });
 

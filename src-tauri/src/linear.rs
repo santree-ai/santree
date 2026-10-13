@@ -3348,12 +3348,14 @@ pub async fn connect(db: &Db) -> Result<Vec<LinearOrg>> {
         .map(|(k, v)| format!("{k}={}", oauth::urlencode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    oauth::open_browser(&format!("{AUTHORIZE_URL}?{query}"));
+    let authorize_url = format!("{AUTHORIZE_URL}?{query}");
 
     let expected_state = state.clone();
-    let code = tokio::task::spawn_blocking(move || oauth::wait_for_code(&expected_state, "Linear"))
-        .await
-        .context("oauth listener task")??;
+    let code = tokio::task::spawn_blocking(move || {
+        oauth::wait_for_code(&expected_state, "Linear", &authorize_url)
+    })
+    .await
+    .context("oauth listener task")??;
 
     let (access_token, refresh_token, expires_at, scopes) =
         exchange_code(&code, &redirect_uri, &verifier).await?;

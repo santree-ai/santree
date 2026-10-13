@@ -2847,6 +2847,7 @@ pub struct AgentSetting {
 pub enum TicketProvider {
     Linear,
     Jira,
+    TickTick,
 }
 
 /// Which trackers/services are connected.
@@ -2947,6 +2948,38 @@ pub struct JiraStatus {
     pub site_url: Option<String>,
     pub cloud_id: Option<String>,
     pub can_write: bool,
+}
+
+/// TickTick connection status. One TickTick account per install, so unlike
+/// Linear's and Jira's it is not per repo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TickTickStatus {
+    pub connected: bool,
+    /// How the account was connected (`"oauth"` or `"token"`); `None` when it
+    /// isn't connected.
+    pub via: Option<String>,
+    /// Whether this build can run the OAuth flow. The personal-token path works
+    /// either way.
+    pub oauth_available: bool,
+    /// Whether santree may change tickets (complete, comment). True for both ways
+    /// of connecting, which both grant read and write.
+    pub can_write: bool,
+}
+
+/// One TickTick list (its API's "project") a repo can read tickets from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TickTickList {
+    pub id: String,
+    pub name: String,
+    /// Hex color the list is drawn in, when it has one.
+    pub color: Option<String>,
+    pub closed: bool,
+    /// The list's folder id, when it sits in one.
+    pub group: Option<String>,
+    /// `read`, `write` or `comment`; `None` for a list you own.
+    pub permission: Option<String>,
 }
 
 /// User settings, persisted as a JSON blob in the `settings` table. Seeded from

@@ -32,6 +32,7 @@ import {
   useResolvedProviderSetting,
   useResolvedSetting,
 } from "../../lib/queries";
+import { ticketHandle } from "../../lib/tracker";
 import { sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed } from "../terminal/agentSeed";
 import type { AgentTabIdentity } from "../terminal/orchestrator";
@@ -211,8 +212,9 @@ export function InvestigatePane({
         title="Investigation ended"
         subtitle={
           <>
-            The investigation for <span className="font-mono text-fg-3">{ticketId}</span> is saved.
-            Resume the same conversation whenever you're ready.
+            The investigation for{" "}
+            <span className="font-mono text-fg-3">{ticketHandle(ticketId)}</span> is saved. Resume
+            the same conversation whenever you're ready.
           </>
         }
         onResume={resumeNow}

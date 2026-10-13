@@ -28,6 +28,7 @@ import {
   useWorkScopeRepo,
   WORK_AGENT_KEY,
 } from "../../lib/queries";
+import { ticketHandle } from "../../lib/tracker";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { useWorkRepoGate } from "../../state/WorkRepoGate";
 import { NO_PROJECT, useTrees } from "./model";
@@ -78,7 +79,7 @@ export function StartTaskButton({
   // with no feedback beyond the trigger button's tiny spinner. A failed create
   // drops the placeholder (the global mutation cache still surfaces the toast).
   const start = (t: { id: string; title: string; project: string }) => {
-    void askRepo(targets, `Starting ${t.id}`).then((repo) => {
+    void askRepo(targets, `Starting ${ticketHandle(t.id)}`).then((repo) => {
       if (!repo) return;
       const agent = (workAgent as AgentKind | null) ?? settings?.defaultAgent ?? "Claude";
       const project = t.project === NO_PROJECT ? null : t.project;
@@ -145,7 +146,7 @@ export function StartTaskButton({
                 }}
                 className="flex w-full cursor-pointer flex-col items-start gap-0.5 px-3 py-1.5 text-left hover:bg-hover"
               >
-                <span className="font-mono text-[10.5px] text-muted-2">{t.id}</span>
+                <span className="font-mono text-[10.5px] text-muted-2">{ticketHandle(t.id)}</span>
                 <MarkdownTitle className="block line-clamp-2 text-[12px] text-fg-3">
                   {t.title}
                 </MarkdownTitle>

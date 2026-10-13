@@ -1,6 +1,6 @@
 //! Provider-neutral ticket dispatch.
 //!
-//! [`TicketTracker`] is implemented by both Linear and Jira; the free functions
+//! [`TicketTracker`] is implemented by Linear, Jira and TickTick; the free functions
 //! resolve which provider a repo's connection belongs to and delegate.
 
 use anyhow::Result;
@@ -143,6 +143,56 @@ impl TicketTracker for JiraTracker {
     }
 }
 
+// ── TickTick ────────────────────────────────────────────────────────────────
+
+struct TickTickTracker;
+
+#[async_trait]
+impl TicketTracker for TickTickTracker {
+    async fn list_issues(&self, db: &Db, repo: &str) -> Result<Option<Vec<Task>>> {
+        crate::ticktick::list_issues(db, repo).await
+    }
+    async fn triage_tickets(&self, db: &Db, repo: &str) -> Result<Option<Vec<TriageTicket>>> {
+        crate::ticktick::triage_tickets(db, repo).await
+    }
+    async fn triage_detail(&self, db: &Db, repo: &str, id: &str) -> Result<Option<TriageDetail>> {
+        crate::ticktick::triage_detail(db, repo, id).await
+    }
+    async fn set_issue_state(
+        &self,
+        db: &Db,
+        repo: &str,
+        id: &str,
+        state: &str,
+    ) -> Result<Option<()>> {
+        crate::ticktick::set_issue_state(db, repo, id, state).await
+    }
+    async fn create_comment(
+        &self,
+        db: &Db,
+        repo: &str,
+        id: &str,
+        parent: Option<&str>,
+        body: &str,
+    ) -> Result<Option<()>> {
+        crate::ticktick::create_comment(db, repo, id, parent, body).await
+    }
+    async fn tickets_by_id(
+        &self,
+        db: &Db,
+        repo: &str,
+        ids: &[String],
+    ) -> Result<Option<Vec<TicketRef>>> {
+        crate::ticktick::tickets_by_id(db, repo, ids).await
+    }
+    async fn triage_schedule(&self, db: &Db, repo: &str) -> Result<Option<Vec<TriageSchedule>>> {
+        crate::ticktick::triage_schedule(db, repo).await
+    }
+    async fn move_to_started(&self, db: &Db, repo: &str, id: &str) -> Result<Option<()>> {
+        crate::ticktick::move_to_started(db, repo, id).await
+    }
+}
+
 // ── Dispatch ────────────────────────────────────────────────────────────────
 
 /// The provider's name as prompts and ticket details spell it.
@@ -150,6 +200,7 @@ pub fn name(provider: TicketProvider) -> &'static str {
     match provider {
         TicketProvider::Linear => "Linear",
         TicketProvider::Jira => "Jira",
+        TicketProvider::TickTick => "TickTick",
     }
 }
 
@@ -163,6 +214,7 @@ async fn repo_tracker(db: &Db, repo: &str) -> Result<Option<Box<dyn TicketTracke
     let tracker: Box<dyn TicketTracker> = match provider(db, repo).await? {
         None => return Ok(None),
         Some(TicketProvider::Jira) => Box::new(JiraTracker),
+        Some(TicketProvider::TickTick) => Box::new(TickTickTracker),
         // A Linear repo reads through however its org is connected: GraphQL, or
         // the MCP server (`docs/linear-mcp.md`).
         Some(TicketProvider::Linear) => match crate::linear::repo_connection(db, repo).await? {
@@ -239,4 +291,5 @@ pub fn invalidate_all_caches() {
     crate::linear::invalidate_all_caches();
     crate::linear_mcp::tracker::invalidate_all_caches();
     crate::jira::invalidate_all_caches();
+    crate::ticktick::invalidate_all_caches();
 }

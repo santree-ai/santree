@@ -1,5 +1,7 @@
 import { useId } from "react";
 
+import type { TicketProvider } from "../bindings";
+
 /** Inline SVG icons used across the chrome. Stroke uses `currentColor`. */
 
 interface IconProps {
@@ -640,6 +642,40 @@ export function JiraLogo({ size = 18, className }: IconProps) {
   );
 }
 
+/** The TickTick logomark — the ring open from twelve to three o'clock, and the
+ *  check that leaves through the gap — measured off the brand mark. In
+ *  `currentColor` like the Linear and Jira marks, so it tints the same way;
+ *  `branded` draws TickTick's own two colours instead (blue ring, yellow check),
+ *  which one tint can't. */
+export function TickTickLogo({
+  size = 18,
+  className,
+  branded = false,
+}: IconProps & { branded?: boolean }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.88}
+      className={className}
+      aria-hidden
+    >
+      <path
+        d="M12 1.44A10.56 10.56 0 1 0 22.56 12"
+        stroke={branded ? "var(--ticktick-brand)" : undefined}
+      />
+      <path
+        d="M7.6 10.08 11.69 13.89 21.04 3.8"
+        strokeLinejoin="round"
+        stroke={branded ? "var(--ticktick-check)" : undefined}
+      />
+    </svg>
+  );
+}
+
 /**
  * Daedalus's logomark — its app icon: the labyrinth path on the brand tile.
  * Unlike the Linear and Jira marks it carries its own fill, because the tile
@@ -702,19 +738,21 @@ export function TrackerLogo({
   size,
   className = "",
   branded = false,
-}: IconProps & { provider: "Linear" | "Jira"; branded?: boolean }) {
-  const tint = branded
-    ? provider === "Jira"
-      ? "text-[color:var(--jira-brand)]"
-      : "text-[color:var(--linear-brand)]"
-    : "";
+}: IconProps & { provider: TicketProvider; branded?: boolean }) {
+  const tint = branded ? TRACKER_TINT[provider] : "";
   const cls = `${tint} ${className}`.trim() || undefined;
-  return provider === "Jira" ? (
-    <JiraLogo size={size} className={cls} />
-  ) : (
-    <LinearLogo size={size} className={cls} />
-  );
+  if (provider === "Jira") return <JiraLogo size={size} className={cls} />;
+  if (provider === "TickTick")
+    return <TickTickLogo size={size} className={className || undefined} branded={branded} />;
+  return <LinearLogo size={size} className={cls} />;
 }
+
+/** Whole class names, so Tailwind's scanner sees each one. */
+const TRACKER_TINT: Record<TicketProvider, string> = {
+  Linear: "text-[color:var(--linear-brand)]",
+  Jira: "text-[color:var(--jira-brand)]",
+  TickTick: "text-[color:var(--ticktick-brand)]",
+};
 
 /**
  * santree's own logomark — the two stacked triangles from the app icon, filled

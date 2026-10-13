@@ -14,7 +14,7 @@ import type { ReactNode } from "react";
 
 import type { Priority, TriageDetail } from "../bindings";
 import { formatSnoozeLabel } from "../lib/relativeTime";
-import { trackerOf } from "../lib/tracker";
+import { ticketHandle, trackerOf } from "../lib/tracker";
 import { IssueMeta } from "./IssueMeta";
 import { RefreshIcon, TrackerLogo } from "./icons";
 import { MarkdownTitle } from "./Markdown";
@@ -62,7 +62,7 @@ export function IssueHeader({
   return (
     <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
       <div className="mb-2 flex items-center gap-2.5">
-        <span className="font-mono text-[11.5px] text-muted-2">{id}</span>
+        <span className="font-mono text-[11.5px] text-muted-2">{ticketHandle(id)}</span>
         {known && <PriorityPill priority={known.priority} />}
         <StatusPicker detail={detail} onSetState={onSetState} readOnly={linearReadOnly} />
         {known && (

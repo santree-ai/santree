@@ -40,13 +40,16 @@ import {
   type TriageTeamScope,
   usePrefetchOnHover,
   useSetSetting,
+  useTicketProvider,
   useTrackerConnected,
+  useTrackerFeatures,
   useTriageOrgRepo,
   useTriageQueue,
   useTriageSchedule,
   useTriageTeamScopes,
 } from "../../lib/queries";
 import { formatShiftRange, formatSnoozeLabel } from "../../lib/relativeTime";
+import { ticketHandle } from "../../lib/tracker";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { useApp } from "../../state/AppContext";
 import { Avatar } from "../Avatar";
@@ -104,7 +107,10 @@ export function TriageSection() {
   // workspace to ask, the *repo* is blanked — never the hook call, which has to
   // run on every render.
   const orgRepo = useTriageOrgRepo();
-  const repo = triageEnabled && trackerConnected !== false ? orgRepo : "";
+  const orgProvider = useTicketProvider(orgRepo);
+  // A tracker with no triage queue (TickTick) has nothing to ask for either.
+  const hasTriage = useTrackerFeatures(orgRepo).triage;
+  const repo = triageEnabled && trackerConnected !== false && hasTriage ? orgRepo : "";
   const queue = useTriageQueue(repo);
   const { active, snoozed, goodCitizen, teamScopes } = queue;
   const { setScope } = useTriageTeamScopes();
@@ -178,6 +184,24 @@ export function TriageSection() {
         >
           Needs a Linear or Jira connection
         </div>
+      </div>
+    );
+  }
+
+  // Connected, but to a tracker without triage: the same greyed section, naming
+  // why and where the triage project is picked.
+  if (orgRepo && !hasTriage) {
+    return (
+      <div className="flex flex-none flex-col pb-1 opacity-60">
+        <div className={SECTION_HEADER}>Triage</div>
+        <button
+          type="button"
+          onClick={openTeamSettings}
+          className="cursor-pointer py-(--density-compact) text-left text-[11px] text-muted-4 hover:text-fg-3"
+          style={{ paddingLeft: SECTION_GUTTER }}
+        >
+          {orgProvider} has no triage. Pick a Linear or Jira project for it
+        </button>
       </div>
     );
   }
@@ -660,7 +684,7 @@ function TicketRow({
             onClick={onSelect}
             // Warms the detail cache so the click renders instantly.
             onMouseEnter={onHover}
-            aria-label={`Open ${ticket.id}`}
+            aria-label={`Open ${ticketHandle(ticket.id)}`}
             title={ticket.title}
             className="absolute inset-0 cursor-pointer"
           />
@@ -668,7 +692,7 @@ function TicketRow({
             <span aria-hidden className="flex flex-none items-center text-muted-4">
               <RepoTrackerLogo repo={repo} size={CARD_GLYPH} />
             </span>
-            <span className="tree-tag font-mono tabular-nums">{ticket.id}</span>
+            <span className="tree-tag font-mono tabular-nums">{ticketHandle(ticket.id)}</span>
             {ticket.priority !== "None" && <PriorityBars priority={ticket.priority} />}
             <span className="ml-auto flex flex-none items-center">
               {snoozed && ticket.snoozedUntilMs != null ? (

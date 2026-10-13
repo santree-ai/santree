@@ -51,6 +51,7 @@ import {
   WORK_AGENT_KEY,
 } from "../../lib/queries";
 import { shortRepoName } from "../../lib/repoName";
+import { ticketHandle } from "../../lib/tracker";
 import { useLaunchGuard } from "../../lib/useLaunchGuard";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { accentActiveStyle, alpha } from "../../theme/colors";
@@ -387,7 +388,9 @@ function TicketRows({
             })
           }
         >
-          <span className="flex-none font-mono text-[10.5px] text-muted-3">{t.id}</span>
+          <span className="flex-none font-mono text-[10.5px] text-muted-3">
+            {ticketHandle(t.id)}
+          </span>
           <MarkdownTitle className="min-w-0 flex-1 truncate text-[12.5px] text-fg-3">
             {t.title}
           </MarkdownTitle>

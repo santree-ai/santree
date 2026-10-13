@@ -1166,7 +1166,8 @@ export const commands = {
 	 */
 	linearApiBudget: () => typedError<LinearApiBudget[], CmdError>(__TAURI_INVOKE("linear_api_budget")),
 	/**
-	 *  Link a repo to a ticket connection — `linear:<org slug>` or `jira:<cloud id>`,
+	 *  Link a repo to a ticket connection — `linear:<org slug>`, `jira:<cloud id>` or
+	 *  `ticktick:me`,
 	 *  the ids `Repo.connection` carries — or, with `None`, take it off its tracker.
 	 *  The id is parsed and must name a connection that exists.
 	 */
@@ -1195,6 +1196,25 @@ export const commands = {
 	jiraSites: () => typedError<JiraSite[], CmdError>(__TAURI_INVOKE("jira_sites")),
 	/**  Run the Jira OAuth flow; returns the updated site list. */
 	jiraConnect: () => typedError<JiraSite[], CmdError>(__TAURI_INVOKE("jira_connect")),
+	/**  Whether the TickTick account is connected, and how. */
+	ticktickStatus: () => typedError<TickTickStatus, CmdError>(__TAURI_INVOKE("ticktick_status")),
+	/**  Run the TickTick OAuth flow in the browser; returns the new status. */
+	ticktickConnect: () => typedError<TickTickStatus, CmdError>(__TAURI_INVOKE("ticktick_connect")),
+	/**
+	 *  Connect with a personal API token (TickTick Settings > Account > API Token).
+	 *  The token is checked against the API, then stored in the OS keychain.
+	 */
+	ticktickConnectToken: (token: string) => typedError<TickTickStatus, CmdError>(__TAURI_INVOKE("ticktick_connect_token", { token })),
+	/**
+	 *  Forget the TickTick account: its keychain entry and its row, which unlinks
+	 *  every repo that read from it.
+	 */
+	ticktickDisconnect: () => typedError<null, CmdError>(__TAURI_INVOKE("ticktick_disconnect")),
+	/**
+	 *  The account's task lists (and its Inbox, when readable), for the per-repo list
+	 *  picker. Empty when TickTick isn't connected.
+	 */
+	ticktickLists: () => typedError<TickTickList[], CmdError>(__TAURI_INVOKE("ticktick_lists")),
 	/**
 	 *  How santree reaches Daedalus right now, through the Daedalus agent on this
 	 *  machine. Every state is an `Ok` value — no agent, santree off and being
@@ -4410,8 +4430,44 @@ export type TerminalUsage = {
 	live: boolean,
 };
 
+/**  One TickTick list (its API's "project") a repo can read tickets from. */
+export type TickTickList = {
+	id: string,
+	name: string,
+	/**  Hex color the list is drawn in, when it has one. */
+	color: string | null,
+	closed: boolean,
+	/**  The list's folder id, when it sits in one. */
+	group: string | null,
+	/**  `read`, `write` or `comment`; `None` for a list you own. */
+	permission: string | null,
+};
+
+/**
+ *  TickTick connection status. One TickTick account per install, so unlike
+ *  Linear's and Jira's it is not per repo.
+ */
+export type TickTickStatus = {
+	connected: boolean,
+	/**
+	 *  How the account was connected (`"oauth"` or `"token"`); `None` when it
+	 *  isn't connected.
+	 */
+	via: string | null,
+	/**
+	 *  Whether this build can run the OAuth flow. The personal-token path works
+	 *  either way.
+	 */
+	oauthAvailable: boolean,
+	/**
+	 *  Whether santree may change tickets (complete, comment). True for both ways
+	 *  of connecting, which both grant read and write.
+	 */
+	canWrite: boolean,
+};
+
 /**  Which ticket provider a repo uses. */
-export type TicketProvider = "Linear" | "Jira";
+export type TicketProvider = "Linear" | "Jira" | "TickTick";
 
 /**
  *  The handful of tracker fields the Reviews sidebar needs to group PRs by Linear

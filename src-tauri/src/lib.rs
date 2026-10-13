@@ -61,6 +61,7 @@ mod stream;
 mod tabs;
 mod terminal;
 mod text_store;
+mod ticktick;
 mod tracker;
 mod update;
 mod usage;
@@ -259,6 +260,11 @@ fn specta_builder() -> AppBuilder {
             commands::jira_auth_status,
             commands::jira_sites,
             commands::jira_connect,
+            commands::ticktick_status,
+            commands::ticktick_connect,
+            commands::ticktick_connect_token,
+            commands::ticktick_disconnect,
+            commands::ticktick_lists,
             commands::daedalus_status,
             commands::daedalus_health,
             commands::daedalus_settings,

@@ -29,6 +29,7 @@ import {
   useWorktreesByRepo,
 } from "../lib/queries";
 import { shortRepoName } from "../lib/repoName";
+import { ticketHandle } from "../lib/tracker";
 import { useAppUi } from "../state/AppContext";
 import { RepoAvatar } from "./chrome/RepoAvatar";
 import {
@@ -73,6 +74,7 @@ const SETTINGS_SECTIONS: { key: string; label: string; keywords?: string }[] = [
   { key: "general", label: "General", keywords: "appearance theme accent" },
   { key: "linear", label: "Linear", keywords: "org token connect" },
   { key: "jira", label: "Jira", keywords: "atlassian site connect" },
+  { key: "ticktick", label: "TickTick", keywords: "tasks lists token connect" },
   { key: "github", label: "GitHub", keywords: "gh auth" },
   { key: "daedalus", label: "Daedalus", keywords: "home server remote agent machines" },
   { key: "agent-claude", label: "Claude Code", keywords: "agent model" },
@@ -178,7 +180,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
         tickets.push({
           key: `ticket-${task.id}`,
           group: "Tickets",
-          code: task.id,
+          code: ticketHandle(task.id),
           label: task.title,
           meta: task.project,
           keywords: `${task.status} ${repo} ${task.assignee ?? ""}`,

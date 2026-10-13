@@ -17,6 +17,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect } from "react";
 
 import { useTicketProvider, useTriageDetail } from "../lib/queries";
+import { ticketHandle } from "../lib/tracker";
 import { priorityColor } from "../theme/colors";
 import { DiscussionPane, DiscussionSkeleton } from "./IssueDiscussion";
 import { IssueMeta } from "./IssueMeta";
@@ -68,7 +69,7 @@ export function IssuePane({
           title="No linked ticket"
           subtitle={
             ticketId
-              ? `${provider} has no issue ${ticketId}.`
+              ? `${provider} has no issue ${ticketHandle(ticketId)}.`
               : "This PR's title has no ticket id (e.g. [AK-123])."
           }
         />
@@ -80,7 +81,7 @@ export function IssuePane({
     <div className="flex min-h-0 flex-1 flex-col bg-app">
       <div className="flex-none border-b border-hairline px-3 pt-3 pb-3">
         <div className="mb-1.5 flex items-center gap-2">
-          <span className="font-mono text-[11px] text-muted-2">{ticketId}</span>
+          <span className="font-mono text-[11px] text-muted-2">{ticketHandle(ticketId)}</span>
           {/* Both signals, because they answer different questions and the union
               is cheap: the dot's colour is the ticket's *priority* (how much it
               matters) and the label beside it is its workflow *state* (how far it

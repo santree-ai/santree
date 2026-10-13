@@ -9,6 +9,7 @@ import {
   useLinearOrgs,
   useResolvedBoolSetting,
   useSetSetting,
+  useTickTickStatus,
   WORK_DEFAULT_REPO_KEY,
   WORK_MOVE_IN_PROGRESS_KEY,
 } from "../../../lib/queries";
@@ -27,10 +28,13 @@ function TrackingCard({ forRepo }: { forRepo?: string }) {
   const { mutate: setSetting } = useSetSetting();
   // Scoped to every connection rather than a repo: this row also renders
   // app-wide, where there is no repo to resolve a tracker from. Read-only only
-  // when nothing connected, in either tracker, can be written to.
+  // when nothing connected, in any tracker, can be written to.
   const { data: orgs = [] } = useLinearOrgs();
   const { data: sites = [] } = useJiraSites();
-  const writable = [...orgs, ...sites].map((c) => c.canWrite);
+  const { data: ticktick } = useTickTickStatus();
+  const writable = [...orgs, ...sites, ...(ticktick?.connected ? [ticktick] : [])].map(
+    (c) => c.canWrite,
+  );
   const readOnly = writable.length > 0 && writable.every((w) => !w);
   return (
     <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
@@ -39,7 +43,7 @@ function TrackingCard({ forRepo }: { forRepo?: string }) {
         hint={
           readOnly
             ? TRACKER_READ_ONLY_HINT
-            : "Move the ticket to its “in progress” status so Linear or Jira reflects what you're actually working on. Needs write access to the tracker."
+            : "Move the ticket to its “in progress” status so Linear or Jira reflects what you're actually working on. Needs write access to the tracker. TickTick tasks have no such status and stay as they are."
         }
         on={value && !readOnly}
         disabled={readOnly}

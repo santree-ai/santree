@@ -20,6 +20,7 @@ import {
   useTriageDetail,
   useTriageSetState,
 } from "../lib/queries";
+import { ticketHandle } from "../lib/tracker";
 import { DiscussionPane, DiscussionSkeleton } from "./IssueDiscussion";
 import { IssueHeader, type IssueSummary } from "./IssueHeader";
 import { EmptyState } from "./primitives";
@@ -53,7 +54,10 @@ export function IssuePage({
   if (data === null) {
     return (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-app">
-        <EmptyState title="No linked ticket" subtitle={`${provider} has no issue ${ticketId}.`} />
+        <EmptyState
+          title="No linked ticket"
+          subtitle={`${provider} has no issue ${ticketHandle(ticketId)}.`}
+        />
       </div>
     );
   }

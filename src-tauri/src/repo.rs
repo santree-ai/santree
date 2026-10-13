@@ -17,6 +17,7 @@ use crate::db::Db;
 use crate::git::{self, Checkout};
 use crate::jira;
 use crate::linear;
+use crate::ticktick;
 use crate::tracker;
 
 /// Every registered repository, in insertion order. The displayed tracker
@@ -41,6 +42,7 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
     // connections themselves rather than a copy of how they are resolved.
     let orgs = linear::orgs_by_name(db).await?;
     let sites = jira::sites_by_name(db).await?;
+    let ticktick = ticktick::accounts_by_name(db).await?;
 
     Ok(rows
         .into_iter()
@@ -50,13 +52,16 @@ pub async fn list(db: &Db) -> Result<Vec<Repo>> {
                 let known = match c.provider {
                     TicketProvider::Linear => &orgs,
                     TicketProvider::Jira => &sites,
+                    TicketProvider::TickTick => &ticktick,
                 };
                 let display = &known.iter().find(|(key, _)| *key == c.key)?.1;
-                Some((
-                    c.provider,
-                    c.id(),
-                    format!("{} · {display}", tracker::name(c.provider)),
-                ))
+                // TickTick is one account per install: there is no name to add.
+                let label = if display.is_empty() {
+                    tracker::name(c.provider).to_string()
+                } else {
+                    format!("{} · {display}", tracker::name(c.provider))
+                };
+                Some((c.provider, c.id(), label))
             });
             let (provider, connection, label) = match named {
                 Some((p, id, label)) => (Some(p), Some(id), Some(label)),

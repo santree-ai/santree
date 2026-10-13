@@ -44,6 +44,7 @@ import {
 } from "../../components/WorkSignals";
 import { useTicketIssueUrl, useTicketProvider } from "../../lib/queries";
 import { shortRepoName } from "../../lib/repoName";
+import { ticketHandle } from "../../lib/tracker";
 import { statusLabel } from "../../theme/colors";
 import { isStartable, type TicketRow as Row } from "./useTickets";
 
@@ -235,8 +236,8 @@ export const TicketRow = memo(function TicketRow({
           onClick={(e) =>
             onToggleQueue && (e.metaKey || e.ctrlKey) ? onToggleQueue(row) : onOpen(row)
           }
-          aria-label={`Open ${task.id}: ${task.title}`}
-          title={`${task.id} · ${statusLabel[task.status]}${onToggleQueue ? "\n⌘-click to queue" : ""}`}
+          aria-label={`Open ${ticketHandle(task.id)}: ${task.title}`}
+          title={`${ticketHandle(task.id)} · ${statusLabel[task.status]}${onToggleQueue ? "\n⌘-click to queue" : ""}`}
           className="absolute inset-0 cursor-pointer rounded-md"
         />
         {/* The queue mark, in the gutter the indent leaves before the key — the
@@ -251,8 +252,8 @@ export const TicketRow = memo(function TicketRow({
             aria-checked={queued}
             aria-label={
               queued
-                ? `Remove ${task.id} from the launch queue`
-                : `Add ${task.id} to the launch queue`
+                ? `Remove ${ticketHandle(task.id)} from the launch queue`
+                : `Add ${ticketHandle(task.id)} to the launch queue`
             }
             onClick={() => onToggleQueue(row)}
             className={`absolute top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 cursor-pointer items-center justify-center rounded-[3px] border transition-[opacity,background-color,border-color] focus-visible:opacity-100 group-hover:opacity-100 ${
@@ -268,10 +269,11 @@ export const TicketRow = memo(function TicketRow({
         <span className="flex w-4 flex-none justify-center">
           <PriorityBars priority={task.priority} showNone />
         </span>
-        {/* Wide enough for an eight-character key (MSG-5488): the column used to
-          be 52px, which is where those truncated to "MSG-54…". */}
-        <span className="w-14 flex-none truncate font-mono text-[11px] text-muted-4">
-          {task.id}
+        {/* Wide enough for a nine-character handle (TickTick's tt-05fcd4, or a
+          key like MSG-54881): the column used to be 52px, which is where
+          eight-character keys truncated to "MSG-54…". */}
+        <span className="w-[60px] flex-none truncate font-mono text-[11px] text-muted-4">
+          {ticketHandle(task.id)}
         </span>
         {showSource && row.provider && (
           <span
@@ -287,7 +289,7 @@ export const TicketRow = memo(function TicketRow({
         </MarkdownTitle>
         {row.blockedBy && row.worktree === null && (
           <Pill color="var(--color-muted-3)" className={TAG_CLASS}>
-            Blocked · {row.blockedBy}
+            Blocked · {ticketHandle(row.blockedBy)}
           </Pill>
         )}
         <PrChips prs={row.prs} interactive={false} />

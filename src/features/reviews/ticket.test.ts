@@ -19,6 +19,12 @@ describe("ticketIdFor", () => {
     ["Login throttling", "santree/ak-123-login-throttling", "AK-123"],
     ["Login throttling", "feat/jd/ak-7-fix-it", "AK-7"],
     ["Login throttling", "JD/AK-7-Fix-It", "AK-7"],
+    // santree's TickTick tag: its branch carries only the short handle.
+    [
+      "[6226ff9877acee87727f6bca.6247ee29630c800f064fd145] update",
+      "santree/tt-4fd145-update",
+      "6226ff9877acee87727f6bca.6247ee29630c800f064fd145",
+    ],
   ];
   it.each(found)("reads %j / %j as %s", (title, headRef, expected) => {
     expect(ticketIdFor({ title, headRef })).toBe(expected);
@@ -37,6 +43,7 @@ describe("ticketIdFor", () => {
     ["Update react", "renovate/react-19.x"],
     // Prose must not false-match, in the title or the branch.
     ["Fix the service-ticket bug", "feature/no-id"],
+    ["Ship [v1.2] notes", "feature/no-id"],
     ["Plain title", "you/pr88"],
     ["Plain title", "main"],
     ["Plain title", ""],

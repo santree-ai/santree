@@ -31,9 +31,9 @@ use santree_core::{
         RepoLocation, ResourceUsage, ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent,
         ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer,
         ScriptInfo, SessionDetail, SessionState, SessionSubagent, SessionUsageLive, Settings,
-        TabKind, TabLaunch, TabPr, Task, TicketRef, TriageDetail, TriageSchedule, TriageSession,
-        TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreeLaunch, WorktreePr,
-        WorktreeSession, WorktreeTab,
+        TabKind, TabLaunch, TabPr, Task, TickTickList, TickTickStatus, TicketRef, TriageDetail,
+        TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree,
+        WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
     },
 };
 
@@ -69,6 +69,7 @@ use crate::session;
 use crate::sessions::Terminals;
 use crate::settings;
 use crate::tabs::{self, validate_term_key};
+use crate::ticktick;
 use crate::tracker;
 use crate::usage;
 use crate::worktree;
@@ -2413,10 +2414,16 @@ pub async fn triage_snooze(
     until_ms: Option<f64>,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    // Jira has no snooze of its own; without this the call would fall through to
+    // Only Linear has snooze; without this the call would fall through to
     // whichever Linear org the repo would otherwise resolve to.
-    if tracker::provider(&db, &repo).await? == Some(santree_core::domain::TicketProvider::Jira) {
-        return Err("Jira tickets can't be snoozed from santree".into());
+    if let Some(provider) = tracker::provider(&db, &repo).await? {
+        if provider != santree_core::domain::TicketProvider::Linear {
+            return Err(format!(
+                "{} tickets can't be snoozed from santree",
+                tracker::name(provider)
+            )
+            .into());
+        }
     }
     linear::snooze_issue(&db, &repo, &ticket_id, until_ms.map(|ms| ms as i64))
         .await?
@@ -3029,7 +3036,8 @@ pub async fn linear_orgs(db: State<'_, Db>) -> CmdResult<Vec<LinearOrg>> {
     Ok(linear::list_orgs(&db).await?)
 }
 
-/// Link a repo to a ticket connection — `linear:<org slug>` or `jira:<cloud id>`,
+/// Link a repo to a ticket connection — `linear:<org slug>`, `jira:<cloud id>` or
+/// `ticktick:me`,
 /// the ids `Repo.connection` carries — or, with `None`, take it off its tracker.
 /// The id is parsed and must name a connection that exists.
 #[tauri::command]
@@ -3184,6 +3192,46 @@ pub async fn jira_sites(db: State<'_, Db>) -> CmdResult<Vec<JiraSite>> {
 #[specta::specta]
 pub async fn jira_connect(db: State<'_, Db>) -> CmdResult<Vec<JiraSite>> {
     Ok(jira::connect(&db).await?)
+}
+
+// ── TickTick integration ────────────────────────────────────────────────────
+
+/// Whether the TickTick account is connected, and how.
+#[tauri::command]
+#[specta::specta]
+pub async fn ticktick_status(db: State<'_, Db>) -> CmdResult<TickTickStatus> {
+    Ok(ticktick::auth_status(&db).await?)
+}
+
+/// Run the TickTick OAuth flow in the browser; returns the new status.
+#[tauri::command]
+#[specta::specta]
+pub async fn ticktick_connect(db: State<'_, Db>) -> CmdResult<TickTickStatus> {
+    Ok(ticktick::connect(&db).await?)
+}
+
+/// Connect with a personal API token (TickTick Settings > Account > API Token).
+/// The token is checked against the API, then stored in the OS keychain.
+#[tauri::command]
+#[specta::specta]
+pub async fn ticktick_connect_token(token: String, db: State<'_, Db>) -> CmdResult<TickTickStatus> {
+    Ok(ticktick::connect_token(&db, &token).await?)
+}
+
+/// Forget the TickTick account: its keychain entry and its row, which unlinks
+/// every repo that read from it.
+#[tauri::command]
+#[specta::specta]
+pub async fn ticktick_disconnect(db: State<'_, Db>) -> CmdResult<()> {
+    Ok(ticktick::disconnect(&db).await?)
+}
+
+/// The account's task lists (and its Inbox, when readable), for the per-repo list
+/// picker. Empty when TickTick isn't connected.
+#[tauri::command]
+#[specta::specta]
+pub async fn ticktick_lists(db: State<'_, Db>) -> CmdResult<Vec<TickTickList>> {
+    Ok(ticktick::lists(&db).await?)
 }
 
 // ── Updates ──────────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import { createPortal } from "react-dom";
 import { Avatar } from "../../components/Avatar";
 import { MarkdownTitle } from "../../components/Markdown";
 import { Pill } from "../../components/primitives";
+import { ticketHandle } from "../../lib/tracker";
 
 export interface BlockerRowProps {
   id: string;
@@ -83,11 +84,11 @@ export const BlockerRow = memo(function BlockerRow({
         style={grayed ? { borderStyle: "dashed" } : undefined}
       >
         <span className="h-2 w-2 flex-none rounded-full" style={{ background: color }} />
-        <span className="flex-none font-mono text-[10.5px] text-muted-2">{id}</span>
+        <span className="flex-none font-mono text-[10.5px] text-muted-2">{ticketHandle(id)}</span>
         <MarkdownTitle
           className={`min-w-0 flex-1 truncate text-[11.5px] ${grayed ? "text-muted-3" : "text-fg-3"}`}
         >
-          {title || id}
+          {title || ticketHandle(id)}
         </MarkdownTitle>
         {assignee && <Avatar name={assignee} src={assigneeAvatar} size={16} />}
         {foreignProject && (
@@ -113,7 +114,7 @@ export const BlockerRow = memo(function BlockerRow({
             className="z-[100] w-72 rounded-xl border border-line-2 bg-popover p-3 shadow-xl"
           >
             <div className="mb-2 flex items-center gap-2">
-              <span className="font-mono text-[10.5px] text-muted-2">{id}</span>
+              <span className="font-mono text-[10.5px] text-muted-2">{ticketHandle(id)}</span>
               <Pill color={color} className="px-1.5 py-px text-[10px] font-medium">
                 {state}
               </Pill>
@@ -121,7 +122,7 @@ export const BlockerRow = memo(function BlockerRow({
             </div>
 
             <MarkdownTitle className="block text-[12.5px] leading-[1.35] font-medium text-fg-bright">
-              {title || id}
+              {title || ticketHandle(id)}
             </MarkdownTitle>
 
             <div className="mt-3 flex items-center gap-2 border-t border-hairline pt-2.5">

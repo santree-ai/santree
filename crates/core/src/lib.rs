@@ -11,5 +11,6 @@ pub mod jira;
 pub mod layout;
 pub mod linear;
 pub mod review_tools;
+pub mod ticktick;
 
 pub use domain::*;

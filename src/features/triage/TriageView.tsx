@@ -50,6 +50,7 @@ import {
   useTriageQueue,
   useTriageRepo,
 } from "../../lib/queries";
+import { ticketHandle } from "../../lib/tracker";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { agentProvider } from "../terminal/agentProvider";
@@ -155,7 +156,7 @@ export function TriageView() {
           // triaged since. Saying which ticket beats a generic "pick one" beside
           // a sidebar with nothing lit.
           <EmptyState
-            title={`${ticketId} is no longer in triage`}
+            title={`${ticketHandle(ticketId)} is no longer in triage`}
             subtitle="The Triage section in the sidebar lists what is waiting."
           />
         ) : ordered.length === 0 ? (

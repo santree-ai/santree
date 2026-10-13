@@ -9,6 +9,7 @@ import {
   useRepoBranches,
   useTasks,
 } from "../../lib/queries";
+import { ticketHandle } from "../../lib/tracker";
 import { toast } from "../../state/toast";
 import { invalidBranchReason } from "./createWorktree";
 import { useTrees } from "./model";
@@ -224,7 +225,9 @@ function TicketPicker({
   const labelId = useId();
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
-  const matches = tasks.filter((task) => `${task.id} ${task.title}`.toLowerCase().includes(needle));
+  const matches = tasks.filter((task) =>
+    `${task.id} ${ticketHandle(task.id)} ${task.title}`.toLowerCase().includes(needle),
+  );
   const selected = tasks.find((task) => task.id === value);
   return (
     <div className="min-w-0">
@@ -298,7 +301,7 @@ function TicketPicker({
                     onClick={() => pick(task.id)}
                   >
                     <span className="min-w-0">
-                      <span className="block font-mono text-xs">{task.id}</span>
+                      <span className="block font-mono text-xs">{ticketHandle(task.id)}</span>
                       <span className="block truncate text-xs text-muted-2">{task.title}</span>
                     </span>
                   </button>

@@ -635,7 +635,7 @@ pub async fn create(
     let target_branch = plan
         .named()
         .map(str::to_string)
-        .unwrap_or_else(|| format!("santree/{}-{}", issue_id.to_lowercase(), slugify(title)));
+        .unwrap_or_else(|| derived_branch(issue_id, title));
     let mut lock_keys = [
         format!("issue:{issue_id}"),
         format!("branch:{target_branch}"),
@@ -683,6 +683,15 @@ pub async fn create(
         ensure!(
             !matches!(plan, BranchPlan::Split(_)),
             "Another worktree already owns this split branch"
+        );
+        // A TickTick branch carries only a 6-character handle of the task id, so
+        // two tasks can derive the same branch; adopting it would open one task's
+        // worktree for the other.
+        ensure!(
+            !(matches!(plan, BranchPlan::Derived)
+                && existing_issue != issue_id
+                && santree_core::ticktick::handle(issue_id).is_some()),
+            "branch {target_branch} already belongs to the worktree {existing_issue}; rename this task or start it from the branch picker"
         );
         return get(db, root, &existing_issue)
             .await?
@@ -2241,7 +2250,23 @@ pub(crate) async fn ticket_id(db: &Db, repo: &str, id: &str) -> Result<Option<St
         .filter(|id| !id.is_empty()))
 }
 
+/// `santree/<ticket>-<slug(title)>`. A TickTick id is `<list>.<task>`, two 24-character
+/// hashes: its branch carries the short handle (`tt-1a2b3c`) instead, the way a Linear
+/// branch carries `abc-12`. The worktree's id and directory stay the full id.
+fn derived_branch(issue_id: &str, title: &str) -> String {
+    let ticket =
+        santree_core::ticktick::handle(issue_id).unwrap_or_else(|| issue_id.to_lowercase());
+    format!("santree/{ticket}-{}", slugify(title))
+}
+
 fn legacy_ticket_id(id: &str) -> Option<String> {
+    // Only a real TickTick task id (24 hex): `release.v2`, a branch-named tree,
+    // is shaped like `<list>.<task>` too and must not read as a ticket.
+    if santree_core::ticktick::split_id(id)
+        .is_some_and(|(_, task)| task.len() == 24 && task.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Some(id.to_string());
+    }
     let (team, number) = id.split_once('-')?;
     (team.starts_with(|c: char| c.is_ascii_alphabetic())
         && team.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')

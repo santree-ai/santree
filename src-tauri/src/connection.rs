@@ -1,6 +1,6 @@
-//! A repo's ticket connection: the one Linear org or Jira site its tickets come
-//! from, stored as a provider-qualified id (`linear:<slug>`, `jira:<cloud_id>`) in
-//! `repos.connection`.
+//! A repo's ticket connection: the one Linear org, Jira site or TickTick account
+//! its tickets come from, stored as a provider-qualified id (`linear:<slug>`,
+//! `jira:<cloud_id>`, `ticktick:me`) in `repos.connection`.
 //!
 //! The id, not the display name, is the identity: two Linear workspaces can share
 //! a name, and a Linear team key can equal a Jira project key. Everything that
@@ -20,12 +20,17 @@ use crate::db::Db;
 
 /// Every connection that exists, as ids. A new provider adds its table here.
 const ALL: &str = "SELECT 'linear:' || slug AS id FROM linear_orgs
-                   UNION ALL SELECT 'jira:' || cloud_id FROM jira_sites";
+                   UNION ALL SELECT 'jira:' || cloud_id FROM jira_sites
+                   UNION ALL SELECT 'ticktick:' || id FROM ticktick_accounts";
+
+/// The one TickTick account an install can have (`ticktick_accounts.id`).
+pub const TICKTICK_KEY: &str = "me";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionRef {
     pub provider: TicketProvider,
-    /// The provider's own key: a Linear org slug, a Jira cloud id.
+    /// The provider's own key: a Linear org slug, a Jira cloud id, TickTick's
+    /// `me` (one account per install).
     pub key: String,
 }
 
@@ -44,6 +49,13 @@ impl ConnectionRef {
         }
     }
 
+    pub fn ticktick() -> Self {
+        Self {
+            provider: TicketProvider::TickTick,
+            key: TICKTICK_KEY.into(),
+        }
+    }
+
     pub fn parse(id: &str) -> Option<Self> {
         let (prefix, key) = id.split_once(':')?;
         if key.is_empty() {
@@ -52,6 +64,9 @@ impl ConnectionRef {
         match prefix {
             "linear" => Some(Self::linear(key)),
             "jira" => Some(Self::jira(key)),
+            // The only key a TickTick connection has; anything else names an
+            // account that cannot exist.
+            "ticktick" if key == TICKTICK_KEY => Some(Self::ticktick()),
             _ => None,
         }
     }
@@ -60,6 +75,7 @@ impl ConnectionRef {
         let prefix = match self.provider {
             TicketProvider::Linear => "linear",
             TicketProvider::Jira => "jira",
+            TicketProvider::TickTick => "ticktick",
         };
         format!("{prefix}:{}", self.key)
     }
@@ -182,6 +198,15 @@ mod tests {
         .unwrap();
     }
 
+    async fn add_ticktick(db: &Db) {
+        sqlx::query(
+            "INSERT INTO ticktick_accounts (id, via, connected_at) VALUES ('me', 'token', 0)",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
     async fn stored(db: &Db, repo: &str) -> Option<String> {
         sqlx::query_scalar("SELECT connection FROM repos WHERE name = ?")
             .bind(repo)
@@ -192,10 +217,14 @@ mod tests {
 
     #[test]
     fn an_id_round_trips_and_refuses_what_it_cannot_read() {
-        for c in [ConnectionRef::linear("acme"), ConnectionRef::jira("c-1")] {
+        for c in [
+            ConnectionRef::linear("acme"),
+            ConnectionRef::jira("c-1"),
+            ConnectionRef::ticktick(),
+        ] {
             assert_eq!(ConnectionRef::parse(&c.id()), Some(c));
         }
-        for bad in ["", "linear", "linear:", "ticktick:x", ":x"] {
+        for bad in ["", "linear", "linear:", "ticktick:x", "ticktick:", ":x"] {
             assert_eq!(ConnectionRef::parse(bad), None, "{bad}");
         }
     }
@@ -220,8 +249,32 @@ mod tests {
             .await
             .unwrap();
         add_org(&db, "beta").await;
+        add_ticktick(&db).await;
         assert_eq!(stored(&db, "picked").await.as_deref(), Some("jira:site-1"));
         assert_eq!(stored(&db, "later").await, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TickTick counts toward "the first connection": it adopts when it is the
+    /// only one, and unlinks its repos when it goes.
+    #[tokio::test]
+    async fn a_lone_ticktick_account_adopts_waiting_repos_and_unlinks_on_delete() {
+        let (dir, db) = test_db("ticktick").await;
+        add_repo(&db, "app").await;
+        add_ticktick(&db).await;
+        assert_eq!(stored(&db, "app").await.as_deref(), Some("ticktick:me"));
+
+        sqlx::query("DELETE FROM ticktick_accounts")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(stored(&db, "app").await, None);
+
+        add_org(&db, "acme").await;
+        assert_eq!(stored(&db, "app").await.as_deref(), Some("linear:acme"));
+        add_ticktick(&db).await;
+        assert_eq!(stored(&db, "app").await.as_deref(), Some("linear:acme"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -267,7 +320,14 @@ mod tests {
         link(&db, "app", Some("linear:acme")).await.unwrap();
         assert_eq!(stored(&db, "app").await.as_deref(), Some("linear:acme"));
 
-        for bad in ["", "acme", "ticktick:x", "linear:ghost", "jira:"] {
+        for bad in [
+            "",
+            "acme",
+            "ticktick:x",
+            "ticktick:me",
+            "linear:ghost",
+            "jira:",
+        ] {
             assert!(link(&db, "app", Some(bad)).await.is_err(), "{bad}");
         }
         assert_eq!(stored(&db, "app").await.as_deref(), Some("linear:acme"));

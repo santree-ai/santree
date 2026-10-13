@@ -774,7 +774,7 @@ fn no_migration_stores_a_secret_in_plaintext() {
     // The only names that may look like a credential today, each because it
     // isn't one. Anything else is a new violation, and this list is where the
     // argument for it has to be made.
-    const ALLOWED: [(&str, &str); 3] = [
+    const ALLOWED: [(&str, &str); 4] = [
         // Linear's OAuth pair, from the very first schema. Migration 0014 moves
         // both into the OS keychain and DROPs the columns; the CREATE survives
         // only because migrations cannot be rewritten. Asserted below, not
@@ -783,6 +783,10 @@ fn no_migration_stores_a_secret_in_plaintext() {
         ("0001_init.sql", "refresh_token"),
         // A count of LLM context tokens for the usage bar. Not a credential.
         ("0011_session_usage_live.sql", "input_tokens"),
+        // The string literal 'token' in a CHECK: it names how a TickTick account
+        // was connected (a personal API token pasted in, versus OAuth). The
+        // credential itself is in the OS keychain; the row stores no secret.
+        ("0039_ticktick.sql", "token"),
     ];
 
     let dir = repo_root().join("src-tauri/migrations");

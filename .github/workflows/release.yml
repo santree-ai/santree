@@ -212,6 +212,9 @@ jobs:
           APPLE_API_KEY_PATH: ${{ runner.temp }}/asc-api-key.p8
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # TickTick's OAuth client secret, compiled in by `option_env!` (ticktick.rs)
+          # so it ships in the app without living in the repo.
+          TICKTICK_CLIENT_SECRET: ${{ secrets.TICKTICK_CLIENT_SECRET }}
           # GitHub sets CI=true, which makes the bundler pass `--skip-jenkins` to
           # bundle_dmg.sh — dropping the Finder AppleScript that paints the
           # background and positions the icons, so the DMG ships with default

@@ -1,5 +1,5 @@
-/** A repo's tracker mark — Linear's or Jira's, whichever the repo's tickets come
- *  from. For rows that know their repo but not its provider. */
+/** A repo's tracker mark — Linear's, Jira's or TickTick's, whichever the repo's
+ *  tickets come from. For rows that know their repo but not its provider. */
 import { useTicketProvider } from "../lib/queries";
 import { TrackerLogo } from "./icons";
 

@@ -337,6 +337,9 @@ export function buildDemoCommands(real: Commands): Partial<Commands> {
     jiraSites: async () => ok([]),
     jiraAuthStatus: async () =>
       ok({ authenticated: false, siteName: null, siteUrl: null, cloudId: null, canWrite: false }),
+    ticktickStatus: async () =>
+      ok({ connected: false, via: null, oauthAvailable: false, canWrite: false }),
+    ticktickLists: async () => ok([]),
     linearAuthStatus: async () =>
       ok({
         authenticated: true,

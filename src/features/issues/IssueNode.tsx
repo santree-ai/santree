@@ -13,6 +13,7 @@ import { MarkdownTitle } from "../../components/Markdown";
 import { PrChips } from "../../components/PrChip";
 import { Badge } from "../../components/primitives";
 import { CycleTag, EstimateTag, IssueDueDate, StatusGlyph } from "../../components/WorkSignals";
+import { ticketHandle } from "../../lib/tracker";
 import { accentVar as accent, alpha } from "../../theme/colors";
 import { useIssueHover, useIssueNodeData } from "./model";
 
@@ -165,7 +166,7 @@ export const IssueNode = memo(
 
         <div className="mb-1.5 flex items-center gap-[7px]">
           <StatusGlyph status={data.status} size={12} />
-          <span className="font-mono text-[11px] text-muted-2">{id}</span>
+          <span className="font-mono text-[11px] text-muted-2">{ticketHandle(id)}</span>
           <div className="ml-auto flex items-center gap-1">
             {working && <Badge color="var(--color-status-amber)">WIP</Badge>}
             {data.selected && !working && <Badge color={accent}>Queued</Badge>}
