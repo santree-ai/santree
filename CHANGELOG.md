@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.4 — 2026-10-13
+
+- TickTick is now a ticket tracker, next to Linear and Jira. Connect it in Settings, TickTick, with "Sign in with TickTick" or by pasting a personal API token from TickTick's own settings. A project linked to TickTick picks which of your lists it reads, or reads them all.
+- TickTick tasks show up in Tickets with a short handle like tt-3f9a2c, which also names the branch a task's worktree gets. A task's subtasks block it in the dependency graph until they are done.
+- A TickTick ticket can be marked Todo, Done or Won't do and takes comments. TickTick has no triage, so Triage keeps reading a Linear or Jira project.
+- Signing in to Linear, Jira or TickTick now opens the browser only once santree is ready to receive the reply.
+
 ## 0.1.19-beta.3 — 2026-10-12
 
 - Projects can now read tickets from different trackers. Each project is linked to one Linear workspace or Jira site, and the Tickets page lists every tracker together, with a source menu to narrow it and a small logo on each row once there is more than one.
