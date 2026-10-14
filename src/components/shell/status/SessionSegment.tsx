@@ -51,7 +51,7 @@ export function SessionSegment() {
 
   return (
     <span
-      className="flex items-center gap-2 font-mono"
+      className="flex flex-none items-center gap-2 font-mono whitespace-nowrap"
       title={`${modelVersion(usage.model)} · context ${pct}% full${
         cost ? ` · ${cost} this session` : ""
       }`}

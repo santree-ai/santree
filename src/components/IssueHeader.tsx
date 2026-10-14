@@ -61,17 +61,21 @@ export function IssueHeader({
 
   return (
     <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
-      <div className="mb-2 flex items-center gap-2.5">
-        <span className="font-mono text-[11.5px] text-muted-2">{ticketHandle(id)}</span>
+      <div className="mb-2 flex flex-wrap items-center gap-x-2.5 gap-y-2">
+        <span className="font-mono text-[11.5px] whitespace-nowrap text-muted-2">
+          {ticketHandle(id)}
+        </span>
         {known && <PriorityPill priority={known.priority} />}
         <StatusPicker detail={detail} onSetState={onSetState} readOnly={linearReadOnly} />
         {known && (
           <SlaCountdown
             breachMs={known.slaBreachMs}
-            className="font-mono text-[10.5px] text-status-red/90"
+            className="font-mono text-[10.5px] whitespace-nowrap text-status-red/90"
           />
         )}
-        <div className="ml-auto flex items-center gap-2">
+        {/* Wraps as a whole: when the row is too narrow the actions drop below
+            the id and status as one line, never a button split over two. */}
+        <div className="ml-auto flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={onRefresh}

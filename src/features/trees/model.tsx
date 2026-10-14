@@ -851,6 +851,12 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     // the sidebar switches repo and then lands on whatever was open before.
     const { id, pane, tab, expand, split } = treeFocus;
     if (id !== BASE_ID && !worktrees.some((w) => w.id === id)) return;
+    // "No such tab" only means *closed* once this project's tab rows have landed.
+    // Clicking an agent in another project navigates here first, and until its
+    // rows arrive every tab looks missing — which sent a live, open session down
+    // the reopen path, where resuming it was (rightly) refused as running in
+    // another tab.
+    if (tab && (treeFocus.repo !== repo || !tabsFetched)) return;
     // The worktree itself arrived in the url (`?project=`/`?tree=`); what is left
     // here is the part of a request that is an *instruction* rather than a
     // location — which pane to show, which tab, whether to expand.
@@ -898,6 +904,8 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     consumeTreeFocus();
   }, [
     treeFocus,
+    repo,
+    tabsFetched,
     worktrees,
     consumeTreeFocus,
     setFileFor,

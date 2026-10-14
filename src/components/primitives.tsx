@@ -89,7 +89,7 @@ export function Button({
   return (
     <button
       type={type}
-      className={`flex cursor-pointer items-center justify-center border transition-colors disabled:cursor-default disabled:opacity-50 ${BUTTON_SIZE[size]} ${v.cls} ${className ?? ""}`}
+      className={`flex cursor-pointer items-center justify-center whitespace-nowrap border transition-colors disabled:cursor-default disabled:opacity-50 ${BUTTON_SIZE[size]} ${v.cls} ${className ?? ""}`}
       style={{ ...v.style, ...style }}
       {...rest}
     />

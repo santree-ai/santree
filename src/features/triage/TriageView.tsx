@@ -408,7 +408,7 @@ function InvestigateActions({
   const label = agentProvider(agentKind).label;
   const others = INTERACTIVE_AGENTS.filter((agent) => agent !== agentKind);
   return (
-    <div className="flex items-center gap-px">
+    <div className="flex flex-none items-center gap-px">
       <Button
         variant="tinted"
         size="sm"
