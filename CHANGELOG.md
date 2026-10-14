@@ -7,6 +7,12 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.5 — 2026-10-14
+
+- Clicking an agent in the sidebar that belongs to another project no longer shows "That session is still running in another tab". Santree now waits for that project's tabs to load before deciding the agent's tab was closed.
+- Settings, Terminal lists sessions by project, then by worktree, triage ticket or review, with each tab's own name, instead of one flat table of ids.
+- Buttons never wrap their label onto two lines, and the ticket header moves its actions below the status when the panel is narrow. The model name in the status bar stays on one line.
+
 ## 0.1.19-beta.4 — 2026-10-13
 
 - TickTick is now a ticket tracker, next to Linear and Jira. Connect it in Settings, TickTick, with "Sign in with TickTick" or by pasting a personal API token from TickTick's own settings. A project linked to TickTick picks which of your lists it reads, or reads them all.
