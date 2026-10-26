@@ -41,6 +41,7 @@ import { palette } from "../../theme/colors";
 import { liveTabFor } from "../agents/registry";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
+import { useTabAccounts } from "../trees/useTabAccounts";
 import { useTabSessions } from "../trees/useTabSessions";
 import { aiReviewTermKey, REVIEW_AGENTS, REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
 import { useReviewsModel } from "./model";
@@ -61,6 +62,11 @@ export function ReviewTabBar({
   const provider = useTicketProvider(repo);
   const { data: drafts } = useReviewDrafts(pr.repo, pr.number);
   const { closeWithSession } = useTabSessions(tabs.checkout.worktreeId, tabs.rows, tabs.closeTab);
+  const { menuFor, detailFor } = useTabAccounts(
+    tabs.checkout.repo,
+    tabs.checkout.worktreeId,
+    tabs.rows,
+  );
   // The AI review tabs' half of the same rule: a tab is its process, so the ✕
   // ends the PTY before the row is forgotten. Their sessions hang off the PR's
   // own surface rather than a `worktree_tabs` row, which is the only reason
@@ -85,6 +91,8 @@ export function ReviewTabBar({
         ),
       onClose: () => closeWithSession(t),
       onRename: (title: string) => tabs.renameTab(t.id, title),
+      menu: menuFor(t),
+      detail: detailFor(t),
     })),
     // The ticket, at reading width. Between the checkout's rows and the AI
     // reviews so that opening a review does not shift it — same place Trees

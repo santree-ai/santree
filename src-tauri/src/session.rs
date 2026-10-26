@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, ensure, Result};
 use santree_core::domain::{
-    AgentKind, AgentSession, LastMessageFrom, SessionDetail, SessionSpend, SessionSubagent,
+    AgentKind, AgentSession, EnvVar, LastMessageFrom, SessionDetail, SessionSpend, SessionSubagent,
     TriageSession, WorktreeSession,
 };
 use serde_json::Value;
@@ -185,8 +185,15 @@ fn parse_background_sessions(json: &[u8]) -> Vec<BackgroundSession> {
 /// identity, never terminal output). Any failure — no such binary, a timeout, a
 /// non-zero exit, text that is not JSON — is "none": a launch then does what it
 /// always did.
-pub(crate) async fn background_sessions(executable: &str) -> Vec<BackgroundSession> {
+///
+/// `env` is the launch's account environment: each account's daemon is its own,
+/// so a session is only found by asking under the account it runs on.
+pub(crate) async fn background_sessions(
+    executable: &str,
+    env: &[EnvVar],
+) -> Vec<BackgroundSession> {
     let mut cmd = tokio::process::Command::new(executable);
+    cmd.envs(env.iter().map(|var| (&var.name, &var.value)));
     cmd.args(["agents", "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -213,6 +220,10 @@ pub(crate) async fn background_sessions(executable: &str) -> Vec<BackgroundSessi
 /// launch stops, the tab falls back to a plain shell in the same directory, and
 /// the row is left untouched so the conversation is still there to resume once
 /// the filesystem is. Reporting "pruned" instead would mint a launch over it.
+///
+/// `account` is the launch's account (`accounts::for_launch`): its id, which a
+/// minted row records, and the environment the background listing runs under.
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve(
     db: &Db,
     repo: &str,
@@ -221,7 +232,9 @@ pub async fn resolve(
     home: Option<&Path>,
     executable: &str,
     allow_fresh: bool,
+    account: Option<(&str, &[EnvVar])>,
 ) -> Result<AgentSession> {
+    let env = account.map(|(_, env)| env).unwrap_or_default();
     resolve_with(
         db,
         repo,
@@ -229,8 +242,9 @@ pub async fn resolve(
         cwd,
         executable,
         allow_fresh,
+        account.map(|(id, _)| id),
         |stored_cwd, id| async move { transcript_presence(home, &stored_cwd, &id).await },
-        || background_sessions(executable),
+        || background_sessions(executable, env),
     )
     .await
 }
@@ -245,6 +259,8 @@ pub async fn resolve(
 /// tab attaches to it ([`AgentSession::Attach`]) — checked before the
 /// transcript, since a running session is attachable whatever its record says.
 /// Daedalus passes an empty listing: `claude attach` is this Mac's daemon's.
+///
+/// `account` is recorded on a row this mints; a stored row keeps its own.
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_with<F, Fut, B, BFut>(
     db: &Db,
@@ -253,6 +269,7 @@ pub async fn resolve_with<F, Fut, B, BFut>(
     cwd: &str,
     executable: &str,
     allow_fresh: bool,
+    account: Option<&str>,
     presence: F,
     background: B,
 ) -> Result<AgentSession>
@@ -286,6 +303,8 @@ where
                 executable: executable.to_string(),
                 session_id,
                 background_id: running.id,
+                launch_env: Vec::new(),
+                account: None,
             });
         }
         match presence(stored_cwd, session_id.clone()).await {
@@ -295,6 +314,8 @@ where
                     executable: executable.to_string(),
                     session_id,
                     launch_flags: String::new(),
+                    launch_env: Vec::new(),
+                    account: None,
                 })
             }
             RecordPresence::Unknown(why) => return Err(unreadable_record(&why)),
@@ -306,6 +327,8 @@ where
                 executable: executable.to_string(),
                 session_id: Some(session_id),
                 launch_flags: String::new(),
+                launch_env: Vec::new(),
+                account: None,
             }
         } else {
             AgentSession::Shell
@@ -319,8 +342,10 @@ where
     Ok(AgentSession::Fresh {
         agent_kind: AgentKind::Claude,
         executable: executable.to_string(),
-        session_id: Some(mint(db, repo, term_key, cwd).await?),
+        session_id: Some(mint(db, repo, term_key, cwd, account).await?),
         launch_flags: String::new(),
+        launch_env: Vec::new(),
+        account: None,
     })
 }
 
@@ -396,6 +421,8 @@ where
                     // Filled in by `CodexProvider`, which owns what a Codex session
                     // runs under; the resolver only decides which thread it is.
                     launch_flags: String::new(),
+                    launch_env: Vec::new(),
+                    account: None,
                 });
             }
             // An unreadable rollout tree is not a pruned thread. Starting fresh
@@ -414,6 +441,8 @@ where
         executable: executable.to_string(),
         session_id: None,
         launch_flags: String::new(),
+        launch_env: Vec::new(),
+        account: None,
     })
 }
 
@@ -440,15 +469,26 @@ async fn codex_rollout_presence(sessions_root: Option<&Path>, thread_id: &str) -
 /// run under. Two launches of the same terminal can race — both see no row and
 /// mint an id — so the insert yields to whoever got there first and we re-read:
 /// the loser adopts the winner's session instead of failing the primary key.
-async fn mint(db: &Db, repo: &str, term_key: &str, cwd: &str) -> Result<String> {
+///
+/// `account` is the account the session launches on, recorded with it so every
+/// later resume of this surface runs under the same login.
+async fn mint(
+    db: &Db,
+    repo: &str,
+    term_key: &str,
+    cwd: &str,
+    account: Option<&str>,
+) -> Result<String> {
     sqlx::query(
-        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind) VALUES (?, ?, ?, ?, 'Claude')
+        "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind, account)
+         VALUES (?, ?, ?, ?, 'Claude', ?)
          ON CONFLICT (repo, term_key, agent_kind) DO NOTHING",
     )
     .bind(repo)
     .bind(term_key)
     .bind(cwd)
     .bind(Uuid::new_v4().to_string())
+    .bind(account)
     .execute(db)
     .await?;
     let (session_id,): (String,) = sqlx::query_as(
@@ -1471,7 +1511,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_executable_lists_no_background_sessions() {
-        assert!(background_sessions("/nonexistent/santree-test-claude")
+        assert!(background_sessions("/nonexistent/santree-test-claude", &[])
             .await
             .is_empty());
     }
@@ -1482,7 +1522,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let db = crate::db::init(base.join("test.db")).await.unwrap();
         let (cwd, key) = ("/tmp/santree/work/AK-1", "tree:AK-1");
-        let stored = mint(&db, "repo", key, cwd).await.unwrap();
+        let stored = mint(&db, "repo", key, cwd, None).await.unwrap();
         let listing = |session_id: &str, id: &str| {
             let b = BackgroundSession {
                 id: id.into(),
@@ -1501,6 +1541,7 @@ mod tests {
                 cwd,
                 "/bin/claude",
                 false,
+                None,
                 move |_, _| async move { presence },
                 listing(&stored, "14ffdc20"),
             )
@@ -1513,6 +1554,8 @@ mod tests {
                     executable: "/bin/claude".into(),
                     session_id: stored.clone(),
                     background_id: "14ffdc20".into(),
+                    launch_env: Vec::new(),
+                    account: None,
                 }
             );
         }
@@ -1525,6 +1568,7 @@ mod tests {
             cwd,
             "/bin/claude",
             false,
+            None,
             |_, _| async { RecordPresence::Present },
             listing("aaaaaaaa-0000-4000-8000-000000000001", "14ffdc20"),
         )
@@ -1541,6 +1585,7 @@ mod tests {
             cwd,
             "/bin/claude",
             false,
+            None,
             |_, _| async { RecordPresence::Present },
             || async { Vec::new() },
         )
@@ -1559,6 +1604,7 @@ mod tests {
             cwd,
             "/bin/claude",
             false,
+            None,
             |_, _| async { RecordPresence::Present },
             move || async move { parse_background_sessions(hostile.as_bytes()) },
         )
@@ -1574,6 +1620,7 @@ mod tests {
             cwd,
             "/bin/claude",
             false,
+            None,
             |_, _| async { RecordPresence::Present },
             || async { panic!("listed background sessions with no stored session") },
         )
@@ -1596,15 +1643,33 @@ mod tests {
         let key = "tree:AK-1";
 
         // First, passive reopen with nothing stored → plain shell.
-        let r = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", false)
-            .await
-            .unwrap();
+        let r = resolve(
+            &db,
+            "repo",
+            key,
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(r, AgentSession::Shell);
 
         // Explicit launch mints + stores a fresh session id.
-        let fresh = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
-            .await
-            .unwrap();
+        let fresh = resolve(
+            &db,
+            "repo",
+            key,
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         let AgentSession::Fresh {
             session_id: Some(session_id),
             ..
@@ -1615,9 +1680,18 @@ mod tests {
 
         // No transcript yet → a reopen still can't resume (stays a shell).
         assert_eq!(
-            resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", false)
-                .await
-                .unwrap(),
+            resolve(
+                &db,
+                "repo",
+                key,
+                cwd,
+                Some(&home),
+                "/bin/claude",
+                false,
+                None
+            )
+            .await
+            .unwrap(),
             AgentSession::Shell
         );
 
@@ -1626,27 +1700,49 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{}").unwrap();
         assert_eq!(
-            resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", false)
-                .await
-                .unwrap(),
+            resolve(
+                &db,
+                "repo",
+                key,
+                cwd,
+                Some(&home),
+                "/bin/claude",
+                false,
+                None
+            )
+            .await
+            .unwrap(),
             AgentSession::Resume {
                 agent_kind: AgentKind::Claude,
                 executable: "/bin/claude".into(),
                 session_id: session_id.clone(),
                 launch_flags: String::new(),
+                launch_env: Vec::new(),
+                account: None,
             }
         );
 
         // A re-launch prefers resuming the live session over minting a new id.
         assert_eq!(
-            resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
-                .await
-                .unwrap(),
+            resolve(
+                &db,
+                "repo",
+                key,
+                cwd,
+                Some(&home),
+                "/bin/claude",
+                true,
+                None
+            )
+            .await
+            .unwrap(),
             AgentSession::Resume {
                 agent_kind: AgentKind::Claude,
                 executable: "/bin/claude".into(),
                 session_id,
                 launch_flags: String::new(),
+                launch_env: Vec::new(),
+                account: None,
             }
         );
 
@@ -1732,9 +1828,18 @@ mod tests {
         let cwd = "/tmp/santree/work/AK-1";
         let key = "tree:AK-1";
 
-        let fresh = resolve(&db, "repo", key, cwd, Some(&home), "/bin/claude", true)
-            .await
-            .unwrap();
+        let fresh = resolve(
+            &db,
+            "repo",
+            key,
+            cwd,
+            Some(&home),
+            "/bin/claude",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
         let AgentSession::Fresh {
             session_id: Some(session_id),
             ..
@@ -1762,6 +1867,7 @@ mod tests {
                 Some(&home),
                 "/bin/claude",
                 allow_fresh,
+                None,
             )
             .await
             .unwrap_err()
@@ -1779,9 +1885,11 @@ mod tests {
 
         // No HOME at all is the same class of answer: santree cannot look, so it
         // does not get to say "gone".
-        assert!(resolve(&db, "repo", key, cwd, None, "/bin/claude", true)
-            .await
-            .is_err());
+        assert!(
+            resolve(&db, "repo", key, cwd, None, "/bin/claude", true, None)
+                .await
+                .is_err()
+        );
 
         drop(_guard);
         let _ = std::fs::remove_dir_all(&base);
@@ -1893,8 +2001,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let db = crate::db::init(base.join("test.db")).await.unwrap();
 
-        let first = mint(&db, "repo", "tree:AK-1", "/tmp/wt").await.unwrap();
-        let second = mint(&db, "repo", "tree:AK-1", "/tmp/wt").await.unwrap();
+        let first = mint(&db, "repo", "tree:AK-1", "/tmp/wt", None)
+            .await
+            .unwrap();
+        let second = mint(&db, "repo", "tree:AK-1", "/tmp/wt", None)
+            .await
+            .unwrap();
         assert_eq!(first, second);
 
         let rows: Vec<(String,)> =
@@ -2189,6 +2301,7 @@ mod tests {
             Some(&home),
             "/bin/claude",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -2216,6 +2329,7 @@ mod tests {
             Some(&home),
             "/bin/claude",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -2227,6 +2341,7 @@ mod tests {
             Some(&home),
             "/bin/claude",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -2238,6 +2353,7 @@ mod tests {
             Some(&home),
             "/bin/claude",
             false,
+            None,
         )
         .await
         .unwrap();
@@ -2269,6 +2385,7 @@ mod tests {
             Some(&home),
             "/bin/claude",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -2359,6 +2476,8 @@ mod tests {
                 executable: "/bin/codex".into(),
                 session_id: None,
                 launch_flags: String::new(),
+                launch_env: Vec::new(),
+                account: None,
             }
         );
         assert!(
@@ -2410,6 +2529,8 @@ mod tests {
                 executable: "/bin/codex".into(),
                 session_id: "thread-live".into(),
                 launch_flags: String::new(),
+                launch_env: Vec::new(),
+                account: None,
             }
         );
         // Codex pruned this one: resuming it would just error at the user.
@@ -2420,6 +2541,8 @@ mod tests {
                 executable: "/bin/codex".into(),
                 session_id: None,
                 launch_flags: String::new(),
+                launch_env: Vec::new(),
+                account: None,
             }
         );
         // No rollout directory at all (no `CODEX_HOME`, nothing written yet)
@@ -2431,6 +2554,8 @@ mod tests {
                 executable: "/bin/codex".into(),
                 session_id: None,
                 launch_flags: String::new(),
+                launch_env: Vec::new(),
+                account: None,
             }
         );
         // Both rows survive untouched — repointing is the hook's job.
@@ -2531,6 +2656,7 @@ mod tests {
                 Some(&home),
                 "/bin/claude",
                 true,
+                None,
             )
             .await
             .unwrap(),
@@ -2539,6 +2665,8 @@ mod tests {
                 executable: "/bin/claude".into(),
                 session_id: "sid-live".into(),
                 launch_flags: String::new(),
+                launch_env: Vec::new(),
+                account: None,
             }
         );
 
@@ -2787,6 +2915,7 @@ mod tests {
             Some(&home),
             "/bin/claude",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -2805,6 +2934,7 @@ mod tests {
             Some(&home),
             "/bin/claude",
             true,
+            None,
         )
         .await
         .unwrap();
@@ -2823,6 +2953,7 @@ mod tests {
             Some(&home),
             "/bin/claude",
             true,
+            None,
         )
         .await
         .unwrap();

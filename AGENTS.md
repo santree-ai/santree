@@ -232,6 +232,9 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    them on GitHub — on a click, into the user's pending review)
                    · english_tutor.rs (opt-in writing coach: hook + practice log
                    + on-demand analysis)
+                   · accounts.rs (several Claude/Codex logins: a config folder
+                   each, the shared-state links, the launch env — COMPLIANCE.md
+                   "Agent accounts")
                    · prompts.rs (the prompt engine: embedded defaults, the four
                    layers, Jinja inheritance — see "Prompt layers") ·
                    santree_dir.rs (a managed repo's `.santree/`: what santree

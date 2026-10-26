@@ -31,6 +31,8 @@ const backend = vi.hoisted(() => ({
     executable: "claude",
     sessionId: "s-1",
     launchFlags: "",
+    launchEnv: [],
+    account: null,
   } as AgentSession | undefined,
   sessionFetching: false,
   flagsFetched: true,
@@ -170,6 +172,8 @@ beforeEach(() => {
     executable: "claude",
     sessionId: "s-1",
     launchFlags: "",
+    launchEnv: [],
+    account: null,
   };
   backend.sessionFetching = false;
   backend.flagsFetched = true;
@@ -301,6 +305,8 @@ describe("useAgentTab", () => {
         executable: "/opt/codex",
         sessionId: "thread-1",
         launchFlags: "",
+        launchEnv: [],
+        account: null,
       };
       const t = mount(opts({ agent: "Codex" }));
 
@@ -390,6 +396,8 @@ describe("useAgentTab", () => {
         executable: "/opt/codex",
         sessionId: "s-1",
         launchFlags: "",
+        launchEnv: [],
+        account: null,
       };
       const t = mount(opts({ agent: "Codex", remoteControl: "AK-1" }));
       const seed = t.tab().seed ?? "";
@@ -410,6 +418,8 @@ describe("useAgentTab", () => {
         executable: "claude",
         sessionId: "s-old",
         launchFlags: "",
+        launchEnv: [],
+        account: null,
       };
       const t = mount();
 
@@ -431,6 +441,8 @@ describe("Codex hook injection", () => {
       executable: "/opt/codex",
       sessionId: "s-1",
       launchFlags: "",
+      launchEnv: [],
+      account: null,
     };
     backend.codexHooksFetched = false;
     expect(mount(opts({ agent: "Codex" })).tab().preparing).toBe(true);
@@ -451,6 +463,8 @@ describe("Codex hook injection", () => {
       executable: "/opt/codex",
       sessionId: "s-1",
       launchFlags: "",
+      launchEnv: [],
+      account: null,
     };
     backend.codexHooks = null;
     backend.codexHooksFetched = true;

@@ -4330,6 +4330,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tungstenite",
+ "unicode-normalization",
  "uuid",
 ]
 

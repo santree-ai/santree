@@ -47,6 +47,7 @@ const row = (id: string, worktreeId: string): WorktreeTab => ({
   agentKind: "Codex",
   title: "Codex",
   pr: null,
+  account: null,
 });
 
 /** The route the provider reads its project and selection off. */

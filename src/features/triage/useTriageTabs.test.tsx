@@ -47,6 +47,7 @@ const row = (id: string, worktreeId = "triage:AK-1"): WorktreeTab => ({
   agentKind: null,
   title: "Terminal",
   pr: null,
+  account: null,
 });
 
 function mount(ticketId = "AK-1", repo = "acme/app") {

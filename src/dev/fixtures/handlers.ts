@@ -8,12 +8,14 @@
 import type { Channel } from "@tauri-apps/api/core";
 
 import type {
+  AgentAccount,
   AgentKind,
   AgentSession,
   ApiBudgetWindow,
   CheckLog,
-  ClaudeRateLimitWindow,
-  CodexRateLimits,
+  ClaudeAccountRateLimits,
+  ClaudeAccountUsage,
+  CodexAccountRateLimits,
   LinearApiBudget,
   LinearOrg,
   LinearStatus,
@@ -272,6 +274,8 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
         executable: kind === "Codex" ? "codex" : "claude",
         sessionId: null,
         launchFlags: "",
+        launchEnv: [],
+        account: null,
       };
     },
     list_worktree_tabs: (a) => {
@@ -287,6 +291,7 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
         agentKind: (a.agentKind as AgentKind | null) ?? null,
         title: str(a, "title"),
         pr: null,
+        account: null,
       });
       return null;
     },
@@ -402,57 +407,125 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
         updatedAtMs: now() - 2 * MIN,
       },
     ],
-    claude_rate_limits: (): ClaudeRateLimitWindow[] => [
+    // A second Claude login beside the CLI's own, so the status bar and
+    // Settings → Agents draw their multi-account rows.
+    agent_accounts: (a): AgentAccount[] =>
+      str(a, "agent") === "Claude"
+        ? [
+            {
+              id: "personal",
+              agent: "Claude",
+              label: "Personal",
+              dir: "/Users/sam/.config/santree/accounts/claude/personal",
+              email: "sam@duckmail.com",
+              signedIn: true,
+            },
+          ]
+        : [],
+    claude_rate_limits: (): ClaudeAccountRateLimits[] => [
       {
-        window: "five_hour",
-        usedPct: 15,
-        resetsAtMs: now() + 3 * HOUR + 32 * MIN,
-        updatedAtMs: now() - MIN,
+        account: null,
+        windows: [
+          {
+            window: "five_hour",
+            usedPct: 15,
+            resetsAtMs: now() + 3 * HOUR + 32 * MIN,
+            updatedAtMs: now() - MIN,
+          },
+          {
+            window: "seven_day",
+            usedPct: 31,
+            resetsAtMs: now() + 5 * DAY + 14 * HOUR,
+            updatedAtMs: now() - MIN,
+          },
+          {
+            window: "seven_day_opus",
+            usedPct: 39,
+            resetsAtMs: now() + 5 * DAY + 14 * HOUR,
+            updatedAtMs: now() - MIN,
+          },
+        ],
       },
       {
-        window: "seven_day",
-        usedPct: 31,
-        resetsAtMs: now() + 5 * DAY + 14 * HOUR,
-        updatedAtMs: now() - MIN,
-      },
-      {
-        window: "seven_day_opus",
-        usedPct: 39,
-        resetsAtMs: now() + 5 * DAY + 14 * HOUR,
-        updatedAtMs: now() - MIN,
+        account: "personal",
+        windows: [
+          {
+            window: "five_hour",
+            usedPct: 64,
+            resetsAtMs: now() + HOUR + 12 * MIN,
+            updatedAtMs: now() - 4 * MIN,
+          },
+          {
+            window: "seven_day",
+            usedPct: 22,
+            resetsAtMs: now() + 2 * DAY + 3 * HOUR,
+            updatedAtMs: now() - 4 * MIN,
+          },
+        ],
       },
     ],
-    claude_fetch_usage: () => ({
-      windows: [
-        {
-          window: "five_hour",
-          usedPct: 15,
-          resetsAtMs: now() + 3 * HOUR + 32 * MIN,
-          updatedAtMs: now(),
+    claude_fetch_usage: (): ClaudeAccountUsage[] => [
+      {
+        account: null,
+        fetch: {
+          windows: [
+            {
+              window: "five_hour",
+              usedPct: 15,
+              resetsAtMs: now() + 3 * HOUR + 32 * MIN,
+              updatedAtMs: now(),
+            },
+            {
+              window: "seven_day",
+              usedPct: 31,
+              resetsAtMs: now() + 5 * DAY + 14 * HOUR,
+              updatedAtMs: now(),
+            },
+          ],
+          status: "Ok",
+          detail: null,
         },
-        {
-          window: "seven_day",
-          usedPct: 31,
-          resetsAtMs: now() + 5 * DAY + 14 * HOUR,
-          updatedAtMs: now(),
+      },
+      {
+        account: "personal",
+        fetch: {
+          windows: [
+            {
+              window: "five_hour",
+              usedPct: 64,
+              resetsAtMs: now() + HOUR + 12 * MIN,
+              updatedAtMs: now(),
+            },
+            {
+              window: "seven_day",
+              usedPct: 22,
+              resetsAtMs: now() + 2 * DAY + 3 * HOUR,
+              updatedAtMs: now(),
+            },
+          ],
+          status: "Ok",
+          detail: null,
         },
-      ],
-      status: "Ok",
-      detail: null,
-    }),
-    codex_rate_limits: (): CodexRateLimits => ({
-      plan: "Pro",
-      primary: {
-        usedPercent: 22,
-        windowMinutes: 300,
-        resetsAt: Math.floor((now() + 2 * HOUR) / 1000),
       },
-      secondary: {
-        usedPercent: 48,
-        windowMinutes: 10_080,
-        resetsAt: Math.floor((now() + 4 * DAY) / 1000),
+    ],
+    codex_rate_limits: (): CodexAccountRateLimits[] => [
+      {
+        account: null,
+        limits: {
+          plan: "Pro",
+          primary: {
+            usedPercent: 22,
+            windowMinutes: 300,
+            resetsAt: Math.floor((now() + 2 * HOUR) / 1000),
+          },
+          secondary: {
+            usedPercent: 48,
+            windowMinutes: 10_080,
+            resetsAt: Math.floor((now() + 4 * DAY) / 1000),
+          },
+        },
       },
-    }),
+    ],
     resource_usage: (): ResourceUsage => {
       const term = (label: string, pid: number, cpu: number, mb: number) => ({
         sessionId: null,

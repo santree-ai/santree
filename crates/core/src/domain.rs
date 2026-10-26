@@ -141,6 +141,15 @@ pub struct CodexRateLimits {
     pub secondary: Option<CodexRateLimitWindow>,
 }
 
+/// [`CodexRateLimits`] for one account (`None` = the Default account): the
+/// newest snapshot among the rollouts of the sessions whose stored row names it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAccountRateLimits {
+    pub account: Option<String>,
+    pub limits: CodexRateLimits,
+}
+
 /// The `gh` CLI integration status, shown in Settings → Integrations. GitHub
 /// powers PR creation and the Reviews dashboard and can't be turned off, so the
 /// UI surfaces whether the CLI is installed and authenticated (and as whom)
@@ -408,6 +417,83 @@ pub struct ClaudeUsageFetch {
     /// Why, when the status alone doesn't say (an HTTP code, a transport error).
     /// Never carries anything secret.
     pub detail: Option<String>,
+}
+
+/// One account's usage read. `account: None` is the Default account — whatever
+/// Claude Code uses with no config-folder override.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAccountUsage {
+    pub account: Option<String>,
+    pub fetch: ClaudeUsageFetch,
+}
+
+/// One account's stored rate-limit windows (`None` = the Default account).
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAccountRateLimits {
+    pub account: Option<String>,
+    pub windows: Vec<ClaudeRateLimitWindow>,
+}
+
+/// An extra login for an agent CLI: its own config folder
+/// (`~/.config/santree/accounts/<agent>/<id>`), which santree points the CLI at
+/// through `CLAUDE_CONFIG_DIR` / `CODEX_HOME`. The Default account is not one
+/// of these: it is the CLI's own folder, and is never listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAccount {
+    /// `[a-z0-9][a-z0-9-]{0,31}`, minted from the label; the folder's name.
+    pub id: String,
+    pub agent: AgentKind,
+    pub label: String,
+    /// The account's config folder, absolute.
+    pub dir: String,
+    /// Claude: the signed-in email from the folder's `.claude.json`. Always
+    /// `None` for Codex: santree never reads its auth storage, and `codex login
+    /// status` names a method, not an account.
+    pub email: Option<String>,
+    pub signed_in: bool,
+}
+
+/// Whether `id` has the shape of an [`AgentAccount::id`]:
+/// `[a-z0-9][a-z0-9-]{0,31}`. Checked wherever one crosses a boundary — IPC, a
+/// stored row, the hook's `SANTREE_ACCOUNT` — because it names a folder and a
+/// table key.
+pub fn is_account_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    (1..=32).contains(&bytes.len())
+        && matches!(bytes[0], b'a'..=b'z' | b'0'..=b'9')
+        && bytes
+            .iter()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+}
+
+/// The `SANTREE_ACCOUNT` value for a session on account `id` of `agent`:
+/// `claude:work`, `codex:work`. Agent-qualified so a value inherited by the
+/// other CLI can't be taken for one of its own accounts.
+pub fn account_tag(agent: AgentKind, id: &str) -> String {
+    format!("{}:{id}", agent.as_str().to_ascii_lowercase())
+}
+
+/// [`account_tag`] read back: the account id, when `tag` names one of
+/// `agent`'s accounts and nothing else.
+pub fn account_of_tag(tag: &str, agent: AgentKind) -> Option<&str> {
+    let (kind, id) = tag.split_once(':')?;
+    let named = match kind {
+        "claude" => AgentKind::Claude,
+        "codex" => AgentKind::Codex,
+        _ => return None,
+    };
+    (named == agent && is_account_id(id)).then_some(id)
+}
+
+/// One environment variable a launch line sets before the CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
 }
 
 /// Whether the opt-in **global status-line passthrough** is on: santree's hook
@@ -966,6 +1052,10 @@ pub enum AgentSession {
         session_id: String,
         /// See [`AgentSession::launch_flags`].
         launch_flags: String,
+        /// See [`AgentSession::launch_env`].
+        launch_env: Vec<EnvVar>,
+        /// See [`AgentSession::account`].
+        account: Option<String>,
     },
     /// A fresh launch.
     Fresh {
@@ -980,6 +1070,10 @@ pub enum AgentSession {
         session_id: Option<String>,
         /// See [`AgentSession::launch_flags`].
         launch_flags: String,
+        /// See [`AgentSession::launch_env`].
+        launch_env: Vec<EnvVar>,
+        /// See [`AgentSession::account`].
+        account: Option<String>,
     },
     /// The stored Claude session is running as one of Claude's own background
     /// sessions (`claude --bg`, hosted by Claude's daemon, so it outlived the
@@ -995,6 +1089,11 @@ pub enum AgentSession {
         /// The short id `claude agents` lists and `claude attach` takes —
         /// validated hex before it gets here, because it becomes argv.
         background_id: String,
+        /// See [`AgentSession::launch_env`]: `claude attach` has to reach the
+        /// daemon of the account the session runs on.
+        launch_env: Vec<EnvVar>,
+        /// See [`AgentSession::account`].
+        account: Option<String>,
     },
     /// No agent session — just a login shell.
     Shell,
@@ -1017,6 +1116,56 @@ impl AgentSession {
             Self::Resume { launch_flags, .. } | Self::Fresh { launch_flags, .. } => launch_flags,
             Self::Attach { .. } | Self::Shell => "",
         }
+    }
+
+    /// The environment the launch line sets before the CLI, already resolved:
+    /// for a session on one of santree's accounts, the CLI's config-folder
+    /// variable (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`) and `SANTREE_ACCOUNT` for
+    /// the hook. Empty for the Default account, a Daedalus project, or a shell.
+    pub fn launch_env(&self) -> &[EnvVar] {
+        match self {
+            Self::Resume { launch_env, .. }
+            | Self::Fresh { launch_env, .. }
+            | Self::Attach { launch_env, .. } => launch_env,
+            Self::Shell => &[],
+        }
+    }
+
+    /// The account this session runs on (an [`AgentAccount::id`]); `None` is
+    /// the Default account.
+    pub fn account(&self) -> Option<&str> {
+        match self {
+            Self::Resume { account, .. }
+            | Self::Fresh { account, .. }
+            | Self::Attach { account, .. } => account.as_deref(),
+            Self::Shell => None,
+        }
+    }
+
+    /// Pin the session to an account and the environment that selects it.
+    pub fn with_account(mut self, id: Option<String>, env: Vec<EnvVar>) -> Self {
+        match &mut self {
+            Self::Resume {
+                launch_env,
+                account,
+                ..
+            }
+            | Self::Fresh {
+                launch_env,
+                account,
+                ..
+            }
+            | Self::Attach {
+                launch_env,
+                account,
+                ..
+            } => {
+                *launch_env = env;
+                *account = id;
+            }
+            Self::Shell => {}
+        }
+        self
     }
 
     /// Attach the flags a provider resolved for this session. Separate from
@@ -1123,6 +1272,10 @@ pub struct WorktreeTab {
     /// their launch configuration from it. `None` on a review tab means the row
     /// predates the column.
     pub pr: Option<TabPr>,
+    /// The account the tab's stored session runs on (`terminal_sessions.account`
+    /// for its key and provider). `None` is the Default account, or no stored
+    /// session yet.
+    pub account: Option<String>,
 }
 
 /// A proposed PR (title + body) for the create-PR dialog, before it's opened.

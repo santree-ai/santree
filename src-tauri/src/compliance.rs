@@ -980,8 +980,9 @@ fn the_usage_credential_is_never_logged_serialized_or_stored() {
         "the log scan found no log calls — it has stopped working"
     );
 
-    // Only the derived windows are stored, and only in the one display-only table
-    // the status-line capture also writes.
+    // Only the derived windows are stored, and only in the display-only tables
+    // the status-line capture also writes: the Default account's, and the named
+    // accounts' (COMPLIANCE.md, "Agent accounts").
     let statements = string_literals(&src)
         .into_iter()
         .filter(|l| l.contains("INSERT") || l.contains("UPDATE") || l.contains("SELECT"))
@@ -992,8 +993,8 @@ fn the_usage_credential_is_never_logged_serialized_or_stored() {
     );
     for sql in statements {
         assert!(
-            sql.contains("claude_rate_limits"),
-            "claude_usage.rs writes somewhere other than the rate-limit table: {sql}"
+            sql.contains("claude_rate_limits") || sql.contains("claude_account_rate_limits"),
+            "claude_usage.rs writes somewhere other than the rate-limit tables: {sql}"
         );
         let lower = sql.to_ascii_lowercase();
         for word in ["token", "credential", "secret"] {

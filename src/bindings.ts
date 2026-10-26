@@ -31,10 +31,42 @@ export const commands = {
 	/**
 	 *  Codex subscription usage, as of the last turn Codex actually ran — read back
 	 *  from its own rollout transcript, the only source that needs neither a control
-	 *  plane nor the vendor's credentials. Empty when Codex has never run here, or
+	 *  plane nor the vendor's credentials. One entry per account, the Default first:
+	 *  each is the newest snapshot among the rollouts of the sessions whose stored
+	 *  row names that account now. Empty limits when Codex has never run there, or
 	 *  when the plan reports no windows.
 	 */
-	codexRateLimits: () => typedError<CodexRateLimits, CmdError>(__TAURI_INVOKE("codex_rate_limits")),
+	codexRateLimits: () => typedError<CodexAccountRateLimits[], CmdError>(__TAURI_INVOKE("codex_rate_limits")),
+	/**
+	 *  The accounts santree keeps for `agent` (Claude or Codex), without the
+	 *  Default one, which is the CLI's own and never listed.
+	 */
+	agentAccounts: (agent: AgentKind) => typedError<AgentAccount[], CmdError>(__TAURI_INVOKE("agent_accounts", { agent })),
+	/**
+	 *  Make a new account for `agent` named `label`: its folder, linked to the
+	 *  Default account's shared state. It is not signed in; the user does that with
+	 *  [`agent_account_login_command`] in a terminal.
+	 */
+	agentAccountCreate: (agent: AgentKind, label: string) => typedError<AgentAccount, CmdError>(__TAURI_INVOKE("agent_account_create", { agent, label })),
+	/**
+	 *  Delete an account's folder. Sessions launched on it continue on the Default
+	 *  account, and settings naming it are cleared. The CLI's keychain item for it,
+	 *  if it made one, is the CLI's and stays.
+	 */
+	agentAccountRemove: (agent: AgentKind, id: string) => typedError<null, CmdError>(__TAURI_INVOKE("agent_account_remove", { agent, id })),
+	/**
+	 *  The shell command that signs account `id` in — the vendor's own login with
+	 *  the account's folder as its config — for a terminal the user watches. Built
+	 *  here so the folder and its quoting never come from the webview.
+	 */
+	agentAccountLoginCommand: (agent: AgentKind, id: string) => typedError<string, CmdError>(__TAURI_INVOKE("agent_account_login_command", { agent, id })),
+	/**
+	 *  Move a tab's stored session to another account (`None` = Default): the next
+	 *  launch of the surface resumes the same conversation under that login. The
+	 *  running process is not touched — the frontend ends and reopens the tab, on
+	 *  the user's click.
+	 */
+	terminalSessionSetAccount: (repo: string, termKey: string, agent: AgentKind, account: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("terminal_session_set_account", { repo, termKey, agent, account })),
 	/**
 	 *  Hand `codex logout` on, on a click. santree asks; Codex owns what happens to
 	 *  the credentials. There is deliberately no matching login command — see
@@ -963,10 +995,12 @@ export const commands = {
 	/**
 	 *  Claude's account-level subscription rate-limit windows (5-hour, 7-day, ...),
 	 *  as its own status line last reported them — captured from the same stdin as
-	 *  [`session_usage_live`], never from a credential. Empty until a subscriber
-	 *  session has rendered a status line after its first API response. Display-only.
+	 *  [`session_usage_live`], never from a credential. One entry per account, the
+	 *  Default first; an account's windows are empty until one of its subscriber
+	 *  sessions has rendered a status line after its first API response.
+	 *  Display-only.
 	 */
-	claudeRateLimits: () => typedError<ClaudeRateLimitWindow[], CmdError>(__TAURI_INVOKE("claude_rate_limits")),
+	claudeRateLimits: () => typedError<ClaudeAccountRateLimits[], CmdError>(__TAURI_INVOKE("claude_rate_limits")),
 	/**
 	 *  Ask Anthropic for the account's current subscription usage and record it.
 	 * 
@@ -975,7 +1009,7 @@ export const commands = {
 	 *  read-only, sent to Anthropic's own endpoint and nowhere else, never logged
 	 *  or stored, and what comes back only ever drives a meter. Input-free.
 	 */
-	claudeFetchUsage: () => typedError<ClaudeUsageFetch, CmdError>(__TAURI_INVOKE("claude_fetch_usage")),
+	claudeFetchUsage: () => typedError<ClaudeAccountUsage[], CmdError>(__TAURI_INVOKE("claude_fetch_usage")),
 	/**
 	 *  Whether the opt-in global status-line passthrough is on — read from the
 	 *  user's own `~/.claude/settings.json`. Input-free: the path comes from the
@@ -1551,6 +1585,28 @@ export type AdoptedSession = {
 };
 
 /**
+ *  An extra login for an agent CLI: its own config folder
+ *  (`~/.config/santree/accounts/<agent>/<id>`), which santree points the CLI at
+ *  through `CLAUDE_CONFIG_DIR` / `CODEX_HOME`. The Default account is not one
+ *  of these: it is the CLI's own folder, and is never listed.
+ */
+export type AgentAccount = {
+	/**  `[a-z0-9][a-z0-9-]{0,31}`, minted from the label; the folder's name. */
+	id: string,
+	agent: AgentKind,
+	label: string,
+	/**  The account's config folder, absolute. */
+	dir: string,
+	/**
+	 *  Claude: the signed-in email from the folder's `.claude.json`. Always
+	 *  `None` for Codex: santree never reads its auth storage, and `codex login
+	 *  status` names a method, not an account.
+	 */
+	email: string | null,
+	signedIn: boolean,
+};
+
+/**
  *  An agent harness's authentication / subscription status, as shown in the
  *  harness settings tab. Read from the agent CLI's own credentials (e.g.
  *  `~/.claude.json`); the CLI owns auth.
@@ -1646,7 +1702,11 @@ export type AgentSession =
  */
 executable: string; sessionId: string; 
 /**  See [`AgentSession::launch_flags`]. */
-launchFlags: string } | 
+launchFlags: string; 
+/**  See [`AgentSession::launch_env`]. */
+launchEnv: EnvVar[]; 
+/**  See [`AgentSession::account`]. */
+account: string | null } | 
 /**  A fresh launch. */
 { type: "fresh"; agentKind: AgentKind; executable: string; 
 /**
@@ -1659,7 +1719,11 @@ launchFlags: string } |
  */
 sessionId: string | null; 
 /**  See [`AgentSession::launch_flags`]. */
-launchFlags: string } | 
+launchFlags: string; 
+/**  See [`AgentSession::launch_env`]. */
+launchEnv: EnvVar[]; 
+/**  See [`AgentSession::account`]. */
+account: string | null } | 
 /**
  *  The stored Claude session is running as one of Claude's own background
  *  sessions (`claude --bg`, hosted by Claude's daemon, so it outlived the
@@ -1678,7 +1742,14 @@ sessionId: string;
  *  The short id `claude agents` lists and `claude attach` takes —
  *  validated hex before it gets here, because it becomes argv.
  */
-backgroundId: string } | 
+backgroundId: string; 
+/**
+ *  See [`AgentSession::launch_env`]: `claude attach` has to reach the
+ *  daemon of the account the session runs on.
+ */
+launchEnv: EnvVar[]; 
+/**  See [`AgentSession::account`]. */
+account: string | null } | 
 /**  No agent session — just a login shell. */
 { type: "shell" };
 
@@ -1948,6 +2019,21 @@ export type CheckStep = {
 	status: CheckStatus,
 };
 
+/**  One account's stored rate-limit windows (`None` = the Default account). */
+export type ClaudeAccountRateLimits = {
+	account: string | null,
+	windows: ClaudeRateLimitWindow[],
+};
+
+/**
+ *  One account's usage read. `account: None` is the Default account — whatever
+ *  Claude Code uses with no config-folder override.
+ */
+export type ClaudeAccountUsage = {
+	account: string | null,
+	fetch: ClaudeUsageFetch,
+};
+
 /**
  *  Whether the opt-in **global status-line passthrough** is on: santree's hook
  *  wrapping the `statusLine` in the user's own Claude settings so every Claude
@@ -2031,6 +2117,15 @@ export type CmdError = string;
 export type CodexAccount = {
 	connected: boolean,
 	authType: string,
+};
+
+/**
+ *  [`CodexRateLimits`] for one account (`None` = the Default account): the
+ *  newest snapshot among the rollouts of the sessions whose stored row names it.
+ */
+export type CodexAccountRateLimits = {
+	account: string | null,
+	limits: CodexRateLimits,
 };
 
 /**
@@ -2382,6 +2477,12 @@ export type EnglishLog = {
 	unparsed: number | null,
 	/**  Last-modified time (epoch ms); `None` when the filesystem won't say. */
 	updatedAtMs: number | null,
+};
+
+/**  One environment variable a launch line sets before the CLI. */
+export type EnvVar = {
+	name: string,
+	value: string,
 };
 
 /**
@@ -5018,6 +5119,12 @@ export type WorktreeTab = {
 	 *  predates the column.
 	 */
 	pr: TabPr | null,
+	/**
+	 *  The account the tab's stored session runs on (`terminal_sessions.account`
+	 *  for its key and provider). `None` is the Default account, or no stored
+	 *  session yet.
+	 */
+	account: string | null,
 };
 
 /**

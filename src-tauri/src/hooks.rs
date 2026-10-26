@@ -18,7 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use santree_core::domain::{
-    AgentKind, AgentState, ClaudeRateLimitWindow, SessionState, SessionUsageLive,
+    AgentKind, AgentState, ClaudeAccountRateLimits, ClaudeRateLimitWindow, SessionState,
+    SessionUsageLive,
 };
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -761,17 +762,55 @@ pub async fn session_usage_live(db: &Db) -> Result<Vec<SessionUsageLive>> {
         .collect())
 }
 
-/// Claude's account rate-limit windows as the status line last reported them
-/// (`claude_rate_limits`, one row per window, written by the hook's statusline
-/// mode). Empty until a santree-launched subscriber session has rendered a status
-/// line after its first API response — API-key sessions never report any.
-pub async fn claude_rate_limits(db: &Db) -> Result<Vec<ClaudeRateLimitWindow>> {
-    let rows = sqlx::query_as::<_, (String, f64, Option<i64>, i64)>(
-        "SELECT window, used_pct, resets_at_ms, updated_at_ms \
-         FROM claude_rate_limits ORDER BY window",
-    )
-    .fetch_all(db)
-    .await?;
+/// Every Claude account's rate-limit windows: the Default account first, then
+/// each account on disk in id order — an account with nothing recorded yet is
+/// still listed, with no windows, so a meter row doesn't appear and vanish.
+/// Rows left by a removed account are not shown.
+pub async fn claude_rate_limits(db: &Db) -> Result<Vec<ClaudeAccountRateLimits>> {
+    let mut out = vec![ClaudeAccountRateLimits {
+        account: None,
+        windows: claude_rate_limits_of(db, None).await?,
+    }];
+    for (id, _, _) in crate::accounts::on_disk(AgentKind::Claude) {
+        let windows = claude_rate_limits_of(db, Some(&id)).await?;
+        out.push(ClaudeAccountRateLimits {
+            account: Some(id),
+            windows,
+        });
+    }
+    Ok(out)
+}
+
+/// One account's rate-limit windows as the status line last reported them — or
+/// as the usage endpoint did (`claude_usage.rs` writes the same rows). The
+/// Default account's are `claude_rate_limits`, a named account's
+/// `claude_account_rate_limits`, one row per window, written by the hook's
+/// statusline mode. Empty until a santree-launched subscriber session has
+/// rendered a status line after its first API response — API-key sessions
+/// never report any.
+pub async fn claude_rate_limits_of(
+    db: &Db,
+    account: Option<&str>,
+) -> Result<Vec<ClaudeRateLimitWindow>> {
+    let rows = match account {
+        None => {
+            sqlx::query_as::<_, (String, f64, Option<i64>, i64)>(
+                "SELECT window, used_pct, resets_at_ms, updated_at_ms \
+                 FROM claude_rate_limits ORDER BY window",
+            )
+            .fetch_all(db)
+            .await?
+        }
+        Some(account) => {
+            sqlx::query_as::<_, (String, f64, Option<i64>, i64)>(
+                "SELECT window, used_pct, resets_at_ms, updated_at_ms \
+                 FROM claude_account_rate_limits WHERE account = ? ORDER BY window",
+            )
+            .bind(account)
+            .fetch_all(db)
+            .await?
+        }
+    };
     Ok(rows
         .into_iter()
         .map(

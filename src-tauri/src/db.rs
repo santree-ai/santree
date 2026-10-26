@@ -327,6 +327,7 @@ mod tests {
         (37, "daedalus agent", "9ccad02d013c1eb522f157eacd9abec8dfe829dbcaf20891a2056c118fdf12646c0faf3b29b008e221df062103cd2cf7"),
         (38, "repo connection", "07c317b748f9bf0ccc062a4a5b8feb1a50d2d7da91a1b8ba79d0c53e5fe9698534df37ff2d1e383587a3d4f91b683536"),
         (39, "ticktick", "ed027b987f4a5c5af9fe43a5aa77ee2e09c8f37750023b3633a4402acd90245be70c0869dc554f2df00fc7502c3a2434"),
+        (40, "agent accounts", "1f311f26bb353ff3bcaac830ca8cf63086fdf31cefbe656b455e864008371bc50ef90c4a22b931c39bbefe3bd303dfd9"),
     ];
 
     /// See [`SHIPPED_MIGRATIONS`]. Checked against the embedded set, so it fails at

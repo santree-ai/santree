@@ -38,6 +38,7 @@ import { alpha } from "../../../theme/colors";
 import { agentProvider } from "../../terminal/agentProvider";
 import { LoginTerminal } from "../LoginTerminal";
 import { Block, Heading, KvRow, ToggleRow } from "../widgets";
+import { AgentAccountsBlock } from "./AgentAccounts";
 
 export const ClaudeAgentSection = () => <ProviderSection kind="Claude" name="Claude Code" />;
 export const CodexAgentSection = () => <ProviderSection kind="Codex" name="Codex" />;
@@ -179,6 +180,13 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
         )}
       </Block>
 
+      {kind === "Claude" && (
+        <AgentAccountsBlock
+          kind="Claude"
+          defaultStatus={auth?.account || (auth?.connected ? "Signed in" : "Not signed in")}
+        />
+      )}
+
       <Block
         title={`${def.label} executable path`}
         subtitle="Override the detected executable with a custom one. Leave empty to use the one found on your PATH (recommended)."
@@ -235,6 +243,7 @@ function CodexPanel() {
   const health = useCodexHealth();
   const account = useCodexAccount(health.data?.available === true);
   const limits = useCodexRateLimits(account.data?.connected === true);
+  const defaultLimits = limits.data?.find((a) => a.account === null)?.limits;
   const logout = useCodexLogout();
   const configured = settings?.agents?.find((agent) => agent.key === "Codex");
   const [execDraft, setExecDraft] = useState<string | null>(null);
@@ -315,14 +324,19 @@ function CodexPanel() {
         )}
       </Block>
 
+      <AgentAccountsBlock
+        kind="Codex"
+        defaultStatus={account.data?.connected ? "Signed in" : "Not signed in"}
+      />
+
       <Block
         title="Rate limits"
         subtitle="From Codex's own record of its last turn — it does not update until you run Codex again."
       >
         <div className="overflow-hidden rounded-lg border border-line-3 bg-surface">
-          <KvRow label="Plan" value={limits.data?.plan || "—"} />
-          <KvRow label="Primary" value={formatWindow(limits.data?.primary ?? null)} />
-          <KvRow label="Secondary" value={formatWindow(limits.data?.secondary ?? null)} />
+          <KvRow label="Plan" value={defaultLimits?.plan || "—"} />
+          <KvRow label="Primary" value={formatWindow(defaultLimits?.primary ?? null)} />
+          <KvRow label="Secondary" value={formatWindow(defaultLimits?.secondary ?? null)} />
         </div>
         {limits.error && (
           <div className="mt-2 text-[11px] text-status-amber">{limits.error.message}</div>

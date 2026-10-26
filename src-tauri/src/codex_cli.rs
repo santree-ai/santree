@@ -27,6 +27,7 @@
 //! here either: see [`crate::codex_rollouts::latest_rate_limits`] for the one
 //! source that needs neither a server nor a credential.
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -73,8 +74,11 @@ pub async fn health(executable: Option<String>) -> CodexHealth {
 /// santree matches the "Logged in" prefix and reports the method verbatim rather
 /// than mapping it to an enum, so a new auth method Codex adds shows up as
 /// itself instead of as "unknown".
-pub async fn account(executable: &str) -> Result<CodexAccount> {
-    let out = run_streams(executable, &["login", "status"]).await?;
+///
+/// `home` is one of santree's account folders, run as `CODEX_HOME`; `None` asks
+/// about the Default account, in whatever home Codex resolves for itself.
+pub async fn account(executable: &str, home: Option<&Path>) -> Result<CodexAccount> {
+    let out = run_streams_in(executable, &["login", "status"], home).await?;
     // `codex login status` prints its answer on **stderr** and leaves stdout
     // empty (verified against 0.151.0: `stdout[0] b""`, `stderr[24] b"Logged in
     // using ChatGPT\n"`, exit 0). Reading stdout alone reported every signed-in
@@ -234,7 +238,16 @@ struct Streams {
 }
 
 async fn run_streams(executable: &str, args: &[&str]) -> Result<Streams> {
-    let mut child = tokio::process::Command::new(executable)
+    run_streams_in(executable, args, None).await
+}
+
+/// [`run_streams`] with `CODEX_HOME` set to `home`, when given.
+async fn run_streams_in(executable: &str, args: &[&str], home: Option<&Path>) -> Result<Streams> {
+    let mut command = tokio::process::Command::new(executable);
+    if let Some(home) = home {
+        command.env("CODEX_HOME", home);
+    }
+    let mut child = command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

@@ -266,6 +266,7 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
         agentKind: resolvedAgent,
         title: defaultTabTitle(kind, resolvedAgent, rows),
         pr: null,
+        account: null,
       });
       show(checkoutTab(id));
     },

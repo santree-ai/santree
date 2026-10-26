@@ -135,6 +135,7 @@ function CodexUsagePanel() {
   const health = useCodexHealth();
   const account = useCodexAccount(health.data?.available === true);
   const limits = useCodexRateLimits(account.data?.connected === true);
+  const defaultLimits = limits.data?.find((a) => a.account === null)?.limits;
 
   if (health.isLoading || account.isLoading || limits.isLoading) {
     return (
@@ -174,18 +175,18 @@ function CodexUsagePanel() {
           <span className="text-muted-3">Signed in with</span>
           <span className="text-fg-2">{account.data.authType || "Codex CLI"}</span>
           <span className="text-muted-3">Plan</span>
-          <span className="text-fg-2">{limits.data?.plan || "Unavailable"}</span>
+          <span className="text-fg-2">{defaultLimits?.plan || "Unavailable"}</span>
         </div>
       </Card>
       <Card title="Rate limits">
         <div className="flex flex-col gap-2 text-[12px]">
           <div className="grid grid-cols-[7rem_1fr] gap-x-4">
             <span className="text-muted-3">Primary</span>
-            <span className="text-fg-2">{formatCodexWindow(limits.data?.primary ?? null)}</span>
+            <span className="text-fg-2">{formatCodexWindow(defaultLimits?.primary ?? null)}</span>
           </div>
           <div className="grid grid-cols-[7rem_1fr] gap-x-4">
             <span className="text-muted-3">Secondary</span>
-            <span className="text-fg-2">{formatCodexWindow(limits.data?.secondary ?? null)}</span>
+            <span className="text-fg-2">{formatCodexWindow(defaultLimits?.secondary ?? null)}</span>
           </div>
         </div>
       </Card>

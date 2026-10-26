@@ -42,6 +42,7 @@ import {
 } from "../../lib/queries";
 import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
+import { useTabAccounts } from "./useTabAccounts";
 import { useTabSessions } from "./useTabSessions";
 
 export function MainTabBar({
@@ -78,6 +79,7 @@ export function MainTabBar({
   } = useTrees();
   const provider = useTicketProvider(repo);
   const { closeWithSession } = useTabSessions(activeId, tabs, closeTab);
+  const { menuFor, detailFor } = useTabAccounts(repo, activeId, tabs);
   const isBase = activeId === BASE_ID;
 
   // One list, so the fit/hide decision sees every tab — the persisted rows and
@@ -96,6 +98,8 @@ export function MainTabBar({
         ),
       onClose: () => closeWithSession(t),
       onRename: (title: string) => renameTab(t.id, title),
+      menu: menuFor(t),
+      detail: detailFor(t),
     })),
     ...(prViewOpen
       ? [

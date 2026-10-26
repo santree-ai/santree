@@ -14,6 +14,15 @@
  * mark and nothing else: a pool with thousands of headroom is not worth the
  * width, so its numbers wait behind the click (see `ServiceBudgets`).
  *
+ * A provider with more than one login (Settings → Agents) shows only the one new
+ * sessions use in the bar — named, unless it is the Default — and every login in
+ * the panel, where a click on one makes it the account the next session starts
+ * on. That is the whole switcher: one place, behind the number you check before
+ * starting work. A running tab never moves from here (that is its own
+ * "Continue on …"), and santree never switches on its own (COMPLIANCE.md,
+ * "Agent accounts") — when the chosen login is nearly spent, the one with the
+ * most room left only says so.
+ *
  * The panel lists each provider on its own row — always both, a provider with
  * nothing to report saying so rather than vanishing — then each service that
  * actually answered, then the doors to the full history and the accounts. A
@@ -34,19 +43,24 @@
 import { useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useMemo, useState } from "react";
 
-import type { ClaudeRateLimitWindow, CodexRateLimits } from "../../../bindings";
+import type { AgentAccount, ClaudeUsageFetch } from "../../../bindings";
 import { formatUntil } from "../../../lib/format";
 import {
+  AGENT_ACCOUNT_KEY,
+  providerSettingKey,
+  useAgentAccounts,
   useClaudeAccountUsage,
   useClaudeGlobalCapture,
   useClaudeRateLimits,
   useCodexAccount,
   useCodexHealth,
   useCodexRateLimits,
+  useSetSetting,
+  useSetting,
 } from "../../../lib/queries";
 import { useLiveNow } from "../../../lib/relativeTime";
 import { agentBrandColor } from "../../../theme/colors";
-import { AgentIcon, ChevronRightIcon, RefreshIcon } from "../../icons";
+import { AgentIcon, CheckIcon, ChevronRightIcon, RefreshIcon } from "../../icons";
 import { Dropdown } from "../../primitives";
 import { BudgetLine } from "./BudgetLine";
 import {
@@ -56,34 +70,48 @@ import {
   useServiceBudgets,
 } from "./ServiceBudgets";
 import { StatusButton } from "./StatusSegment";
+import { claudeWindows, codexWindows, meterColor, type UsageWindow } from "./usageWindows";
 
 type Kind = "Claude" | "Codex";
 
-/** Warn/critical thresholds shared with the terminal bar and the tree status
- *  line, so one fill never reads as two different levels of urgent. Below the
- *  warn point the fill stays muted: an unremarkable meter should look like it. */
-function meterColor(pct: number): string {
-  if (pct >= 80) return "var(--color-status-red)";
-  if (pct >= 60) return "var(--color-status-amber)";
-  return "var(--color-muted-4)";
-}
-
-/** One rate-limit window, provider-neutral. */
-interface Window {
-  /** "5h", "wk", a model name — what the window is, in a word, for the bar. */
-  label: string;
-  /** The same thing spelled out, for the panel's labelled rows. */
-  longLabel: string;
-  pct: number;
-  resetsAtMs: number | null;
-}
-
 interface ProviderUsage {
+  /** Unique per row: the provider and the account. */
+  key: string;
   kind: Kind;
   name: string;
-  windows: Window[];
+  /** The login's id; `null` is the Default. */
+  id: string | null;
+  /** Which login the row meters, by its label — `null` while the Default is
+   *  the only one shown, so a one-account bar reads exactly as it always has. */
+  account: string | null;
+  /** Whether a provider has more than one login, i.e. whether there is
+   *  anything to pick between. */
+  choosable: boolean;
+  /** The login new sessions of this provider start on. */
+  current: boolean;
+  /** Not signed in: nothing could launch on it, so it can't be picked. */
+  signedOut: boolean;
+  windows: UsageWindow[];
   /** Why there is nothing to show, when the provider itself said. */
   note: string | null;
+}
+
+/** At or past this, the chosen login is about to stop a session mid-work. */
+const NEARLY_FULL = 90;
+
+const fullest = (windows: UsageWindow[]) => Math.max(0, ...windows.map((w) => w.pct));
+
+/** The row to point at when the provider's current login is nearly spent: the
+ *  signed-in one with the most room in its fullest window. Only rows with
+ *  numbers — "no data" is not "room". */
+function roomiest(rows: ProviderUsage[]): string | undefined {
+  const current = rows.find((r) => r.current);
+  if (!current || fullest(current.windows) < NEARLY_FULL) return undefined;
+  const others = rows.filter(
+    (r) => !r.current && !r.signedOut && r.windows.length > 0 && fullest(r.windows) < NEARLY_FULL,
+  );
+  if (others.length === 0) return undefined;
+  return others.reduce((best, r) => (fullest(r.windows) < fullest(best.windows) ? r : best)).key;
 }
 
 /** The bar's fixed-width track — the panel's rows use the shared `BudgetLine`,
@@ -102,7 +130,7 @@ function Meter({ pct }: { pct: number }) {
 
 /** "31% used 1h 38m" — a window as the bar spells it; the label rides along only
  *  when it isn't one of the two everyone has. */
-function barText(w: Window, nowMs: number): string {
+function barText(w: UsageWindow, nowMs: number): string {
   const used = `${w.pct}% used`;
   // A model-scoped window (Fable, Opus) says which model instead of when it
   // resets: it rolls over with the weekly window whose countdown is already on
@@ -116,122 +144,116 @@ function isStandardWindow(label: string): boolean {
   return label === "5h" || label === "wk";
 }
 
-/** A window's name spelled out, for a labelled row: "5h" is enough beside a bar
- *  three characters wide, but as the label column of its own row it reads like a
- *  truncation. A name that isn't a duration (a model's) is already a word. */
-function spellOut(label: string): string {
-  if (label === "wk") return "Weekly";
-  const parsed = /^(\d+)([dhm])$/.exec(label);
-  if (!parsed) return label;
-  const n = Number(parsed[1]);
-  if (parsed[2] === "m") return `${n} min`;
-  const unit = parsed[2] === "d" ? "day" : "hour";
-  return `${n} ${unit}${n === 1 ? "" : "s"}`;
+/** Why an account's Claude row is empty, when Anthropic said. Only once it has
+ *  actually been asked: "not signed in" is a claim, and while the first read is
+ *  in flight we don't know it yet. The `detail` is the specific reason (an HTTP
+ *  code, a transport error) and never carries anything secret. */
+function claudeNote(windows: UsageWindow[], usage: ClaudeUsageFetch | undefined): string | null {
+  const status = usage?.status;
+  if (windows.length > 0 || !status) return null;
+  if (status === "NoCredentials") return "Sign in to Claude Code to see usage";
+  if (status === "Unauthorized") return "Claude Code needs signing in again";
+  if (status === "Unavailable") return usage?.detail ?? "Anthropic didn't answer";
+  return null;
 }
 
-/** Claude's windows, by the names the CLI reports them under: the session and
- *  weekly ones first, then anything else (a per-model weekly window, say) by its
- *  own name with the `seven_day_` prefix dropped and the first letter raised. */
-function claudeWindows(rows: ClaudeRateLimitWindow[] | undefined): Window[] {
-  const order = ["five_hour", "seven_day"];
-  const rank = (w: string) => (order.includes(w) ? order.indexOf(w) : 99);
-  return (rows ?? [])
-    .filter((r) => r.usedPct !== null)
-    .sort((a, b) => rank(a.window) - rank(b.window) || a.window.localeCompare(b.window))
-    .map((r) => {
-      const bare = r.window.replace(/^seven_day_/, "");
-      const label =
-        r.window === "five_hour"
-          ? "5h"
-          : r.window === "seven_day"
-            ? "wk"
-            : bare.charAt(0).toUpperCase() + bare.slice(1);
-      return {
-        label,
-        longLabel: spellOut(label),
-        pct: Math.round(r.usedPct ?? 0),
-        resetsAtMs: r.resetsAtMs,
-      };
-    });
-}
-
-/** Codex reports window length in minutes, and a weekly window is 10080 of them. */
-function codexLabel(minutes: number | null, fallback: string): string {
-  if (!minutes) return fallback;
-  if (minutes >= 10_000) return "wk";
-  if (minutes >= 1440) return `${Math.round(minutes / 1440)}d`;
-  if (minutes >= 60) return `${Math.round(minutes / 60)}h`;
-  return `${minutes}m`;
-}
-
-function codexWindows(limits: CodexRateLimits | undefined): Window[] {
-  if (!limits) return [];
-  const out: Window[] = [];
-  const pairs: [CodexRateLimits["primary"], string][] = [
-    [limits.primary, "5h"],
-    [limits.secondary, "wk"],
-  ];
-  for (const [w, fallback] of pairs) {
-    if (!w || typeof w.usedPercent !== "number") continue;
-    // Epoch seconds and epoch millis both appear on the wire, told apart by scale.
-    const reset =
-      w.resetsAt === null ? null : w.resetsAt < 10_000_000_000 ? w.resetsAt * 1_000 : w.resetsAt;
-    const label = codexLabel(w.windowMinutes, fallback);
-    out.push({
-      label,
-      longLabel: spellOut(label),
-      pct: Math.min(100, Math.round(w.usedPercent)),
-      resetsAtMs: reset,
-    });
-  }
-  return out;
-}
-
-/** Every provider's usage, always both, in a fixed order. */
+/** Every provider's usage, in a fixed order: each provider's Default account —
+ *  always both, a provider with nothing to report saying so — then each of
+ *  santree's own accounts that has something to show, is signed in, or is the
+ *  one new sessions use. */
 function useProviderUsage(): {
   providers: ProviderUsage[];
   refresh: () => void;
   fetching: boolean;
+  choose: (kind: Kind, id: string | null) => void;
 } {
+  const chosenClaude =
+    useSetting("app", providerSettingKey(AGENT_ACCOUNT_KEY, "Claude")).data ?? "";
+  const chosenCodex = useSetting("app", providerSettingKey(AGENT_ACCOUNT_KEY, "Codex")).data ?? "";
+  const { mutate: setSetting } = useSetSetting();
   // Anthropic's own answer leads: it needs no session to have run, so it is
   // what fills the meters on a cold start. The stored rows (what the status
   // line captured) stand in while it loads — and are what the command itself
   // returns when there is no credential to ask with.
   const account = useClaudeAccountUsage();
   const stored = useClaudeRateLimits();
+  const claudeAccounts = useAgentAccounts("Claude");
   const health = useCodexHealth();
   const codexAccount = useCodexAccount(health.data?.available === true);
-  const codex = useCodexRateLimits(codexAccount.data?.connected === true);
+  const codexAccounts = useAgentAccounts("Codex", health.data?.available === true);
+  const codex = useCodexRateLimits(
+    codexAccount.data?.connected === true || !!codexAccounts.data?.some((a) => a.signedIn),
+  );
 
   const providers = useMemo<ProviderUsage[]>(() => {
-    // Not `account.data?.windows ?? stored.data`: an account read that failed —
-    // rate-limited, signed out, offline — answers with an *empty* list, and `[]`
-    // is not nullish, so that spelling silently shadowed the statusline rows and
-    // defeated the whole point of having a second source.
-    const fetched = claudeWindows(account.data?.windows);
-    const claudeW = fetched.length > 0 ? fetched : claudeWindows(stored.data);
-    // Only say why once Anthropic has actually been asked: "not signed in" is a
-    // claim, and while the first read is in flight we don't know it yet. The
-    // `detail` is the specific reason (an HTTP code, a transport error) and
-    // never carries anything secret.
-    const status = account.data?.status;
-    const detail = account.data?.detail ?? null;
-    const note =
-      claudeW.length > 0 || !status
-        ? null
-        : status === "NoCredentials"
-          ? "Sign in to Claude Code to see usage"
-          : status === "Unauthorized"
-            ? "Claude Code needs signing in again"
-            : status === "Unavailable"
-              ? (detail ?? "Anthropic didn't answer")
-              : null;
-    const codexW = codexWindows(codex.data);
+    const claudeRow = (id: string | null) => {
+      // Not `fetched ?? stored`: an account read that failed — rate-limited,
+      // signed out, offline — answers with an *empty* list, and `[]` is not
+      // nullish, so that spelling silently shadowed the statusline rows and
+      // defeated the whole point of having a second source.
+      const usage = account.data?.find((a) => a.account === id)?.fetch;
+      const fetched = claudeWindows(usage?.windows);
+      const windows =
+        fetched.length > 0
+          ? fetched
+          : claudeWindows(stored.data?.find((a) => a.account === id)?.windows);
+      return { windows, note: claudeNote(windows, usage) };
+    };
+    const codexRow = (id: string | null) => ({
+      windows: codexWindows(codex.data?.find((a) => a.account === id)?.limits),
+      note: null,
+    });
+    const chosen: Record<Kind, string> = { Claude: chosenClaude, Codex: chosenCodex };
+    const rows = (
+      kind: Kind,
+      accounts: AgentAccount[] | undefined,
+      read: (id: string | null) => { windows: UsageWindow[]; note: string | null },
+    ): ProviderUsage[] => {
+      const extra = (accounts ?? [])
+        .map((a) => ({ a, usage: read(a.id) }))
+        .filter(({ a, usage }) => a.signedIn || usage.windows.length > 0 || a.id === chosen[kind]);
+      const choosable = extra.length > 0;
+      // A setting naming an account that is gone launches on the Default.
+      const currentId = extra.some(({ a }) => a.id === chosen[kind]) ? chosen[kind] : null;
+      return [
+        // The Default is named only once there is another login beside it.
+        {
+          key: `${kind}:`,
+          kind,
+          name: kind,
+          id: null,
+          account: choosable ? "Default" : null,
+          choosable,
+          current: currentId === null,
+          signedOut: false,
+          ...read(null),
+        },
+        ...extra.map(({ a, usage }) => ({
+          key: `${kind}:${a.id}`,
+          kind,
+          name: kind,
+          id: a.id,
+          account: a.label,
+          choosable,
+          current: a.id === currentId,
+          signedOut: !a.signedIn,
+          ...usage,
+        })),
+      ];
+    };
     return [
-      { kind: "Claude", name: "Claude", windows: claudeW, note },
-      { kind: "Codex", name: "Codex", windows: codexW, note: null },
+      ...rows("Claude", claudeAccounts.data, claudeRow),
+      ...rows("Codex", codexAccounts.data, codexRow),
     ];
-  }, [account.data, stored.data, codex.data]);
+  }, [
+    account.data,
+    stored.data,
+    codex.data,
+    claudeAccounts.data,
+    codexAccounts.data,
+    chosenClaude,
+    chosenCodex,
+  ]);
 
   return {
     providers,
@@ -240,6 +262,8 @@ function useProviderUsage(): {
       void codex.refetch();
     },
     fetching: account.isFetching || codex.isFetching,
+    choose: (kind, id) =>
+      setSetting({ scope: "app", key: providerSettingKey(AGENT_ACCOUNT_KEY, kind), value: id }),
   };
 }
 
@@ -262,11 +286,25 @@ function Mark({ kind, size = 11 }: { kind: Kind; size?: number }) {
 /** One provider in the bar: its mark, then — when it has anything — the fullest
  *  window's track and every window's text. */
 function BarProvider({ p, nowMs }: { p: ProviderUsage; nowMs: number }) {
-  if (p.windows.length === 0) return <Mark kind={p.kind} />;
+  // The bar shows only the login new sessions use, and names it only when it is
+  // not the Default — the one-account bar reads exactly as it always has.
+  const account = p.id !== null && p.account && (
+    <span className="text-[10.5px] whitespace-nowrap text-muted-4">{p.account}</span>
+  );
+  if (p.windows.length === 0)
+    return account ? (
+      <span className="flex items-center gap-1.5">
+        <Mark kind={p.kind} />
+        {account}
+      </span>
+    ) : (
+      <Mark kind={p.kind} />
+    );
   const pct = Math.min(100, Math.max(...p.windows.map((w) => w.pct)));
   return (
     <span className="flex items-center gap-1.5">
       <Mark kind={p.kind} />
+      {account}
       <Meter pct={pct} />
       <span className="flex items-center gap-1.5 text-[10.5px] tabular-nums whitespace-nowrap">
         {p.windows.map((w, i) => (
@@ -294,17 +332,40 @@ function ProviderRow({
   p,
   nowMs,
   onOpen,
+  onChoose,
+  mostRoom,
 }: {
   p: ProviderUsage;
   nowMs: number;
   onOpen: () => void;
+  /** Make this login the one new sessions use. */
+  onChoose: () => void;
+  /** The current login is nearly spent and this one has the most room left. */
+  mostRoom: boolean;
 }) {
   const empty = p.windows.length === 0;
+  // With one login there is nothing to pick, so the row is the door to the
+  // usage history it always was; with several, a click picks.
+  const choice = p.choosable
+    ? {
+        role: "menuitemradio" as const,
+        "aria-checked": p.current,
+        disabled: p.signedOut,
+        title: p.signedOut
+          ? "Sign in under Settings → Agents first"
+          : p.current
+            ? "New sessions start on this account"
+            : "Use for new sessions",
+        onClick: () => {
+          if (!p.current) onChoose();
+        },
+      }
+    : { onClick: onOpen };
   return (
     <button
       type="button"
-      onClick={onOpen}
-      className="flex w-full cursor-pointer flex-col gap-1 rounded-md px-2 py-1.5 text-left hover:bg-hover"
+      {...choice}
+      className="flex w-full cursor-pointer flex-col gap-1 rounded-md px-2 py-1.5 text-left hover:bg-hover focus-visible:bg-hover disabled:cursor-default disabled:opacity-60"
     >
       <span className="flex items-center gap-2.5">
         {/* A tile, not a bare glyph: it fixes the icon column's width whatever
@@ -315,6 +376,7 @@ function ProviderRow({
           <Mark kind={p.kind} size={13} />
         </span>
         <span className="text-[12.5px] font-semibold text-fg">{p.name}</span>
+        {p.account && <span className="flex-none text-[11.5px] text-muted-3">{p.account}</span>}
         {/* Titled as well as shown: a reason can be longer than the column (an
             HTTP code, a transport error), and truncating away the one actionable
             part of an empty row is how this went unexplained. Say why when the
@@ -322,10 +384,22 @@ function ProviderRow({
             to do about it. */}
         {empty && (
           <span className="min-w-0 truncate text-[11px] text-muted-4" title={p.note ?? undefined}>
-            {p.note ?? "No usage data"}
+            {p.signedOut ? "Signed out" : (p.note ?? "No usage data")}
           </span>
         )}
-        <ChevronRightIcon size={12} className="ml-auto flex-none text-muted-4" />
+        {p.choosable ? (
+          <span className="ml-auto flex flex-none items-center gap-1.5 text-[11px] text-muted-3">
+            {mostRoom && <span>most room</span>}
+            {p.current && (
+              <>
+                <span>in use</span>
+                <CheckIcon size={12} className="text-fg" />
+              </>
+            )}
+          </span>
+        ) : (
+          <ChevronRightIcon size={12} className="ml-auto flex-none text-muted-4" />
+        )}
       </span>
       {!empty && (
         <span className="flex flex-col gap-1">
@@ -368,6 +442,7 @@ function UsagePanel({
   services,
   refresh,
   fetching,
+  choose,
   nowMs,
   close,
 }: {
@@ -375,12 +450,21 @@ function UsagePanel({
   services: ServiceBudget[];
   refresh: () => void;
   fetching: boolean;
+  choose: (kind: Kind, id: string | null) => void;
   nowMs: number;
   close: () => void;
 }) {
+  const hints = new Set(
+    (["Claude", "Codex"] as const).map((kind) =>
+      roomiest(providers.filter((p) => p.kind === kind)),
+    ),
+  );
   const navigate = useNavigate();
   const capture = useClaudeGlobalCapture();
-  const claudeEmpty = providers.some((p) => p.kind === "Claude" && p.windows.length === 0);
+  // The Default account's row: a session on another login reports through the
+  // status line santree layers onto it, so the global capture is only about
+  // the Default's sessions started elsewhere.
+  const claudeEmpty = providers.some((p) => p.key === "Claude:" && p.windows.length === 0);
   // Claude's windows only arrive when a session redraws its status line. Until
   // santree wraps the user's global one, only sessions santree started count —
   // the one reason the row can sit empty while Claude is busy elsewhere.
@@ -415,7 +499,14 @@ function UsagePanel({
           past the text without moving the text itself. */}
       <div className="flex flex-col border-t border-line px-1 py-1">
         {providers.map((p) => (
-          <ProviderRow key={p.kind} p={p} nowMs={nowMs} onOpen={go("usage")} />
+          <ProviderRow
+            key={p.key}
+            p={p}
+            nowMs={nowMs}
+            onOpen={go("usage")}
+            onChoose={() => choose(p.kind, p.id)}
+            mostRoom={hints.has(p.key)}
+          />
         ))}
       </div>
       {/* The capture note explains the Claude row above it, so it stays next to
@@ -448,18 +539,24 @@ function UsagePanel({
 /** The bar's usage cluster, and the panel it opens. */
 export function UsageSegment() {
   const [open, setOpen] = useState(false);
-  const { providers, refresh: refreshProviders, fetching } = useProviderUsage();
+  const { providers, refresh: refreshProviders, fetching, choose } = useProviderUsage();
   // Only while the panel is open: reading Linear's budget can cost a request
   // (it only reports one in a response), and the bar shows no service numbers
   // to keep fresh.
   const services = useServiceBudgets(open);
   const nowMs = useLiveNow();
-  const summary = providers
+  const inUse = providers.filter((p) => p.current);
+  const summary = inUse
     .filter((p) => p.windows.length > 0)
-    .map((p) => `${p.name}: ${p.windows.map((w) => `${w.pct}% ${w.label}`).join(", ")}`)
+    .map(
+      (p) =>
+        `${p.name}${p.id !== null ? ` (${p.account})` : ""}: ${p.windows
+          .map((w) => `${w.pct}% ${w.label}`)
+          .join(", ")}`,
+    )
     .join(" · ");
   const label = `${summary ? `Usage — ${summary}` : "Usage"} · GitHub and Linear API budgets`;
-  const bar: ReactNode = providers.map((p) => <BarProvider key={p.kind} p={p} nowMs={nowMs} />);
+  const bar: ReactNode = inUse.map((p) => <BarProvider key={p.key} p={p} nowMs={nowMs} />);
   const busy = fetching || services.fetching;
   const refresh = () => {
     refreshProviders();
@@ -494,6 +591,7 @@ export function UsageSegment() {
             services={services.services}
             refresh={refresh}
             fetching={busy}
+            choose={choose}
             nowMs={nowMs}
             close={close}
           />

@@ -129,6 +129,7 @@ async fn resolve(
             effort,
             surface: SessionSurface::Work,
             review_mcp_config: None,
+            account: None,
         },
     )
     .await
@@ -338,6 +339,8 @@ async fn launching_an_agent_writes_its_hooks_on_the_box_and_runs_it_there() {
             executable: "claude".into(),
             session_id: id,
             launch_flags: String::new(),
+            launch_env: Vec::new(),
+            account: None,
         }
     );
 

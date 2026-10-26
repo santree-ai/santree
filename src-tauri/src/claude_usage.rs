@@ -18,13 +18,21 @@
 //!   SQLite. No type here derives `Debug` or `Serialize` over it.
 //! * **Display-only.** What comes back is a number for a meter. Nothing derived
 //!   from it is ever written toward a session, same bound as the status line.
-use std::path::PathBuf;
+//! * **Each account its own.** The Default account's token comes from Claude
+//!   Code's own item; one of santree's accounts' only from the item Claude made
+//!   for that account's folder, or that folder's file — never the Default's, so
+//!   one login's numbers can never be shown as another's.
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use santree_core::domain::{ClaudeRateLimitWindow, ClaudeUsageFetch, ClaudeUsageStatus};
+use santree_core::domain::{
+    AgentKind, ClaudeAccountUsage, ClaudeRateLimitWindow, ClaudeUsageFetch, ClaudeUsageStatus,
+};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::db::Db;
 
@@ -51,6 +59,44 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// The generic-password service Claude Code stores its credentials under.
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Which login a read is for. A named account carries its folder exactly as
+/// the launch hands it to Claude (`accounts::dir_string`).
+#[derive(Clone)]
+enum Account {
+    Default,
+    Named { id: String, dir: String },
+}
+
+/// The keychain item Claude Code keeps a config folder's credentials under when
+/// `CLAUDE_CONFIG_DIR` names one: the base service, a dash, and the first eight
+/// hex digits of the SHA-256 of the folder string as it was passed (NFC).
+/// Measured against Claude Code 2.1, not documented, hence the pin in tests.
+fn keychain_service_for(dir: &str) -> String {
+    let normalized: String = dir.nfc().collect();
+    let digest = Sha256::digest(normalized.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{KEYCHAIN_SERVICE}-{}", &hex[..8])
+}
+
+/// Where an account's token may be read from, in order.
+enum Source {
+    Keychain(String),
+    File(PathBuf),
+}
+
+/// Every place [`read_token`] looks for `account`'s token. A named account's
+/// list never names the unscoped item or the Default folder: falling back to
+/// either would show the Default login's usage under another account's name.
+fn sources(account: &Account) -> Vec<Source> {
+    match account {
+        Account::Default => default_sources(config_dir()),
+        Account::Named { dir, .. } => vec![
+            Source::Keychain(keychain_service_for(dir)),
+            Source::File(Path::new(dir).join(".credentials.json")),
+        ],
+    }
+}
 
 // ── Credentials ─────────────────────────────────────────────────────────────
 
@@ -88,13 +134,28 @@ fn config_dir() -> Option<PathBuf> {
     crate::global_capture::claude_config_dir()
 }
 
-/// Read the login keychain's Claude Code credentials.
+/// The Default account's [`sources`], given Claude's config folder as santree
+/// resolved it. The other direction of the same rule: a config folder inside
+/// santree's accounts root is an account's, whatever the environment said, and
+/// its file is never read as the Default login's.
+fn default_sources(config_dir: Option<PathBuf>) -> Vec<Source> {
+    let mut out = vec![Source::Keychain(KEYCHAIN_SERVICE.to_string())];
+    out.extend(
+        config_dir
+            .filter(|dir| !crate::accounts::inside_accounts_root(dir))
+            .map(|dir| Source::File(dir.join(".credentials.json"))),
+    );
+    out
+}
+
+/// Read the login keychain's Claude Code credentials under `service`.
 ///
-/// `security` is invoked with a fixed argv — the service name is a constant and
-/// the account comes from the process's own user, never from IPC. A prompt or a
-/// hung keychain is bounded by [`KEYCHAIN_TIMEOUT`]; the failure is silent
-/// because "no credential" is an ordinary state, not an error to report.
-fn keychain_credentials() -> Option<String> {
+/// `security` is invoked with a fixed argv — the service name is a constant, or
+/// derived from an account folder santree itself made, and the account comes
+/// from the process's own user, never from IPC. A prompt or a hung keychain is
+/// bounded by [`KEYCHAIN_TIMEOUT`]; the failure is silent because "no
+/// credential" is an ordinary state, not an error to report.
+fn keychain_credentials(service: &str) -> Option<String> {
     let user = std::env::var("USER").ok();
     // With the account first (how Claude Code writes it), then without: an item
     // stored under a different account name is still ours to read.
@@ -103,7 +164,7 @@ fn keychain_credentials() -> Option<String> {
             vec![
                 "find-generic-password".into(),
                 "-s".into(),
-                KEYCHAIN_SERVICE.into(),
+                service.into(),
                 "-a".into(),
                 u.clone(),
                 "-w".into(),
@@ -111,14 +172,14 @@ fn keychain_credentials() -> Option<String> {
             vec![
                 "find-generic-password".into(),
                 "-s".into(),
-                KEYCHAIN_SERVICE.into(),
+                service.into(),
                 "-w".into(),
             ],
         ],
         None => vec![vec![
             "find-generic-password".into(),
             "-s".into(),
-            KEYCHAIN_SERVICE.into(),
+            service.into(),
             "-w".into(),
         ]],
     };
@@ -159,20 +220,18 @@ fn keychain_credentials() -> Option<String> {
     None
 }
 
-/// `<config dir>/.credentials.json` — where Claude Code keeps credentials when
-/// the keychain isn't used.
-fn file_credentials() -> Option<String> {
-    let path = config_dir()?.join(".credentials.json");
-    std::fs::read_to_string(path).ok()
-}
-
-/// Claude Code's current access token, keychain first, file second. Blocking, so
+/// An account's current access token, from the first of its [`sources`] that
+/// has one — the keychain first, then `<config dir>/.credentials.json`, where
+/// Claude Code keeps credentials when the keychain isn't used. Blocking, so
 /// callers run it off the async runtime.
-fn read_token() -> Option<String> {
-    keychain_credentials()
-        .as_deref()
-        .and_then(access_token)
-        .or_else(|| file_credentials().as_deref().and_then(access_token))
+fn read_token(account: &Account) -> Option<String> {
+    sources(account).into_iter().find_map(|source| {
+        let raw = match source {
+            Source::Keychain(service) => keychain_credentials(&service),
+            Source::File(path) => std::fs::read_to_string(path).ok(),
+        };
+        raw.as_deref().and_then(access_token)
+    })
 }
 
 // ── The endpoint's answer ───────────────────────────────────────────────────
@@ -329,23 +388,37 @@ fn now_ms() -> f64 {
 }
 
 /// Write the windows to the same table the status-line capture writes, so both
-/// sources feed one store and one reader.
-async fn store(db: &Db, windows: &[ClaudeRateLimitWindow]) -> Result<()> {
+/// sources feed one store and one reader: the Default account's to
+/// `claude_rate_limits`, a named account's to `claude_account_rate_limits`.
+async fn store(db: &Db, account: &Account, windows: &[ClaudeRateLimitWindow]) -> Result<()> {
     for w in windows {
-        sqlx::query(
-            "INSERT INTO claude_rate_limits (window, used_pct, resets_at_ms, updated_at_ms) \
-             VALUES (?, ?, ?, ?) \
-             ON CONFLICT(window) DO UPDATE SET \
-               used_pct = excluded.used_pct, \
-               resets_at_ms = excluded.resets_at_ms, \
-               updated_at_ms = excluded.updated_at_ms",
-        )
-        .bind(&w.window)
-        .bind(w.used_pct)
-        .bind(w.resets_at_ms.map(|ms| ms as i64))
-        .bind(w.updated_at_ms as i64)
-        .execute(db)
-        .await?;
+        let upsert = match account {
+            Account::Default => sqlx::query(
+                "INSERT INTO claude_rate_limits (window, used_pct, resets_at_ms, updated_at_ms) \
+                 VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(window) DO UPDATE SET \
+                   used_pct = excluded.used_pct, \
+                   resets_at_ms = excluded.resets_at_ms, \
+                   updated_at_ms = excluded.updated_at_ms",
+            ),
+            Account::Named { id, .. } => sqlx::query(
+                "INSERT INTO claude_account_rate_limits \
+                   (account, window, used_pct, resets_at_ms, updated_at_ms) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT(account, window) DO UPDATE SET \
+                   used_pct = excluded.used_pct, \
+                   resets_at_ms = excluded.resets_at_ms, \
+                   updated_at_ms = excluded.updated_at_ms",
+            )
+            .bind(id.clone()),
+        };
+        upsert
+            .bind(&w.window)
+            .bind(w.used_pct)
+            .bind(w.resets_at_ms.map(|ms| ms as i64))
+            .bind(w.updated_at_ms as i64)
+            .execute(db)
+            .await?;
     }
     Ok(())
 }
@@ -371,12 +444,50 @@ fn usage_endpoint(raw: &str) -> Option<reqwest::Url> {
 }
 
 /// failures to toast. A real `Err` means the database write failed.
-pub async fn fetch(db: &Db) -> Result<ClaudeUsageFetch> {
-    let Some(token) = tokio::task::spawn_blocking(read_token).await.ok().flatten() else {
+///
+/// One read per account — the Default one first, then each of santree's Claude
+/// accounts — each with its own token, side by side.
+pub async fn fetch(db: &Db) -> Result<Vec<ClaudeAccountUsage>> {
+    let accounts = std::iter::once(Account::Default).chain(
+        crate::accounts::on_disk(AgentKind::Claude)
+            .into_iter()
+            .map(|(id, _, dir)| Account::Named {
+                id,
+                dir: crate::accounts::dir_string(&dir),
+            }),
+    );
+    let reads = accounts.map(|account| async move {
+        let fetch = fetch_one(db, &account).await?;
+        Ok::<_, anyhow::Error>(ClaudeAccountUsage {
+            account: match account {
+                Account::Default => None,
+                Account::Named { id, .. } => Some(id),
+            },
+            fetch,
+        })
+    });
+    futures::future::join_all(reads).await.into_iter().collect()
+}
+
+/// [`fetch`] for one account.
+async fn fetch_one(db: &Db, account: &Account) -> Result<ClaudeUsageFetch> {
+    let stored = || async {
+        let id = match account {
+            Account::Default => None,
+            Account::Named { id, .. } => Some(id.as_str()),
+        };
+        crate::hooks::claude_rate_limits_of(db, id)
+            .await
+            .unwrap_or_default()
+    };
+    let reading = account.clone();
+    let Some(token) = tokio::task::spawn_blocking(move || read_token(&reading))
+        .await
+        .ok()
+        .flatten()
+    else {
         return Ok(ClaudeUsageFetch {
-            windows: crate::hooks::claude_rate_limits(db)
-                .await
-                .unwrap_or_default(),
+            windows: stored().await,
             status: ClaudeUsageStatus::NoCredentials,
             detail: None,
         });
@@ -415,9 +526,7 @@ pub async fn fetch(db: &Db) -> Result<ClaudeUsageFetch> {
         || response.status() == reqwest::StatusCode::FORBIDDEN
     {
         return Ok(ClaudeUsageFetch {
-            windows: crate::hooks::claude_rate_limits(db)
-                .await
-                .unwrap_or_default(),
+            windows: stored().await,
             status: ClaudeUsageStatus::Unauthorized,
             detail: None,
         });
@@ -455,7 +564,7 @@ pub async fn fetch(db: &Db) -> Result<ClaudeUsageFetch> {
             })
         }
     };
-    store(db, &windows).await?;
+    store(db, account, &windows).await?;
     log::debug!("recorded {} Claude usage window(s)", windows.len());
     Ok(ClaudeUsageFetch {
         windows,
@@ -554,6 +663,52 @@ mod tests {
         let w = map_windows(body, 0.0).unwrap();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].window, "Opus");
+    }
+
+    /// Claude Code names a config folder's keychain item after a hash of the
+    /// folder string; a different derivation reads every account as signed
+    /// out. Expected value from `printf %s '<dir>' | shasum -a 256`.
+    #[test]
+    fn an_account_folders_keychain_item_is_named_after_its_hash() {
+        assert_eq!(
+            keychain_service_for("/Users/someone/.config/santree/accounts/claude/work"),
+            "Claude Code-credentials-a0a0a463"
+        );
+    }
+
+    /// A named account with no credential of its own is "not signed in", never
+    /// the Default login's token: that would show one account's usage under
+    /// another's name.
+    #[test]
+    fn a_named_account_never_falls_back_to_the_default_credential() {
+        let dir = "/Users/someone/.config/santree/accounts/claude/work";
+        let named = Account::Named {
+            id: "work".into(),
+            dir: dir.into(),
+        };
+        let found = sources(&named);
+        assert!(found.iter().any(|s| matches!(s, Source::Keychain(_))));
+        for source in found {
+            match source {
+                Source::Keychain(service) => assert_ne!(service, KEYCHAIN_SERVICE),
+                Source::File(path) => assert!(path.starts_with(dir), "{}", path.display()),
+            }
+        }
+    }
+
+    /// And the reverse: the Default read never takes an account folder's file,
+    /// even when santree inherited that folder as its config folder.
+    #[test]
+    fn the_default_read_never_names_an_account_folder() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let inherited = PathBuf::from(home).join(".config/santree/accounts/claude/work-0a1b2c");
+        for source in default_sources(Some(inherited)) {
+            if let Source::File(path) = source {
+                panic!("the Default read names {}", path.display());
+            }
+        }
     }
 
     /// The host check is a parse, so a look-alike host can never match.

@@ -26,10 +26,12 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { getVersion } from "@tauri-apps/api/app";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import type {
+  AgentAccount,
   AgentKind,
+  AgentSession,
   AnalysisScope,
   ChangedFile,
   ClaudeGlobalCapture,
@@ -282,6 +284,8 @@ export const queryKeys = {
   codexAccount: ["codex-account"] as const,
   codexModels: ["codex-models"] as const,
   codexRateLimits: ["codex-rate-limits"] as const,
+  agentAccounts: (agent: AgentKind) => ["agent-accounts", agent] as const,
+  agentAccountLogin: (agent: AgentKind, id: string) => ["agent-account-login", agent, id] as const,
   githubStatus: ["github-status"] as const,
   githubApiBudget: ["github-api-budget"] as const,
   binaryStatus: (name: string) => ["binary-status", name] as const,
@@ -509,6 +513,12 @@ export const WORK_EFFORT_KEY = "work_effort";
  *  `--permission-mode` (see {@link PERMISSION_MODES}). Empty leaves the flag off
  *  ("Default" — Claude's own normal mode). Applied on both start and restart. */
 export const WORK_PERMISSION_MODE_KEY = "work_permission_mode";
+
+/** Which of santree's accounts a new Claude / Codex session launches on — a
+ *  provider-scoped key (`agent_account__claude`), resolved repo → app by the
+ *  backend at launch. Empty or absent is the Default account: the CLI's own
+ *  login. A stored session keeps the account it was launched on. */
+export const AGENT_ACCOUNT_KEY = "agent_account";
 
 /** Provider-specific workflow profiles. The unsuffixed keys remain a legacy
  * fallback for the provider currently selected as that workflow's default. */
@@ -1490,6 +1500,92 @@ export const useCodexModels = (enabled = true) =>
     meta: { silent: true },
   });
 
+// ── Agent accounts ────────────────────────────────────────────────────────────
+// Extra logins for Claude and Codex, each its own config folder. The Default
+// account is the CLI's own and is never listed; usage reads (below) carry it as
+// `account: null`.
+
+/** The accounts santree keeps for `agent`, without the Default one. Polled
+ *  while one of them is not signed in: signing in happens in a terminal, and
+ *  this is how the app notices it finished. */
+export const useAgentAccounts = (agent: AgentKind, enabled = true) =>
+  useUnwrappedQuery(queryKeys.agentAccounts(agent), () => commands.agentAccounts(agent), {
+    enabled,
+    staleTime: 30_000,
+    refetchInterval: (query) => (query.state.data?.some((a) => !a.signedIn) ? 10_000 : false),
+    meta: { silent: true },
+  });
+
+/** The usage reads an account change affects: a new or removed account is a
+ *  new or removed row in each. */
+const accountUsageKeys = (agent: AgentKind): QueryKey[] =>
+  agent === "Codex"
+    ? [queryKeys.codexRateLimits]
+    : [queryKeys.claudeRateLimits, queryKeys.claudeAccountUsage];
+
+export const useCreateAgentAccount = () =>
+  useOptimisticMutation<{ agent: AgentKind; label: string }, AgentAccount>({
+    mutationFn: ({ agent, label }) => unwrap(commands.agentAccountCreate(agent, label)),
+    invalidate: ({ agent }) => [queryKeys.agentAccounts(agent), ...accountUsageKeys(agent)],
+  });
+
+/** Remove an account's folder. The CLI's own saved login for it (a keychain
+ *  item) is the CLI's, and stays. The backend also clears what pointed at it —
+ *  the `agent_account` setting, its rate-limit rows, tabs pinned to it — so
+ *  those reads are refetched with it. */
+export const useRemoveAgentAccount = () =>
+  useOptimisticMutation<{ agent: AgentKind; id: string }, null>({
+    mutationFn: ({ agent, id }) => unwrap(commands.agentAccountRemove(agent, id)),
+    optimistic: (qc, { agent, id }) => {
+      const key = queryKeys.agentAccounts(agent);
+      const prev = qc.getQueryData<AgentAccount[]>(key);
+      if (!prev) return undefined;
+      qc.setQueryData<AgentAccount[]>(
+        key,
+        prev.filter((a) => a.id !== id),
+      );
+      return () => qc.setQueryData(key, prev);
+    },
+    invalidate: ({ agent }) => [
+      queryKeys.agentAccounts(agent),
+      ...accountUsageKeys(agent),
+      queryKeys.setting("app", providerSettingKey(AGENT_ACCOUNT_KEY, agent)),
+      queryKeys.resolvedSettingPrefix,
+      // A cached launch may carry the removed folder's env; running panes keep
+      // theirs (their reads are off), the next launch resolves again.
+      ["agent-session"],
+    ],
+  });
+
+/** The vendor's own login command for one account, built backend-side (its
+ *  folder and quoting never come from here), for the settings login terminal.
+ *  Only read once the user asks to sign in. */
+export const useAgentAccountLoginCommand = (agent: AgentKind, id: string | null) =>
+  useUnwrappedQuery(
+    queryKeys.agentAccountLogin(agent, id ?? ""),
+    () => commands.agentAccountLoginCommand(agent, id ?? ""),
+    { enabled: id !== null, staleTime: Number.POSITIVE_INFINITY },
+  );
+
+/** Move an agent tab's stored session to another account (`null` = Default).
+ *  The running process is not touched: the caller ends and reopens the tab. */
+export const useSetTerminalSessionAccount = () =>
+  useOptimisticMutation<
+    { repo: string; termKey: string; agent: AgentKind; account: string | null },
+    null
+  >({
+    mutationFn: ({ repo, termKey, agent, account }) =>
+      unwrap(commands.terminalSessionSetAccount(repo, termKey, agent, account)),
+    // Every provider's resolution of the surface — the pane's read is keyed by
+    // the provider it asked for, which a resumed session may not be running —
+    // so a relaunch resolves again instead of replaying the old account's env.
+    invalidate: ({ repo, termKey }) => [
+      queryKeys.agentSessionPrefix(repo, termKey),
+      // The rows carry each tab's account too.
+      queryKeys.worktreeTabs(repo),
+    ],
+  });
+
 /** Signing *in* is not here: it was an App Server call, and the CLI's own
  *  `codex login` owns a browser round trip and a local callback. Settings points
  *  the user at their terminal instead of offering a button that can't finish. */
@@ -2414,6 +2510,53 @@ export const useAgentSession = (
     },
   );
 
+/** What {@link useTabSessionAccounts} knows of one agent tab's session. */
+export interface TabSessionAccount {
+  /** The account it launched on — `null` for the Default — or `undefined`
+   *  when no resolution is cached. */
+  account?: string | null;
+  /** Its launch could not be resolved: e.g. the account it was pinned to has
+   *  been removed, which the backend refuses rather than quietly running it on
+   *  another login. The way out is the tab's "Continue on …". */
+  failed: boolean;
+}
+
+/**
+ * Which account each agent tab's session was launched on, as its pane resolved
+ * it ({@link useAgentSession}, an agent tab's `allowFresh` read). Unknown when
+ * no live resolution is cached — a tab adopted after a reload, or one whose read
+ * was collected while it sat hidden — where the row's own `account` answers. A read of the cache, not a fetch: what a tab
+ * is running on is what it launched with, and only its pane may resolve that
+ * (a fetch here could mint the session it is asking about).
+ */
+export const useTabSessionAccounts = (
+  repo: string,
+  tabs: readonly { termKey: string; agent: AgentKind }[],
+): ReadonlyMap<string, TabSessionAccount> => {
+  const qc = useQueryClient();
+  const subscribe = useCallback(
+    (onChange: () => void) => qc.getQueryCache().subscribe(onChange),
+    [qc],
+  );
+  // A string, so an unrelated cache event that changes nothing here is equal by
+  // value and re-renders nobody.
+  const snapshot = useSyncExternalStore(subscribe, () =>
+    JSON.stringify(
+      tabs.flatMap(({ termKey, agent }): [string, TabSessionAccount][] => {
+        const key = queryKeys.agentSession(repo, termKey, agent, true);
+        const state = qc.getQueryState<AgentSession>(key);
+        if (!state) return [];
+        // A resolution marked stale (the tab was just moved to another account)
+        // no longer says what the next launch runs on: the row does, then.
+        const session = state.isInvalidated ? undefined : state.data;
+        const account = session && session.type !== "shell" ? session.account : undefined;
+        return [[termKey, { account, failed: state.status === "error" }]];
+      }),
+    ),
+  );
+  return useMemo(() => new Map(JSON.parse(snapshot) as [string, TabSessionAccount][]), [snapshot]);
+};
+
 /** Providers with a durable conversation on one logical surface. */
 export const useSessionProviders = (repo: string, termKey: string) =>
   useUnwrappedQuery(
@@ -2446,18 +2589,20 @@ export const useSessionUsageWatcher = () => {
   }, [qc]);
 };
 
-/** Claude's account rate-limit windows (the 5h session window, the 7d weekly
- *  one, any other the CLI reports), as captured display-only from the
- *  statusline payload by the hook — see COMPLIANCE.md. Empty until a Claude
- *  session has reported once. */
+/** Claude's rate-limit windows (the 5h session window, the 7d weekly one, any
+ *  other the CLI reports), per account — the Default first (`account: null`),
+ *  then each of santree's — as captured display-only from the statusline
+ *  payload by the hook; see COMPLIANCE.md. An account's windows are empty until
+ *  one of its sessions has reported once. */
 export const useClaudeRateLimits = () =>
   useUnwrappedQuery(queryKeys.claudeRateLimits, () => commands.claudeRateLimits(), {
     staleTime: 60_000,
     meta: { silent: true },
   });
 
-/** The account's usage straight from Anthropic, read with Claude Code's own
- *  credential (see COMPLIANCE.md, "Claude subscription usage"). Unlike the
+/** Each account's usage straight from Anthropic — the Default first, then each
+ *  of santree's — read with that account's own Claude Code credential (see
+ *  COMPLIANCE.md, "Claude subscription usage"). Unlike the
  *  status-line capture this needs no session to have run, so it is what fills
  *  the meters on a cold start; it also records what it reads, so the two
  *  sources share one store. Polled slowly — the windows move in minutes, and
@@ -2512,9 +2657,10 @@ export const useClaudeRateLimitsWatcher = () => {
   }, [qc]);
 };
 
-/** Codex's own rate-limit snapshot from its last turn, read back from its rollout
- *  transcript — there is no live source that doesn't need Codex's credentials, so
- *  this is as fresh as the user's last Codex turn. */
+/** Codex's own rate-limit snapshot from its last turn, per account (the Default
+ *  first), read back from its rollout transcripts — there is no live source that
+ *  doesn't need Codex's credentials, so each is as fresh as that account's last
+ *  Codex turn. */
 export const useCodexRateLimits = (enabled = true) =>
   useUnwrappedQuery(queryKeys.codexRateLimits, () => commands.codexRateLimits(), {
     enabled,

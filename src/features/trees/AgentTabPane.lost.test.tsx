@@ -83,6 +83,7 @@ const ROW: WorktreeTab = {
   agentKind: "Codex",
   title: "Codex",
   pr: null,
+  account: null,
 };
 const WORKTREE = { id: "wt1", path: "/src/web-wt1", title: "wt1" } as Worktree;
 

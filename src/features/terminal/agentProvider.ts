@@ -1,4 +1,4 @@
-import type { AgentKind, AgentSession, Settings } from "../../bindings";
+import type { AgentKind, AgentSession, EnvVar, Settings } from "../../bindings";
 
 /**
  * A launch, as **structured data**: what the user configured, never how a
@@ -284,16 +284,30 @@ function scopedToSession(session: LaunchableSession, config: AgentLaunchConfig):
   return { ...config, model: null, effort: null, permissionMode: null };
 }
 
-/** `env NAME=value …` — the attribution channel santree's hook binary reads to
- *  bind the id the CLI mints to the surface that launched it. Both halves or
- *  neither: a partial pair names nothing. */
-function envWords(config: AgentLaunchConfig): string[] {
-  if (!config.repo || !config.termKey) return [];
-  return [
-    "env",
-    `SANTREE_REPO=${shellQuote(config.repo)}`,
-    `SANTREE_TERM_KEY=${shellQuote(config.termKey)}`,
-  ];
+/** A variable name the shell reads as one word, unquoted. The names come from
+ *  Rust; this keeps a malformed one from becoming anything but a dropped word. */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * `env NAME=value …` — two independent sets, one `env`:
+ *
+ * - the session's own `launchEnv`: the account it runs on (its config folder,
+ *   resolved backend-side). Empty for the Default account.
+ * - the attribution channel santree's hook binary reads to bind the id the CLI
+ *   mints to the surface that launched it. Both halves or neither: a partial
+ *   pair names nothing.
+ */
+function envWords(launchEnv: readonly EnvVar[], config: AgentLaunchConfig): string[] {
+  const words = launchEnv
+    .filter((v) => ENV_NAME.test(v.name))
+    .map((v) => `${v.name}=${shellQuote(v.value)}`);
+  if (config.repo && config.termKey) {
+    words.push(
+      `SANTREE_REPO=${shellQuote(config.repo)}`,
+      `SANTREE_TERM_KEY=${shellQuote(config.termKey)}`,
+    );
+  }
+  return words.length > 0 ? ["env", ...words] : [];
 }
 
 /**
@@ -321,11 +335,13 @@ export function agentSessionSeed(
 
   // The conversation is already running in Claude's daemon, with the flags it
   // was started under, so none of santree's apply: `attach` is only a view onto
-  // it. No `env` pair either — the running session's hooks keep the attribution
-  // it was launched with.
+  // it. No attribution pair either — the running session's hooks keep the one it
+  // was launched with — but the account's env, so `attach` reaches the daemon of
+  // the account the session runs on.
   if (session.type === "attach") {
     return [
       "exec",
+      ...envWords(session.launchEnv, {}),
       shellQuote(session.executable),
       "attach",
       shellQuote(session.backgroundId),
@@ -335,7 +351,7 @@ export function agentSessionSeed(
   const scoped = scopedToSession(session, config);
   const words = [
     "exec",
-    ...envWords(scoped),
+    ...envWords(session.launchEnv, scoped),
     shellQuote(session.executable),
     ...spec.common(session, scoped),
   ];

@@ -10,6 +10,8 @@
 //! (`triage:<ticket>`) for the Triage workspace — the same rows, the same
 //! persistence, on a workspace that has no worktree.
 
+use std::collections::HashMap;
+
 use anyhow::{bail, Result};
 use santree_core::domain::{AgentKind, TabKind, TabPr, WorktreeTab};
 
@@ -97,7 +99,42 @@ fn row_to_tab(row: Row) -> Result<WorktreeTab> {
         pr: pr_repo
             .zip(pr_number)
             .map(|(repo, number)| TabPr { repo, number }),
+        account: None,
     })
+}
+
+/// The accounts `repo`'s stored sessions run on, by (term key, provider) — only
+/// the named ones; a session absent here runs on the Default.
+async fn session_accounts(db: &Db, repo: &str) -> Result<HashMap<(String, String), String>> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT term_key, agent_kind, account FROM terminal_sessions \
+         WHERE repo = ? AND account IS NOT NULL",
+    )
+    .bind(repo)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(key, agent, account)| ((key, agent), account))
+        .collect())
+}
+
+/// Fill each agent tab's account from its session row, keyed by the one
+/// [`term_key`] derivation rather than a second one in SQL.
+fn with_accounts(
+    mut tabs: Vec<WorktreeTab>,
+    accounts: &HashMap<(String, String), String>,
+) -> Vec<WorktreeTab> {
+    for tab in &mut tabs {
+        if let Some(agent) = tab.agent_kind {
+            let key = (
+                term_key(&tab.worktree_id, &tab.id),
+                agent.as_str().to_string(),
+            );
+            tab.account = accounts.get(&key).cloned();
+        }
+    }
+    tabs
 }
 
 /// All extra tabs for the repo (every worktree), in open order.
@@ -106,7 +143,11 @@ pub async fn list(db: &Db, repo: &str) -> Result<Vec<WorktreeTab>> {
         "SELECT {COLUMNS} FROM worktree_tabs WHERE repo = ? ORDER BY worktree_id, position"
     );
     let rows: Vec<Row> = sqlx::query_as(&sql).bind(repo).fetch_all(db).await?;
-    rows.into_iter().map(row_to_tab).collect()
+    let tabs = rows
+        .into_iter()
+        .map(row_to_tab)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(with_accounts(tabs, &session_accounts(db, repo).await?))
 }
 
 /// One tab by id, or `None` when it's gone (a tab closed in another window, a row
@@ -533,12 +574,13 @@ mod tests {
         }
     }
 
-    /// Closing a tab forgets its session under the key it actually launched
-    /// with — for a triage tab that is `triage:<ticket>:tab:<id>`, and a
-    /// `tree:`-shaped key would delete nothing and leave the conversation waiting
-    /// to be resumed by the next tab.
+    /// A tab reads its session's account, and closing it forgets the session,
+    /// under the key it actually launched with — for a triage tab that is
+    /// `triage:<ticket>:tab:<id>`, and a `tree:`-shaped key would match nothing:
+    /// the tab would read as on the Default, and the conversation would be left
+    /// waiting to be resumed by the next tab.
     #[tokio::test]
-    async fn removing_a_tab_forgets_the_session_under_its_own_key() {
+    async fn a_tab_reads_and_forgets_its_session_under_its_own_key() {
         let db = test_db("session").await;
         for (owner, id, key) in [
             ("AK-1", "tab-a", "tree:AK-1:tab:tab-a"),
@@ -546,15 +588,21 @@ mod tests {
         ] {
             add(&db, "repo", agent(owner, id, "Claude")).await.unwrap();
             sqlx::query(
-                "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?, ?, ?, ?)",
+                "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, account) \
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind("repo")
             .bind(key)
             .bind("/tmp/wt")
             .bind(format!("sess-{id}"))
+            .bind(format!("acct-{id}"))
             .execute(&db)
             .await
             .unwrap();
+
+            let listed = list(&db, "repo").await.unwrap();
+            let tab = listed.iter().find(|t| t.id == id).unwrap();
+            assert_eq!(tab.account.as_deref(), Some(format!("acct-{id}").as_str()));
 
             remove(&db, "repo", id).await.unwrap();
 

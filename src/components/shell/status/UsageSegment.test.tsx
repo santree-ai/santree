@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AgentAccount,
   ApiBudgetWindow,
   ClaudeRateLimitWindow,
   ClaudeUsageFetch,
@@ -18,7 +19,12 @@ let github: GithubApiBudget | null | undefined;
 let linear: LinearApiBudget[] | undefined;
 let account: ClaudeUsageFetch | undefined;
 let stored: ClaudeRateLimitWindow[] | undefined;
+/** santree's own Claude logins, and what each one's status line last stored. */
+let claudeAccounts: AgentAccount[] | undefined;
+let storedByAccount: { account: string; windows: ClaudeRateLimitWindow[] }[] = [];
 let live: SessionUsageLive[] | undefined;
+let chosenClaude: string | null = null;
+const setSetting = vi.fn();
 const githubEnabled = vi.fn();
 const linearEnabled = vi.fn();
 const githubRefetch = vi.fn();
@@ -27,9 +33,24 @@ const linearRefetch = vi.fn();
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 
 vi.mock("../../../lib/queries", () => ({
-  useClaudeAccountUsage: () => ({ data: account, refetch: vi.fn(), isFetching: false }),
+  AGENT_ACCOUNT_KEY: "agent_account",
+  providerSettingKey: (key: string, agent: string) => `${key}__${agent.toLowerCase()}`,
+  useSetting: (_scope: string, key: string) => ({
+    data: key === "agent_account__claude" ? chosenClaude : null,
+  }),
+  useSetSetting: () => ({ mutate: setSetting }),
+  useClaudeAccountUsage: () => ({
+    data: account && [{ account: null, fetch: account }],
+    refetch: vi.fn(),
+    isFetching: false,
+  }),
   useClaudeGlobalCapture: () => ({ data: undefined }),
-  useClaudeRateLimits: () => ({ data: stored }),
+  useClaudeRateLimits: () => ({
+    data: stored && [{ account: null, windows: stored }, ...storedByAccount],
+  }),
+  useAgentAccounts: (agent: string) => ({
+    data: agent === "Claude" ? claudeAccounts : undefined,
+  }),
   useCodexAccount: () => ({ data: undefined }),
   useCodexHealth: () => ({ data: undefined }),
   useCodexRateLimits: () => ({ data: undefined, refetch: vi.fn(), isFetching: false }),
@@ -66,6 +87,10 @@ describe("UsageSegment — services", () => {
     linear = undefined;
     account = undefined;
     stored = undefined;
+    claudeAccounts = undefined;
+    storedByAccount = [];
+    chosenClaude = null;
+    setSetting.mockReset();
     live = undefined;
     for (const fn of [githubEnabled, linearEnabled, githubRefetch, linearRefetch]) fn.mockClear();
   });
@@ -188,6 +213,10 @@ describe("UsageSegment — Claude windows", () => {
     linear = undefined;
     account = undefined;
     stored = undefined;
+    claudeAccounts = undefined;
+    storedByAccount = [];
+    chosenClaude = null;
+    setSetting.mockReset();
     live = undefined;
   });
 
@@ -297,6 +326,52 @@ describe("UsageSegment — Claude windows", () => {
     const row = claudeRow(menu);
     expect(resetCount(row)).toBe(0);
     expect(row.textContent).not.toContain("%");
+  });
+
+  /** One row per login. The single-account tests above pin that a lone
+   *  Default reads exactly as before — no label anywhere; with a second login
+   *  each meter has to say whose it is. A login with neither data nor a
+   *  sign-in is not a row: it has nothing to meter. */
+  /** The bar meters only the login new sessions use; the panel lists every
+   *  login, and a click on one is the switch. */
+  it("shows only the account in use in the bar, and switches from the panel", () => {
+    stored = [window("five_hour", 12, HOUR)];
+    claudeAccounts = [
+      { id: "work", agent: "Claude", label: "Work", dir: "/a/work", email: null, signedIn: true },
+      {
+        id: "spare",
+        agent: "Claude",
+        label: "Spare",
+        dir: "/a/spare",
+        email: null,
+        signedIn: false,
+      },
+    ];
+    storedByAccount = [{ account: "work", windows: [window("five_hour", 77, HOUR)] }];
+    const { rerender } = render(<UsageSegment />);
+    const trigger = () => screen.getByRole("button", { name: /API budgets$/ });
+    expect(trigger().textContent).toContain("12% used");
+    expect(trigger().textContent).not.toContain("Work");
+    expect(trigger().textContent).not.toContain("Default");
+
+    const rows = within(openPanel()).getAllByRole("menuitemradio");
+    expect(rows.map((r) => r.textContent?.match(/^Claude(Default|Work)/)?.[1])).toEqual([
+      "Default",
+      "Work",
+    ]);
+    expect(rows[0].getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(rows[1]);
+    expect(setSetting).toHaveBeenCalledWith({
+      scope: "app",
+      key: "agent_account__claude",
+      value: "work",
+    });
+
+    chosenClaude = "work";
+    rerender(<UsageSegment />);
+    expect(trigger().textContent).toContain("Work");
+    expect(trigger().textContent).toContain("77% used");
+    expect(trigger().textContent).not.toContain("12% used");
   });
 
   it("names the sign-in as the reason when no credential answered", () => {

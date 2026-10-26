@@ -632,7 +632,7 @@ export function buildDemoCommands(real: Commands): Partial<Commands> {
     addWorktreeTab: forRepo(
       real.addWorktreeTab,
       async (_repo, worktreeId, id, kind, agentKind, title, pr) => {
-        tabs.push({ id, worktreeId, kind, agentKind, title, pr });
+        tabs.push({ id, worktreeId, kind, agentKind, title, pr, account: null });
         return ok(null);
       },
     ),
@@ -662,6 +662,8 @@ export function buildDemoCommands(real: Commands): Partial<Commands> {
         executable: agent === "Codex" ? "codex" : "claude",
         sessionId: null,
         launchFlags: "",
+        launchEnv: [],
+        account: null,
       }),
     ),
     sessionProviders: forRepo(real.sessionProviders, async (_repo, termKey) => {
@@ -910,32 +912,75 @@ export function buildDemoCommands(real: Commands): Partial<Commands> {
     claudeRateLimits: async () =>
       ok([
         {
-          window: "five_hour",
-          usedPct: 23,
-          resetsAtMs: now() + 2 * HOUR + 47 * MIN,
-          updatedAtMs: now() - MIN,
+          account: null,
+          windows: [
+            {
+              window: "five_hour",
+              usedPct: 23,
+              resetsAtMs: now() + 2 * HOUR + 47 * MIN,
+              updatedAtMs: now() - MIN,
+            },
+            {
+              window: "seven_day",
+              usedPct: 41,
+              resetsAtMs: now() + 4 * DAY + 6 * HOUR,
+              updatedAtMs: now() - MIN,
+            },
+          ],
         },
         {
-          window: "seven_day",
-          usedPct: 41,
-          resetsAtMs: now() + 4 * DAY + 6 * HOUR,
-          updatedAtMs: now() - MIN,
+          account: "personal",
+          windows: [
+            {
+              window: "five_hour",
+              usedPct: 58,
+              resetsAtMs: now() + HOUR + 20 * MIN,
+              updatedAtMs: now() - 3 * MIN,
+            },
+            {
+              window: "seven_day",
+              usedPct: 17,
+              resetsAtMs: now() + 2 * DAY + 9 * HOUR,
+              updatedAtMs: now() - 3 * MIN,
+            },
+          ],
         },
       ]),
+    // A second Claude login beside the CLI's own, whose meters are above.
+    agentAccounts: async (agent) =>
+      ok(
+        agent === "Claude"
+          ? [
+              {
+                id: "personal",
+                agent: "Claude" as const,
+                label: "Personal",
+                dir: "/Users/santiago/.config/santree/accounts/claude/personal",
+                email: null,
+                signedIn: true,
+              },
+            ]
+          : [],
+      ),
     codexRateLimits: async () =>
-      ok({
-        plan: "Pro",
-        primary: {
-          usedPercent: 18,
-          windowMinutes: 300,
-          resetsAt: Math.floor((now() + 3 * HOUR) / 1000),
+      ok([
+        {
+          account: null,
+          limits: {
+            plan: "Pro",
+            primary: {
+              usedPercent: 18,
+              windowMinutes: 300,
+              resetsAt: Math.floor((now() + 3 * HOUR) / 1000),
+            },
+            secondary: {
+              usedPercent: 37,
+              windowMinutes: 10_080,
+              resetsAt: Math.floor((now() + 5 * DAY) / 1000),
+            },
+          },
         },
-        secondary: {
-          usedPercent: 37,
-          windowMinutes: 10_080,
-          resetsAt: Math.floor((now() + 5 * DAY) / 1000),
-        },
-      }),
+      ]),
 
     // ── Terminals ──────────────────────────────────────────────────────────
     // Owned by where they run: a pane in a demo checkout is scripted, anything

@@ -117,6 +117,7 @@ const ROW: WorktreeTab = {
   agentKind: "Codex",
   title: "Codex",
   pr: null,
+  account: null,
 };
 
 let registry: TerminalTabs;

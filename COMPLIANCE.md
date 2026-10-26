@@ -94,7 +94,9 @@ minus the nested-session markers santree itself inherited (below) — plus the
 user's own Settings → Environment variables, and `TERM`. santree does not
 synthesize those values, read them from a CLI's config, or capture them from
 anywhere. Launches also carry `SANTREE_REPO` / `SANTREE_TERM_KEY` so the hook
-binary knows which row to update, and pass through the `--permission-mode` and
+binary knows which row to update (and, on one of santree's accounts,
+`SANTREE_ACCOUNT` plus the CLI's config-folder variable — "Agent accounts"
+below), and pass through the `--permission-mode` and
 `--remote-control` flags the user configured. **santree never selects a
 permissive permission mode or defaults to one** — the prompt Claude shows is
 Claude's, under the mode the user chose.
@@ -135,13 +137,62 @@ from the same exported list. A copied list is a list that drifts.
 **Claude subscription usage.** `claude_usage.rs` reads Claude Code's own OAuth
 token — from the keychain, else its credentials file, via a fixed argv with the
 account taken from our own process, never from IPC. One GET to
-`api.anthropic.com`, host matched by parse. Read-only: never written, refreshed,
-or re-stored; expiry is Anthropic's call. Never logged or persisted; only
-percentages and reset times reach SQLite. Identified honestly as
-`santree/<version>`. This account only, never forwarded onward. It is the only
-module that does this and `claude_fetch_usage` the only command.
+`api.anthropic.com` per account, host matched by parse. Read-only: never
+written, refreshed, or re-stored; expiry is Anthropic's call. Never logged or
+persisted; only percentages and reset times reach SQLite. Identified honestly as
+`santree/<version>`. The accounts are the Default one (Claude Code's own item
+and file) plus each account the user created in santree ("Agent accounts"
+below), and **each token is read separately, from that account's own keychain
+item or file**: the item Claude Code names after the account's folder
+(`Claude Code-credentials-<first 8 hex of sha256(folder)>`), else the folder's
+`.credentials.json`. A named account with neither is "not signed in" — **never
+the unscoped item**, which would show one login's usage as another's. Never
+forwarded onward. It is the only module that does this and `claude_fetch_usage`
+the only command.
 → `the_usage_credential_is_never_logged_serialized_or_stored`,
-`every_host_allowlist_is_matched_by_a_parsed_host_not_a_string_prefix`
+`every_host_allowlist_is_matched_by_a_parsed_host_not_a_string_prefix`,
+`a_named_account_never_falls_back_to_the_default_credential`
+
+**Agent accounts.** The user can keep several Claude Code and Codex logins:
+each is a folder they created in santree,
+`~/.config/santree/accounts/<claude|codex>/<id>/`, and a launch on it sets the
+CLI's own documented override — `CLAUDE_CONFIG_DIR` or `CODEX_HOME` — to that
+folder, plus `SANTREE_ACCOUNT=<agent>:<id>` so the hook records rate limits
+under it (the hook takes the tag only for the agent it names). Account ids are
+minted with a random suffix and never reused, because Claude names an account's
+keychain item after its folder: a reused id would reopen a removed account's
+login. The bound:
+
+- **santree never reads, copies or writes a credential there.** Signing in is
+  the vendor CLI's own login (`claude auth login`, `codex login`), run in a
+  terminal the user watches; santree only builds the command line. Removing an
+  account deletes the folder and leaves the CLI's keychain item alone.
+- **What is shared is an allowlist of non-credential state.** `accounts.rs`
+  symlinks named entries from the Default home into the folder — settings,
+  instructions, skills, the transcript and rollout directories — so a session
+  can be resumed under another account. Everything else (the credential,
+  `.claude.json`'s login, Codex's auth storage, daemons, databases) stays per
+  account by not being on the list. A new Claude account's `.claude.json` is
+  seeded once with onboarding done, the theme, and workspace trust for exactly
+  the folders already trusted in the Default account — no login.
+- **A running session is never moved.** An account is fixed at launch and
+  stored with the session. "Continue on account…" is a click: santree records
+  the new account, ends the tab's process, and the tab resumes the same session
+  id under it — the same human-opened resume as any other.
+- **No automatic switching.** Nothing changes an account on the user's behalf:
+  not on a rate limit, not on an error, not on a schedule. A launch on an
+  account whose folder is gone fails with a message saying so, rather than
+  running on the Default login. Removing an account in santree is the one
+  reset, and it is the user's click: the sessions launched on it continue on
+  the Default account, and its stored windows and the settings naming it go.
+- **santree does not inherit an account.** Started from one of its own account
+  tabs, santree drops `SANTREE_ACCOUNT` from its own environment at startup,
+  and `CLAUDE_CONFIG_DIR` / `CODEX_HOME` when they point into the accounts
+  root (a user's own value elsewhere stays), so its Default launches, Default
+  usage read and the links every account points at stay the Default
+  account's. Provisioning refuses a Default home inside the accounts root.
+- **Daedalus sessions run on the box's Default account**, and a relayed hook's
+  `SANTREE_ACCOUNT` is ignored.
 
 **GitHub token.** `github.rs::token()` borrows a token from `gh auth token` —
 GitHub's own documented lending interface, not an agent CLI's auth — and holds
@@ -249,7 +300,9 @@ models` for the catalog, `codex logout` on a click. Each is one short-lived,
 non-interactive invocation with stdin closed, bounded by a timeout and an output
 cap. There is deliberately **no login command**: starting a ChatGPT login was a
 protocol call, the CLI's own is an interactive browser flow, and santree points
-the user at `codex login` in a terminal rather than reimplementing it.
+the user at `codex login` in a terminal rather than reimplementing it (for one
+of santree's accounts, the same command with `CODEX_HOME` set — "Agent
+accounts").
 
 Removing it removed a real cost as well as a rule to keep: that `codex
 app-server` process outlived the app that started it with nothing to retire it
@@ -270,7 +323,10 @@ so the number comes from Codex's own rollout transcript: it writes a
 returned, and `codex_rollouts.rs` reads back the most recent one. It is a
 display-only transcript read like the two beside it, and it is **as fresh as the
 user's last Codex turn and no fresher** — the UI must not imply otherwise. When
-Codex has never run, or the plan reports no windows, the answer is empty.
+Codex has never run, or the plan reports no windows, the answer is empty. Every
+account's rollouts share one directory, so a rollout counts for the account its
+thread's `terminal_sessions` row names *now* — the launch account, until
+"Continue on account" moves the row — else the Default one.
 → `nothing_reads_codexs_auth_storage`
 
 **Review MCP server.** The AI review and Address review launch one santree-owned

@@ -123,6 +123,7 @@ function RepoLaunches({ repo }: { repo: string }) {
           tabs.filter((t) => t.worktreeId === id),
         ),
         pr: null,
+        account: null,
       });
       beginRun(repo, id, tabId);
     }

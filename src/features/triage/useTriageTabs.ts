@@ -182,6 +182,7 @@ export function useTriageTabs(repo: string, ticketId: string): TriageTabs {
         agentKind: resolvedAgent,
         title: defaultTabTitle(kind, resolvedAgent, rows),
         pr: null,
+        account: null,
       });
       select(rowTab(id));
     },

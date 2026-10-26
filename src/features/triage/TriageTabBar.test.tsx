@@ -16,6 +16,11 @@ import { TerminalsProvider, useTerminals } from "../terminal/TerminalsContext";
 
 vi.mock("../../lib/queries", () => ({
   useTicketProvider: () => "Linear",
+  // "Continue on account": no extra logins, so no tab menu.
+  useRepos: () => ({ data: [] }),
+  useAgentAccounts: () => ({ data: [] }),
+  useTabSessionAccounts: () => new Map(),
+  useSetTerminalSessionAccount: () => ({ mutateAsync: vi.fn() }),
   useTriageOrgRepo: () => "acme/app",
   useAgentAuth: () => ({ data: { connected: true } }),
   useCodexAccount: () => ({ data: { connected: true } }),
@@ -34,6 +39,7 @@ const row = (id: string, kind: WorktreeTab["kind"], title: string): WorktreeTab 
   agentKind: kind === "terminal" ? null : "Codex",
   title,
   pr: null,
+  account: null,
 });
 
 /** The model the bar draws, dialled per test — all but its split layout, which
@@ -76,6 +82,7 @@ function Bar({ tabs, rightCollapsed }: { tabs: TabsModel; rightCollapsed: boolea
   ]);
   return (
     <TriageTabBar
+      repo="acme/app"
       ticket={ticket}
       tabs={{ ...tabs, split }}
       rightCollapsed={rightCollapsed}

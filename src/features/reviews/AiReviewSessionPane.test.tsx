@@ -27,6 +27,7 @@ const q = vi.hoisted(() => ({
     agentKind: "Claude",
     executable: "claude",
     sessionId: "sess-1",
+    launchEnv: [],
   } as Record<string, unknown>,
   codexHooks: "-c 'hooks.SessionStart=[…]'" as string | null,
   launch: { data: undefined, isSuccess: false, isError: false, isFetched: false } as {
@@ -102,6 +103,7 @@ beforeEach(() => {
     agentKind: "Claude",
     executable: "claude",
     sessionId: "sess-1",
+    launchEnv: [],
   };
   q.codexHooks = "-c 'hooks.SessionStart=[…]'";
 });
@@ -157,7 +159,13 @@ describe("AiReviewSessionPane", () => {
       isError: false,
       isFetched: true,
     };
-    q.session = { type: "fresh", agentKind: "Codex", executable: "codex", sessionId: null };
+    q.session = {
+      type: "fresh",
+      agentKind: "Codex",
+      executable: "codex",
+      sessionId: null,
+      launchEnv: [],
+    };
     render(<AiReviewSessionPane pr={pr} agentKind="Codex" visible onShowDrafts={vi.fn()} />);
     const seed = spies.terminal.mock.calls[0][0] as string;
     expect(seed).toContain("-c 'hooks.SessionStart=[…]'");

@@ -23,6 +23,14 @@ vi.mock("../../../lib/queries", async (importOriginal) => ({
   useClaudeGlobalCapture: () => ({ data: false }),
   useSetClaudeGlobalCapture: () => ({ mutate: vi.fn() }),
   useSetSetting: () => ({ mutate: vi.fn() }),
+  // The Accounts block's reads: no extra logins, no usage.
+  useAgentAccounts: () => ({ data: [] }),
+  useAgentAccountLoginCommand: () => ({ data: undefined }),
+  useClaudeAccountUsage: () => ({ data: undefined }),
+  useClaudeRateLimits: () => ({ data: undefined }),
+  useCodexRateLimits: () => ({ data: undefined }),
+  useCreateAgentAccount: () => ({ mutate: vi.fn() }),
+  useRemoveAgentAccount: () => ({ mutateAsync: vi.fn() }),
 }));
 
 beforeEach(() => {

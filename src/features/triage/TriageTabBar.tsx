@@ -41,17 +41,22 @@ import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { liveTabFor } from "../agents/registry";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
+import { useTabAccounts } from "../trees/useTabAccounts";
 import { useTabSessions } from "../trees/useTabSessions";
 import { triageTermKey } from "./providerSessions";
 import { agentTab, rowTab, type TriageMainTab, type TriageTabs } from "./useTriageTabs";
 
 export function TriageTabBar({
+  repo,
   ticket,
   tabs,
   rightCollapsed,
   onToggleRight,
   renderTab,
 }: {
+  /** The attached project the ticket's own tabs run in (its main checkout);
+   *  `null` until one is attached. */
+  repo: string | null;
   ticket: TriageTicket;
   tabs: TriageTabs;
   rightCollapsed: boolean;
@@ -68,6 +73,7 @@ export function TriageTabBar({
   // investigation hangs off the ticket's own surface rather than a row, which
   // is the only reason the same hook can't do it for those too.
   const { closeWithSession } = useTabSessions(termKey, tabs.rows, tabs.closeTab);
+  const { menuFor, detailFor } = useTabAccounts(repo ?? "", termKey, tabs.rows);
   const { tabs: sessions, close: endSession } = useTerminals();
   const closeAgent = (agent: AgentKind) => {
     const live = liveTabFor(termKey, agent, sessions);
@@ -98,6 +104,8 @@ export function TriageTabBar({
         ),
       onClose: () => closeWithSession(t),
       onRename: (title: string) => tabs.renameTab(t.id, title),
+      menu: menuFor(t),
+      detail: detailFor(t),
     })),
   ];
 

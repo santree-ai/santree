@@ -49,6 +49,7 @@ export function useResumeSessionInWorktree(): SessionResumer {
             // Only the review kinds carry a PR, and those arrive through their own
             // hand-off, never from here.
             pr: null,
+            account: null,
           });
           setActiveTab(extraTab(tabId));
         } catch {

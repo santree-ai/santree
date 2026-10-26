@@ -42,19 +42,28 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use serde::{Deserialize, Deserializer};
 
-use santree_core::domain::{CodexRateLimitWindow, CodexRateLimits, LastMessageFrom};
+use santree_core::domain::{
+    CodexAccountRateLimits, CodexRateLimitWindow, CodexRateLimits, LastMessageFrom,
+};
+
+use crate::db::Db;
 
 use crate::session::{RecordPresence, SessionSummary};
 use crate::usage::{cwd_belongs_to, one_line, Blocks};
 
-/// `$CODEX_HOME/sessions` (Codex's own override), else `~/.codex/sessions` — when
-/// it exists.
-pub(crate) fn sessions_root() -> Option<PathBuf> {
-    let home = match std::env::var_os("CODEX_HOME") {
+/// Codex's home as the running app sees it: `$CODEX_HOME` (Codex's own
+/// override), else `~/.codex`. The Default account's, and what every account
+/// folder links its shared state back to (`accounts.rs`).
+pub(crate) fn codex_home() -> Option<PathBuf> {
+    Some(match std::env::var_os("CODEX_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => PathBuf::from(std::env::var_os("HOME")?).join(".codex"),
-    };
-    let root = home.join("sessions");
+    })
+}
+
+/// `<codex home>/sessions` — when it exists.
+pub(crate) fn sessions_root() -> Option<PathBuf> {
+    let root = codex_home()?.join("sessions");
     root.is_dir().then_some(root)
 }
 
@@ -774,17 +783,53 @@ const RATE_LIMIT_TAIL: u64 = 1024 * 1024;
 /// user's last Codex turn. The live answer lives behind the account API, and the
 /// only keys to that are the ones Codex owns.
 ///
+/// Per account: every account's rollouts land in the one shared `sessions/`
+/// (`accounts.rs`), so a rollout is attributed by its thread — `bound` maps a
+/// thread to the account its `terminal_sessions` row names *now*
+/// ([`account_bindings`]), which is the launch account until "Continue on
+/// account" moves the row, after which the thread's older turns count for the
+/// new account too. A subagent's rollout follows its parent; anything else is
+/// the Default account's. One entry for the Default account, then one per id in
+/// `accounts`; a thread bound to an account no longer there counts for nobody.
+///
 /// Empty when Codex has never run, or when the plan reports no windows at all —
 /// a usage-based enterprise plan legitimately answers `primary: null`.
 /// Blocking (disk) — call from `spawn_blocking`.
-pub(crate) fn latest_rate_limits() -> CodexRateLimits {
-    sessions_root()
-        .map(|root| latest_rate_limits_in(&root))
-        .unwrap_or_default()
+pub(crate) fn latest_rate_limits(
+    bound: &HashMap<String, String>,
+    accounts: &[String],
+) -> Vec<CodexAccountRateLimits> {
+    match sessions_root() {
+        Some(root) => latest_rate_limits_in(&root, bound, accounts),
+        None => std::iter::once(None)
+            .chain(accounts.iter().cloned().map(Some))
+            .map(|account| CodexAccountRateLimits {
+                account,
+                limits: CodexRateLimits::default(),
+            })
+            .collect(),
+    }
+}
+
+/// The account each Codex thread's row names now: thread id → account id.
+/// Written by the hook from `SANTREE_ACCOUNT` at the thread's start, and by
+/// `terminal_session_set_account` on "Continue on account".
+pub(crate) async fn account_bindings(db: &Db) -> anyhow::Result<HashMap<String, String>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT session_id, account FROM terminal_sessions \
+         WHERE agent_kind = 'Codex' AND account IS NOT NULL",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().collect())
 }
 
 /// [`latest_rate_limits`] over an explicit `sessions` root (tests pin it).
-fn latest_rate_limits_in(root: &Path) -> CodexRateLimits {
+fn latest_rate_limits_in(
+    root: &Path,
+    bound: &HashMap<String, String>,
+    accounts: &[String],
+) -> Vec<CodexAccountRateLimits> {
     let mut paths = Vec::new();
     collect_rollouts(root, 0, &mut paths);
     // Newest first by mtime, not by the timestamp in the file name: a resumed
@@ -797,11 +842,47 @@ fn latest_rate_limits_in(root: &Path) -> CodexRateLimits {
         })
         .collect();
     dated.sort_unstable_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    dated
-        .iter()
-        .take(RATE_LIMIT_ROLLOUTS)
-        .find_map(|(_, path)| last_rate_limits(path))
-        .unwrap_or_default()
+
+    let wanted = 1 + accounts.len();
+    let mut found: HashMap<Option<&str>, CodexRateLimits> = HashMap::new();
+    let mut tried: HashMap<Option<&str>, usize> = HashMap::new();
+    for (_, path) in &dated {
+        if found.len() == wanted {
+            break;
+        }
+        // Peeks are cached, and the history listings have usually made them.
+        let account = if bound.is_empty() {
+            None
+        } else {
+            peek(path).and_then(|meta| {
+                bound
+                    .get(&meta.thread_id)
+                    .or_else(|| meta.parent.as_ref().and_then(|p| bound.get(p)))
+                    .map(String::as_str)
+            })
+        };
+        if account.is_some_and(|id| !accounts.iter().any(|a| a == id)) {
+            continue;
+        }
+        if found.contains_key(&account) {
+            continue;
+        }
+        let attempts = tried.entry(account).or_default();
+        if *attempts >= RATE_LIMIT_ROLLOUTS {
+            continue;
+        }
+        *attempts += 1;
+        if let Some(limits) = last_rate_limits(path) {
+            found.insert(account, limits);
+        }
+    }
+    std::iter::once(None)
+        .chain(accounts.iter().map(|id| Some(id.as_str())))
+        .map(|account| CodexAccountRateLimits {
+            account: account.map(str::to_string),
+            limits: found.remove(&account).unwrap_or_default(),
+        })
+        .collect()
 }
 
 /// How much of a rollout's tail [`last_activity_ms`] reads. Far smaller than
@@ -1478,7 +1559,9 @@ mod tests {
             1_000_000,
         );
 
-        let limits = latest_rate_limits_in(&sessions);
+        let limits = latest_rate_limits_in(&sessions, &HashMap::new(), &[])
+            .remove(0)
+            .limits;
         assert_eq!(limits.plan.as_deref(), Some("pro"));
         let primary = limits.primary.expect("the newest snapshot has a window");
         assert_eq!(primary.used_percent, 41.0);
@@ -1488,7 +1571,7 @@ mod tests {
 
         // A machine that has never run Codex answers empty, not an error.
         assert_eq!(
-            latest_rate_limits_in(&dir.join("missing")),
+            latest_rate_limits_in(&dir.join("missing"), &HashMap::new(), &[])[0].limits,
             CodexRateLimits::default()
         );
 

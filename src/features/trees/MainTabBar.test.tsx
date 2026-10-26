@@ -62,6 +62,11 @@ function openOf(openMainTabs: typeof import("./model").openMainTabs): MainTab[] 
 
 vi.mock("../../lib/queries", () => ({
   useTicketProvider: () => "Linear",
+  // "Continue on account": no extra logins, so no tab menu.
+  useRepos: () => ({ data: [] }),
+  useAgentAccounts: () => ({ data: [] }),
+  useTabSessionAccounts: () => new Map(),
+  useSetTerminalSessionAccount: () => ({ mutateAsync: vi.fn() }),
   useAgentAuth: () => ({ data: { connected: true } }),
   useCodexAccount: () => ({ data: { connected: q.macCodex } }),
   useCodexHealth: () => ({ data: { available: q.macCodex } }),
@@ -85,6 +90,7 @@ const tab = (id: string, kind: TabKind): WorktreeTab => ({
   agentKind: kind === "terminal" ? null : "Codex",
   title: kind === "agent" ? "Codex" : "Terminal 2",
   pr: null,
+  account: null,
 });
 
 const refIdOf = (id: string) => `tree:${trees.activeId}:tab:${id}`;
@@ -309,6 +315,7 @@ describe("fitting the tabs to the pane", () => {
       agentKind: "Claude",
       title: "Claude Code",
       pr: null,
+      account: null,
     },
     ...Array.from({ length: n }, (_, i) => ({
       id: `t${i + 1}`,
@@ -317,6 +324,7 @@ describe("fitting the tabs to the pane", () => {
       agentKind: "Codex" as const,
       title: `Session ${i + 1}`,
       pr: null,
+      account: null,
     })),
   ];
   const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent);

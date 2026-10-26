@@ -31,7 +31,14 @@ import {
 import { targetOwnsKey } from "../lib/useKeyboardShortcuts";
 import { CHROME } from "../state/AppContext";
 import { ChevronDownIcon, CloseIcon, PlusIcon } from "./icons";
-import { Dropdown, MENU_ITEM, onTabStripKeyDown, underlineTabStyle } from "./primitives";
+import {
+  ContextMenu,
+  type ContextMenuItem,
+  Dropdown,
+  MENU_ITEM,
+  onTabStripKeyDown,
+  underlineTabStyle,
+} from "./primitives";
 
 /** Everything a tab needs, so the whole strip can be built as one list and *then*
  *  fitted to the pane. */
@@ -55,6 +62,12 @@ export interface StripTab<T extends string> {
    *  disappears the moment a tab becomes closable. This rides inside the tab,
    *  after the label, and survives. */
   badge?: ReactNode;
+  /** One more line for the tab's tooltip — something true of what runs in it
+   *  that the label doesn't say (an agent tab's account). */
+  detail?: string;
+  /** The tab's right-click menu (and Shift-F10 / the menu key on it): actions
+   *  on what the tab holds. Absent or empty, the tab has none. */
+  menu?: ContextMenuItem[];
 }
 
 export function TabStrip<T extends string>({
@@ -367,6 +380,8 @@ function Tab<T extends string>({
   onRename,
   trailing,
   badge,
+  detail,
+  menu,
 }: StripTab<T> & {
   active: T | null;
   muted: boolean;
@@ -376,7 +391,7 @@ function Tab<T extends string>({
 }) {
   const on = active === tab;
   const [editing, setEditing] = useState(false);
-  return (
+  const body = (
     // Presentational wrapper: the strip is the tablist and the label button is the
     // tab — the close × has to stay a sibling of it, because a tab's children are
     // presentational to AT and it would disappear inside one.
@@ -421,7 +436,9 @@ function Tab<T extends string>({
           }
           // The title also carries the full label, which a narrow pane may have
           // ellipsised away.
-          title={onRename ? `${label} — double-click (or F2) to rename` : label}
+          title={[label, detail, onRename && "double-click (or F2) to rename"]
+            .filter(Boolean)
+            .join(" — ")}
           // `min-w-0` is what lets the button shrink past its content: without
           // it a flex child's automatic minimum size is its min-content width,
           // which for a two-word label is one word — so the label wrapped onto a
@@ -451,6 +468,14 @@ function Tab<T extends string>({
         )}
       </span>
     </div>
+  );
+  // Only a tab with actions is wrapped: every other tab's DOM stays as it was.
+  return menu && menu.length > 0 ? (
+    <ContextMenu items={menu} className="flex" menuClassName="w-56">
+      {body}
+    </ContextMenu>
+  ) : (
+    body
   );
 }
 

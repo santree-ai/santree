@@ -356,7 +356,13 @@ fn wip_auth(provider: &str, settings: &str, login: &str, detected_exec: String) 
 /// (account email, organization name, plan label). `None` when not signed in.
 fn claude_account() -> Option<(String, String, String)> {
     let home = std::env::var_os("HOME")?;
-    let raw = std::fs::read_to_string(PathBuf::from(home).join(".claude.json")).ok()?;
+    claude_account_at(&PathBuf::from(home).join(".claude.json"))
+}
+
+/// [`claude_account`] from a given `.claude.json` — the Default account's, or
+/// the one Claude keeps inside one of santree's account folders.
+pub(crate) fn claude_account_at(path: &Path) -> Option<(String, String, String)> {
+    let raw = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let acc = json.get("oauthAccount")?;
     let email = acc.get("emailAddress")?.as_str()?.to_string();

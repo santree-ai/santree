@@ -368,7 +368,8 @@ async fn apply_hook<S: Store>(
     // *only that one terminal's* row — never another tab's, even though sibling
     // tabs share a cwd.
     if event == "SessionStart" && binds_session_id(agent, source) {
-        let HookEnv { repo, term_key } = env;
+        let account = env.account_for(agent);
+        let HookEnv { repo, term_key, .. } = env;
         if repo.is_empty() || term_key.is_empty() {
             // The one failure that makes a session permanently unattributable:
             // without these the row can't be bound to a surface, and every
@@ -383,7 +384,7 @@ async fn apply_hook<S: Store>(
             );
         } else {
             let bound = store
-                .reconcile_terminal_session(repo, term_key, cwd, session_id, agent)
+                .reconcile_terminal_session(repo, term_key, cwd, session_id, agent, account)
                 .await;
             let reconciled = store
                 .noted(event, "binding the session to its terminal", bound)
@@ -603,11 +604,26 @@ fn record_statusline(db_path: &str, p: &Value, reading: &StatuslineReading<'_>) 
     else {
         return;
     };
-    rt.block_on(record_statusline_to(&mut PathStore(db_path), p, reading));
+    let env = HookEnv::from_process();
+    rt.block_on(record_statusline_to(
+        &mut PathStore(db_path),
+        p,
+        reading,
+        env.account_for(AgentKind::Claude),
+    ));
 }
 
 /// [`record_statusline`]'s writes against any [`Store`].
-async fn record_statusline_to<S: Store>(store: &mut S, p: &Value, reading: &StatuslineReading<'_>) {
+///
+/// `account` is the santree account the session runs on (`SANTREE_ACCOUNT`):
+/// its windows are that account's, and writing them over the Default
+/// account's would show one account's usage as another's.
+async fn record_statusline_to<S: Store>(
+    store: &mut S,
+    p: &Value,
+    reading: &StatuslineReading<'_>,
+    account: Option<&str>,
+) {
     let session_id = p
         .get("session_id")
         .and_then(Value::as_str)
@@ -628,7 +644,10 @@ async fn record_statusline_to<S: Store>(store: &mut S, p: &Value, reading: &Stat
     // has none (API-key / Bedrock / Vertex sessions, or before the first response).
     let windows = parse_rate_limits(p);
     if !windows.is_empty() {
-        let wrote = store.record_rate_limits(&windows).await.unwrap_or(false);
+        let wrote = store
+            .record_rate_limits(account, &windows)
+            .await
+            .unwrap_or(false);
         if wrote {
             store.nudge(RATE_LIMITS_TAG);
         }
@@ -695,49 +714,82 @@ fn epoch_ms(value: &Value) -> Option<i64> {
 /// set writes nothing and doesn't nudge the UI. Never creates the db.
 async fn record_rate_limits(
     db_path: &str,
+    account: Option<&str>,
     windows: &[RateLimitWindow],
 ) -> Result<bool, sqlx::Error> {
     let Some(mut conn) = open(db_path).await? else {
         return Ok(false);
     };
-    let wrote = record_rate_limits_on(&mut conn, windows).await?;
+    let wrote = record_rate_limits_on(&mut conn, account, windows).await?;
 
     // Same as `record_usage`: close before the caller nudges the app to read.
     conn.close().await?;
     Ok(wrote)
 }
 
+/// `account` picks the table: `None` (the Default account) is
+/// `claude_rate_limits`, as it always was, so an older hook binary and this one
+/// write the same rows; a named account's windows are keyed by it in
+/// `claude_account_rate_limits`.
 async fn record_rate_limits_on(
     conn: &mut SqliteConnection,
+    account: Option<&str>,
     windows: &[RateLimitWindow],
 ) -> Result<bool, sqlx::Error> {
     let mut wrote = false;
     for w in windows {
-        let current: Option<(f64, Option<i64>)> = sqlx::query_as(
-            "SELECT used_pct, resets_at_ms FROM claude_rate_limits WHERE window = ?",
-        )
-        .bind(&w.window)
-        .fetch_optional(&mut *conn)
-        .await?;
+        let current: Option<(f64, Option<i64>)> = match account {
+            None => {
+                sqlx::query_as(
+                    "SELECT used_pct, resets_at_ms FROM claude_rate_limits WHERE window = ?",
+                )
+                .bind(&w.window)
+                .fetch_optional(&mut *conn)
+                .await?
+            }
+            Some(account) => {
+                sqlx::query_as(
+                    "SELECT used_pct, resets_at_ms FROM claude_account_rate_limits \
+                     WHERE account = ? AND window = ?",
+                )
+                .bind(account)
+                .bind(&w.window)
+                .fetch_optional(&mut *conn)
+                .await?
+            }
+        };
         if let Some((used, resets)) = current {
             if (used - w.used_pct).abs() < 1e-9 && resets == w.resets_at_ms {
                 continue;
             }
         }
-        sqlx::query(
-            "INSERT INTO claude_rate_limits (window, used_pct, resets_at_ms, updated_at_ms) \
-             VALUES (?, ?, ?, ?) \
-             ON CONFLICT(window) DO UPDATE SET \
-               used_pct = excluded.used_pct, \
-               resets_at_ms = excluded.resets_at_ms, \
-               updated_at_ms = excluded.updated_at_ms",
-        )
-        .bind(&w.window)
-        .bind(w.used_pct)
-        .bind(w.resets_at_ms)
-        .bind(now_ms())
-        .execute(&mut *conn)
-        .await?;
+        let upsert = match account {
+            None => sqlx::query(
+                "INSERT INTO claude_rate_limits (window, used_pct, resets_at_ms, updated_at_ms) \
+                 VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(window) DO UPDATE SET \
+                   used_pct = excluded.used_pct, \
+                   resets_at_ms = excluded.resets_at_ms, \
+                   updated_at_ms = excluded.updated_at_ms",
+            ),
+            Some(account) => sqlx::query(
+                "INSERT INTO claude_account_rate_limits \
+                   (account, window, used_pct, resets_at_ms, updated_at_ms) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT(account, window) DO UPDATE SET \
+                   used_pct = excluded.used_pct, \
+                   resets_at_ms = excluded.resets_at_ms, \
+                   updated_at_ms = excluded.updated_at_ms",
+            )
+            .bind(account),
+        };
+        upsert
+            .bind(&w.window)
+            .bind(w.used_pct)
+            .bind(w.resets_at_ms)
+            .bind(now_ms())
+            .execute(&mut *conn)
+            .await?;
         wrote = true;
     }
     Ok(wrote)
@@ -995,16 +1047,21 @@ async fn reconcile_terminal_session(
     cwd: &str,
     session_id: &str,
     agent: AgentKind,
+    account: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
     let Some(mut conn) = open(db_path).await? else {
         return Ok(false);
     };
     let changed =
-        reconcile_terminal_session_on(&mut conn, repo, term_key, cwd, session_id, agent).await?;
+        reconcile_terminal_session_on(&mut conn, repo, term_key, cwd, session_id, agent, account)
+            .await?;
     conn.close().await?;
     Ok(changed)
 }
 
+/// `account` is the santree account the session was launched on
+/// (`SANTREE_ACCOUNT`). Only Codex's insert records it: a Claude row is written
+/// by the app at launch with its account already in it.
 async fn reconcile_terminal_session_on(
     conn: &mut SqliteConnection,
     repo: &str,
@@ -1012,21 +1069,27 @@ async fn reconcile_terminal_session_on(
     cwd: &str,
     session_id: &str,
     agent: AgentKind,
+    account: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
     let statement = match agent {
+        // A new thread on the surface is the launch's own: it runs on the
+        // account the launch chose, so the row follows it.
         AgentKind::Codex => sqlx::query(
-            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind) \
-             VALUES (?, ?, ?, ?, ?) \
+            "INSERT INTO terminal_sessions \
+               (repo, term_key, cwd, session_id, agent_kind, account) \
+             VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT (repo, term_key, agent_kind) DO UPDATE SET \
                session_id = excluded.session_id, \
-               cwd = excluded.cwd \
+               cwd = excluded.cwd, \
+               account = excluded.account \
              WHERE terminal_sessions.session_id <> excluded.session_id",
         )
         .bind(repo)
         .bind(term_key)
         .bind(cwd)
         .bind(session_id)
-        .bind(agent.as_str()),
+        .bind(agent.as_str())
+        .bind(account),
         _ => sqlx::query(
             "UPDATE terminal_sessions SET session_id = ? \
              WHERE repo = ? AND term_key = ? AND agent_kind = ? AND session_id <> ?",
@@ -1087,6 +1150,7 @@ trait Store {
         cwd: &str,
         session_id: &str,
         agent: AgentKind,
+        account: Option<&str>,
     ) -> Result<bool, sqlx::Error>;
 
     async fn record_usage(
@@ -1097,6 +1161,7 @@ trait Store {
 
     async fn record_rate_limits(
         &mut self,
+        account: Option<&str>,
         windows: &[RateLimitWindow],
     ) -> Result<bool, sqlx::Error>;
 
@@ -1152,8 +1217,9 @@ impl Store for PathStore<'_> {
         cwd: &str,
         session_id: &str,
         agent: AgentKind,
+        account: Option<&str>,
     ) -> Result<bool, sqlx::Error> {
-        reconcile_terminal_session(self.0, repo, term_key, cwd, session_id, agent).await
+        reconcile_terminal_session(self.0, repo, term_key, cwd, session_id, agent, account).await
     }
 
     async fn record_usage(
@@ -1175,9 +1241,10 @@ impl Store for PathStore<'_> {
 
     async fn record_rate_limits(
         &mut self,
+        account: Option<&str>,
         windows: &[RateLimitWindow],
     ) -> Result<bool, sqlx::Error> {
-        record_rate_limits(self.0, windows).await
+        record_rate_limits(self.0, account, windows).await
     }
 
     fn note(&mut self, event: &str, detail: &str) {
@@ -1219,8 +1286,10 @@ impl Store for ConnStore<'_> {
         cwd: &str,
         session_id: &str,
         agent: AgentKind,
+        account: Option<&str>,
     ) -> Result<bool, sqlx::Error> {
-        reconcile_terminal_session_on(self.conn, repo, term_key, cwd, session_id, agent).await
+        reconcile_terminal_session_on(self.conn, repo, term_key, cwd, session_id, agent, account)
+            .await
     }
 
     async fn record_usage(
@@ -1242,9 +1311,10 @@ impl Store for ConnStore<'_> {
 
     async fn record_rate_limits(
         &mut self,
+        account: Option<&str>,
         windows: &[RateLimitWindow],
     ) -> Result<bool, sqlx::Error> {
-        record_rate_limits_on(self.conn, windows).await
+        record_rate_limits_on(self.conn, account, windows).await
     }
 
     fn note(&mut self, _event: &str, detail: &str) {
@@ -1271,6 +1341,11 @@ pub struct HookEnv {
     pub repo: String,
     /// `SANTREE_TERM_KEY`.
     pub term_key: String,
+    /// `SANTREE_ACCOUNT` as found: the santree account the session was
+    /// launched on, when it is not the Default one, agent-qualified
+    /// (`claude:work`). Read it through [`HookEnv::account_for`], which accepts
+    /// only a well-formed tag for the agent asking.
+    pub account: Option<String>,
 }
 
 impl HookEnv {
@@ -1279,11 +1354,20 @@ impl HookEnv {
         Self {
             repo: std::env::var("SANTREE_REPO").unwrap_or_default(),
             term_key: std::env::var("SANTREE_TERM_KEY").unwrap_or_default(),
+            account: std::env::var("SANTREE_ACCOUNT").ok(),
         }
+    }
+
+    /// The account id `agent`'s session runs on, or `None` for the Default
+    /// account — including for a tag naming the other agent or malformed.
+    pub fn account_for(&self, agent: AgentKind) -> Option<&str> {
+        santree_core::domain::account_of_tag(self.account.as_deref()?, agent)
     }
 
     /// An environment captured elsewhere — the `env` pairs a relayed hook
     /// carries. The last value of a repeated name wins, as in a real env.
+    /// `SANTREE_ACCOUNT` is not read: a Daedalus session always runs on the
+    /// Default account, so a relayed one names nothing santree launched.
     pub fn from_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
         let mut env = Self::default();
         for (key, value) in pairs {
@@ -1374,7 +1458,8 @@ pub async fn apply(
         Invocation::Statusline => {
             let p: Value = serde_json::from_slice(stdin).unwrap_or(Value::Null);
             let reading = StatuslineReading::of(&p);
-            record_statusline_to(&mut store, &p, &reading).await;
+            record_statusline_to(&mut store, &p, &reading, env.account_for(AgentKind::Claude))
+                .await;
         }
     }
     store.applied
@@ -2057,7 +2142,9 @@ mod tests {
         };
 
         // No db yet → no-op, no panic, and crucially no db created.
-        assert!(!record_rate_limits(db, &[five(10.0, None)]).await.unwrap());
+        assert!(!record_rate_limits(db, None, &[five(10.0, None)])
+            .await
+            .unwrap());
         assert!(!db_path.exists(), "must never create the app's db");
 
         // The table the app owns (mirrors migration 0027).
@@ -2079,18 +2166,20 @@ mod tests {
         }
 
         let first = [five(37.0, Some(1_787_000_000_000)), week.clone()];
-        assert!(record_rate_limits(db, &first).await.unwrap());
+        assert!(record_rate_limits(db, None, &first).await.unwrap());
         // The identical set again → no write, no UI nudge.
-        assert!(!record_rate_limits(db, &first).await.unwrap());
+        assert!(!record_rate_limits(db, None, &first).await.unwrap());
         // One window moving is enough to write (and only that row changes).
-        assert!(
-            record_rate_limits(db, &[five(42.0, Some(1_787_000_000_000)), week.clone()])
-                .await
-                .unwrap()
-        );
+        assert!(record_rate_limits(
+            db,
+            None,
+            &[five(42.0, Some(1_787_000_000_000)), week.clone()]
+        )
+        .await
+        .unwrap());
         // A reset time changing counts as a change too, even at the same percentage.
         assert!(
-            record_rate_limits(db, &[five(42.0, Some(1_787_018_000_000))])
+            record_rate_limits(db, None, &[five(42.0, Some(1_787_018_000_000))])
                 .await
                 .unwrap()
         );
@@ -2511,6 +2600,7 @@ mod tests {
              created_at TEXT NOT NULL DEFAULT '', \
              agent_kind TEXT NOT NULL DEFAULT 'Claude' \
                CHECK (agent_kind IN ('Claude', 'Codex', 'Cursor', 'Opencode')), \
+             account TEXT, \
              PRIMARY KEY (repo, term_key, agent_kind))",
         )
         .execute(&mut c)
@@ -2542,7 +2632,15 @@ mod tests {
         let (base, db_path) = registry_db("reconcile").await;
         let db = db_path.to_str().unwrap();
         let claude = |key: &'static str, sid: &'static str| {
-            reconcile_terminal_session(db, "acme/app", key, "/checkout", sid, AgentKind::Claude)
+            reconcile_terminal_session(
+                db,
+                "acme/app",
+                key,
+                "/checkout",
+                sid,
+                AgentKind::Claude,
+                None,
+            )
         };
 
         // No db yet ⇒ silent no-op, never creates one (COMPLIANCE: never disrupt).
@@ -2554,6 +2652,7 @@ mod tests {
             "/checkout",
             "new-id",
             AgentKind::Claude,
+            None,
         )
         .await
         .unwrap());
@@ -2639,7 +2738,15 @@ mod tests {
         let (base, db_path) = registry_db("codex-bind").await;
         let db = db_path.to_str().unwrap();
         let codex = |sid: &'static str, cwd: &'static str| {
-            reconcile_terminal_session(db, "acme/app", "tree:AK-1", cwd, sid, AgentKind::Codex)
+            reconcile_terminal_session(
+                db,
+                "acme/app",
+                "tree:AK-1",
+                cwd,
+                sid,
+                AgentKind::Codex,
+                None,
+            )
         };
 
         // A Claude session already runs on the same surface.
@@ -2736,7 +2843,8 @@ mod tests {
             env,
             HookEnv {
                 repo: "acme/app".into(),
-                term_key: "tree:AK-1".into()
+                term_key: "tree:AK-1".into(),
+                account: None,
             }
         );
     }
@@ -2765,6 +2873,7 @@ mod tests {
         let env = HookEnv {
             repo: "acme/app".into(),
             term_key: "tree:AK-1".into(),
+            account: None,
         };
         let applied = apply(&mut conn, &start, payload, &env).await;
         assert_eq!(

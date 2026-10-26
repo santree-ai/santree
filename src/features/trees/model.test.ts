@@ -415,6 +415,7 @@ function extraTabRow(
     agentKind: kind === "terminal" ? null : agentKind,
     title,
     pr: null,
+    account: null,
   };
 }
 

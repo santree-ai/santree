@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use santree_core::domain::{AgentKind, AgentSession, AgentVersionStatus};
+use santree_core::domain::{AgentKind, AgentSession, AgentVersionStatus, EnvVar};
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 
@@ -207,6 +207,11 @@ pub struct SessionRequest<'a> {
     /// the session's own row. `None` for every surface that has no review tools;
     /// a review that reaches [`CodexProvider`] without one fails to launch.
     pub review_mcp_config: Option<&'a Path>,
+    /// The account this launch runs on and its environment
+    /// (`accounts::for_launch`); `None` is the Default account. The caller pins
+    /// it onto the session; a provider only needs it where the CLI is asked
+    /// something on the session's behalf, or a row is minted.
+    pub account: Option<(&'a str, &'a [EnvVar])>,
 }
 
 #[async_trait]
@@ -236,6 +241,7 @@ impl AgentProvider for ClaudeProvider {
             self.home.as_deref(),
             &self.executable,
             request.allow_fresh,
+            request.account,
         )
         .await
     }

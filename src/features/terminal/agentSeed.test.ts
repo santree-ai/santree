@@ -15,6 +15,8 @@ const fresh: Extract<AgentSession, { type: "fresh" }> = {
   executable: "claude",
   sessionId: "sess-1",
   launchFlags: "",
+  launchEnv: [],
+  account: null,
 };
 const resume: Extract<AgentSession, { type: "resume" }> = {
   type: "resume",
@@ -22,6 +24,8 @@ const resume: Extract<AgentSession, { type: "resume" }> = {
   executable: "claude",
   sessionId: "sess-1",
   launchFlags: "",
+  launchEnv: [],
+  account: null,
 };
 
 describe("agentSessionSeed", () => {
@@ -44,6 +48,8 @@ describe("agentSessionSeed", () => {
         executable: "/custom/codex",
         sessionId: null,
         launchFlags: "",
+        launchEnv: [],
+        account: null,
       },
       { prompt: "inspect this" },
     );
@@ -62,7 +68,9 @@ describe("agentSessionSeed", () => {
       executable: "codex",
       sessionId: "t1",
       launchFlags: "",
-    } as const;
+      launchEnv: [],
+      account: null,
+    } satisfies AgentSession;
     const seed = agentSessionSeed(codex, {
       hookFlag: "-c 'hooks.SessionStart=[]'",
       repo: "acme/app",
@@ -91,6 +99,8 @@ describe("agentSessionSeed", () => {
           executable: "codex",
           sessionId: null,
           launchFlags,
+          launchEnv: [],
+          account: null,
         },
         { prompt: "review it", hookFlag: "-c 'hooks.SessionStart=[]'" },
       ),
@@ -106,6 +116,8 @@ describe("agentSessionSeed", () => {
           executable: "codex",
           sessionId: "t1",
           launchFlags,
+          launchEnv: [],
+          account: null,
         },
         {},
       ),
@@ -152,14 +164,40 @@ describe("agentSessionSeed", () => {
     );
   });
 
-  /** The `env` prefix is what Claude's SessionStart hook reads to adopt a new
-   *  (e.g. post-/clear) session id for this exact terminal; half of it is useless. */
-  it("omits the env prefix unless both repo and termKey are given", () => {
+  /** The `env` prefix carries two independent things: the repo/termKey pair
+   *  Claude's SessionStart hook reads to adopt a new (e.g. post-/clear) session
+   *  id for this exact terminal — half of it is useless — and the account the
+   *  session runs on, which an attach needs as much as a launch. */
+  it("puts the account env and the attribution pair under one env, each independently", () => {
     expect(agentSessionSeed(fresh, { prompt: "go", repo: "acme" })).toBe(
       "exec 'claude' --session-id 'sess-1' 'go'",
     );
     expect(agentSessionSeed(fresh, { prompt: "go", termKey: "triage:AK-1" })).toBe(
       "exec 'claude' --session-id 'sess-1' 'go'",
+    );
+    const launchEnv = [
+      { name: "CLAUDE_CONFIG_DIR", value: "/acc/it's" },
+      { name: "SANTREE_ACCOUNT", value: "work" },
+    ];
+    expect(agentSessionSeed({ ...resume, launchEnv }, { repo: "acme" })).toBe(
+      "exec env CLAUDE_CONFIG_DIR='/acc/it'\\''s' SANTREE_ACCOUNT='work' 'claude' --resume 'sess-1'",
+    );
+    expect(agentSessionSeed({ ...resume, launchEnv }, { repo: "acme", termKey: "tree:AK-1" })).toBe(
+      "exec env CLAUDE_CONFIG_DIR='/acc/it'\\''s' SANTREE_ACCOUNT='work' " +
+        "SANTREE_REPO='acme' SANTREE_TERM_KEY='tree:AK-1' 'claude' --resume 'sess-1'",
+    );
+    expect(
+      agentSessionSeed({
+        type: "attach",
+        agentKind: "Claude",
+        executable: "claude",
+        sessionId: "sess-1",
+        backgroundId: "14ffdc20",
+        launchEnv,
+        account: "work",
+      }),
+    ).toBe(
+      "exec env CLAUDE_CONFIG_DIR='/acc/it'\\''s' SANTREE_ACCOUNT='work' 'claude' attach '14ffdc20'",
     );
   });
 
@@ -265,7 +303,15 @@ describe("the launch line each call site used to assemble", () => {
    *  launch failure, not a no-op. */
   it("never leaks a Claude-shaped flag onto a Codex launch", () => {
     const line = agentSessionSeed(
-      { type: "fresh", agentKind: "Codex", executable: "codex", sessionId: null, launchFlags: "" },
+      {
+        type: "fresh",
+        agentKind: "Codex",
+        executable: "codex",
+        sessionId: null,
+        launchFlags: "",
+        launchEnv: [],
+        account: null,
+      },
       {
         configuredFor: "Codex",
         model: "gpt-5-codex",
@@ -312,6 +358,8 @@ describe("resumeInvocation agrees with the seeded resume", () => {
       executable: `/opt/${bin}`,
       sessionId,
       launchFlags: "",
+      launchEnv: [],
+      account: null,
     });
     expect(seeded).toBe(`exec '/opt/${bin}' ${invocation}`);
   });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { AgentSession } from "../../bindings";
 import { agentProvider, agentSessionSeed, providerExecutable, sessionAgent } from "./agentProvider";
 
 describe("agent provider contract", () => {
@@ -12,6 +13,8 @@ describe("agent provider contract", () => {
           executable: "/opt/claude",
           sessionId: "old",
           launchFlags: "",
+          launchEnv: [],
+          account: null,
         },
         "Codex",
       ),
@@ -31,6 +34,8 @@ describe("agent provider contract", () => {
           executable: "/opt/cursor-agent",
           sessionId: "cursor-1",
           launchFlags: "",
+          launchEnv: [],
+          account: null,
         },
         {},
       ),
@@ -44,7 +49,9 @@ describe("agent provider contract", () => {
       executable: "/opt/claude",
       sessionId: "14ffdc20-a4ce-4bac-b737-d952b4a43500",
       backgroundId: "14ffdc20",
-    } as const;
+      launchEnv: [],
+      account: null,
+    } satisfies AgentSession;
     // The running session keeps the flags it was started under; the config
     // that would decorate a resume or a fresh launch is not applied to it.
     expect(

@@ -759,7 +759,7 @@ const tab = (
   agentKind: AgentKind | null,
   title: string,
   kind: WorktreeTab["kind"] = agentKind ? "agent" : "terminal",
-): WorktreeTab => ({ id, worktreeId, kind, agentKind, title, pr: null });
+): WorktreeTab => ({ id, worktreeId, kind, agentKind, title, pr: null, account: null });
 
 export const TABS: WorktreeTab[] = [
   tab("t-142a", "QK-142", "Claude", "Claude Code"),

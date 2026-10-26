@@ -868,6 +868,7 @@ mod tests {
             agent_kind: Some(AgentKind::Claude),
             title: "AI review".into(),
             pr,
+            account: None,
         }
     }
 

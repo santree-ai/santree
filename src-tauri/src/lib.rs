@@ -3,6 +3,7 @@
 //! Keep this file about *registration* only. Command bodies live in
 //! [`commands`], and the real logic lives in the `santree-core` crate.
 
+mod accounts;
 mod agent;
 mod agent_procs;
 mod awake;
@@ -111,6 +112,11 @@ fn specta_builder() -> AppBuilder {
             commands::codex_account,
             commands::codex_models,
             commands::codex_rate_limits,
+            commands::agent_accounts,
+            commands::agent_account_create,
+            commands::agent_account_remove,
+            commands::agent_account_login_command,
+            commands::terminal_session_set_account,
             commands::codex_logout,
             commands::claude_usage,
             commands::agent_auth,
@@ -569,6 +575,10 @@ fn install_panic_hook() {
 pub fn run() {
     // Installed first so it also covers `hydrate_path`'s shell-out below.
     install_panic_hook();
+
+    // Before anything reads the environment or starts a thread: santree may
+    // have been launched from one of its own account tabs.
+    accounts::forget_inherited_account();
 
     // Must run before any subprocess is spawned (git, hooks, setup scripts, agents).
     hydrate_path();

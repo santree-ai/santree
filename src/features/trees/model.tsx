@@ -938,6 +938,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         // Persisted so the tab re-derives its deny list and its review tools when
         // it reopens — the hand-off carrying them dies with the app.
         pr: fixCiLaunch.pr,
+        account: null,
       });
     }
     select(worktreeId);
@@ -1101,6 +1102,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
           // The "+" menu opens agent and terminal tabs only; a PR belongs to the
           // review kinds, which arrive through the hand-off above.
           pr: null,
+          account: null,
         });
         setTabFor(activeId, extraTab(id));
         return id;

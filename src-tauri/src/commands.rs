@@ -19,24 +19,26 @@ use tauri_specta::Event;
 use santree_core::{
     config,
     domain::{
-        AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession, AgentVersionStatus,
-        AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog, ClaudeGlobalCapture,
-        ClaudeRateLimitWindow, CodexAccount, CodexHealth, CodexModel, CodexRateLimits,
-        DaedalusAgentHooks, DaedalusHealth, DaedalusIcon, DaedalusLink, DaedalusMachine,
-        DaedalusSettingAnswer, DaedalusSettingKey, DaedalusWorkspaceList, EnglishAnalysis,
-        EnglishLog, FileSource, GithubApiBudget, GithubStatus, JiraSite, JiraStatus,
-        LegacyCliMigration, LinearApiBudget, LinearOrg, LinearStatus, LinearTeam, LogExport,
-        MergeQueueView, NewInlineComment, NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft,
-        PrLabel, PromptInfo, PromptLayer, PromptPreview, PromptWorkItemSample, Repo, RepoBranch,
-        RepoLocation, ResourceUsage, ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent,
-        ReviewInbox, ReviewPr, ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer,
-        ScriptInfo, SessionDetail, SessionState, SessionSubagent, SessionUsageLive, Settings,
-        TabKind, TabLaunch, TabPr, Task, TickTickList, TickTickStatus, TicketRef, TriageDetail,
-        TriageSchedule, TriageSession, TriageTicket, UsageReport, ViewedMarks, Worktree,
-        WorktreeLaunch, WorktreePr, WorktreeSession, WorktreeTab,
+        AgentAccount, AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession,
+        AgentVersionStatus, AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog,
+        ClaudeAccountRateLimits, ClaudeAccountUsage, ClaudeGlobalCapture, CodexAccount,
+        CodexAccountRateLimits, CodexHealth, CodexModel, DaedalusAgentHooks, DaedalusHealth,
+        DaedalusIcon, DaedalusLink, DaedalusMachine, DaedalusSettingAnswer, DaedalusSettingKey,
+        DaedalusWorkspaceList, EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget,
+        GithubStatus, JiraSite, JiraStatus, LegacyCliMigration, LinearApiBudget, LinearOrg,
+        LinearStatus, LinearTeam, LogExport, MergeQueueView, NewInlineComment, NewPr,
+        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptLayer,
+        PromptPreview, PromptWorkItemSample, Repo, RepoBranch, RepoLocation, ResourceUsage,
+        ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
+        ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail,
+        SessionState, SessionSubagent, SessionUsageLive, Settings, TabKind, TabLaunch, TabPr, Task,
+        TickTickList, TickTickStatus, TicketRef, TriageDetail, TriageSchedule, TriageSession,
+        TriageTicket, UsageReport, ViewedMarks, Worktree, WorktreeLaunch, WorktreePr,
+        WorktreeSession, WorktreeTab,
     },
 };
 
+use crate::accounts;
 use crate::awake::{self, KeepAwake, KeepAwakeStatus};
 use crate::codex_cli;
 use crate::codex_rollouts;
@@ -272,7 +274,7 @@ pub async fn codex_health(db: State<'_, Db>) -> CmdResult<CodexHealth> {
 #[specta::specta]
 pub async fn codex_account(db: State<'_, Db>) -> CmdResult<CodexAccount> {
     let executable = settings::agent_executable(&db, AgentKind::Codex).await?;
-    Ok(codex_cli::account(&executable).await?)
+    Ok(codex_cli::account(&executable, None).await?)
 }
 
 #[tauri::command]
@@ -284,12 +286,109 @@ pub async fn codex_models(db: State<'_, Db>) -> CmdResult<Vec<CodexModel>> {
 
 /// Codex subscription usage, as of the last turn Codex actually ran — read back
 /// from its own rollout transcript, the only source that needs neither a control
-/// plane nor the vendor's credentials. Empty when Codex has never run here, or
+/// plane nor the vendor's credentials. One entry per account, the Default first:
+/// each is the newest snapshot among the rollouts of the sessions whose stored
+/// row names that account now. Empty limits when Codex has never run there, or
 /// when the plan reports no windows.
 #[tauri::command]
 #[specta::specta]
-pub async fn codex_rate_limits() -> CmdResult<CodexRateLimits> {
-    Ok(tokio::task::spawn_blocking(codex_rollouts::latest_rate_limits).await?)
+pub async fn codex_rate_limits(db: State<'_, Db>) -> CmdResult<Vec<CodexAccountRateLimits>> {
+    let bound = codex_rollouts::account_bindings(&db).await?;
+    let accounts: Vec<String> = accounts::on_disk(AgentKind::Codex)
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect();
+    Ok(
+        tokio::task::spawn_blocking(move || codex_rollouts::latest_rate_limits(&bound, &accounts))
+            .await?,
+    )
+}
+
+/// The accounts santree keeps for `agent` (Claude or Codex), without the
+/// Default one, which is the CLI's own and never listed.
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_accounts(agent: AgentKind, db: State<'_, Db>) -> CmdResult<Vec<AgentAccount>> {
+    Ok(accounts::list(&db, agent).await?)
+}
+
+/// Make a new account for `agent` named `label`: its folder, linked to the
+/// Default account's shared state. It is not signed in; the user does that with
+/// [`agent_account_login_command`] in a terminal.
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_account_create(
+    agent: AgentKind,
+    label: String,
+    db: State<'_, Db>,
+) -> CmdResult<AgentAccount> {
+    Ok(accounts::create(&db, agent, &label).await?)
+}
+
+/// Delete an account's folder. Sessions launched on it continue on the Default
+/// account, and settings naming it are cleared. The CLI's keychain item for it,
+/// if it made one, is the CLI's and stays.
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_account_remove(
+    agent: AgentKind,
+    id: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    Ok(accounts::remove(&db, agent, &id).await?)
+}
+
+/// The shell command that signs account `id` in — the vendor's own login with
+/// the account's folder as its config — for a terminal the user watches. Built
+/// here so the folder and its quoting never come from the webview.
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_account_login_command(
+    agent: AgentKind,
+    id: String,
+    db: State<'_, Db>,
+) -> CmdResult<String> {
+    Ok(accounts::login_command(&db, agent, &id).await?)
+}
+
+/// Move a tab's stored session to another account (`None` = Default): the next
+/// launch of the surface resumes the same conversation under that login. The
+/// running process is not touched — the frontend ends and reopens the tab, on
+/// the user's click.
+#[tauri::command]
+#[specta::specta]
+pub async fn terminal_session_set_account(
+    repo: String,
+    term_key: String,
+    agent: AgentKind,
+    account: Option<String>,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    validate_term_key(&term_key)?;
+    if !matches!(agent, AgentKind::Claude | AgentKind::Codex) {
+        return Err(format!("{} has no accounts in santree", agent.as_str()).into());
+    }
+    if repo::is_daedalus(&db, &repo).await? {
+        return Err("a Daedalus project's sessions run on the box's own account".into());
+    }
+    if let Some(id) = &account {
+        accounts::existing(agent, id)?;
+    }
+    let updated = sqlx::query(
+        "UPDATE terminal_sessions SET account = ? \
+         WHERE repo = ? AND term_key = ? AND agent_kind = ?",
+    )
+    .bind(&account)
+    .bind(&repo)
+    .bind(&term_key)
+    .bind(agent.as_str())
+    .execute(&*db)
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Err("this tab has no stored session to continue".into());
+    }
+    Ok(())
 }
 
 /// Hand `codex logout` on, on a click. santree asks; Codex owns what happens to
@@ -943,6 +1042,7 @@ pub async fn commit_worktree(
 pub async fn commit_message(
     repo: String,
     issue_id: String,
+    stage_all: bool,
     db: State<'_, Db>,
     daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {
@@ -1017,7 +1117,6 @@ pub async fn investigate_prompt(
     app: AppHandle,
     repo: String,
     issue_id: String,
-    stage_all: bool,
     db: State<'_, Db>,
     daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {
@@ -1099,6 +1198,14 @@ pub async fn agent_session(
     }
     let agent = context.agent.unwrap_or(agent);
     let surface = context.surface;
+    // Which login the session runs on: a stored surface keeps the one it was
+    // launched on, a new one takes the `agent_account` setting. A Daedalus
+    // session runs on the box, under the box's own login.
+    let account = if remote {
+        None
+    } else {
+        accounts::for_launch(&db, &repo, &term_key, agent).await?
+    };
     // Codex takes santree's review tools as launch configuration, so the path is
     // resolved here — from the session's own row, never from IPC (COMPLIANCE.md,
     // "santree derives its own paths"). Claude's frontend still passes
@@ -1135,6 +1242,7 @@ pub async fn agent_session(
                 surface,
                 allow_fresh,
                 review_mcp_config: None,
+                account: None,
             },
         )
         .await?);
@@ -1142,7 +1250,7 @@ pub async fn agent_session(
     let executable = settings::agent_executable(&db, agent).await?;
     let provider = provider::provider(agent, executable)?;
     debug_assert_eq!(provider.kind(), agent);
-    Ok(provider
+    let session = provider
         .resolve_session(SessionRequest {
             db: &db,
             repo: &repo,
@@ -1153,8 +1261,15 @@ pub async fn agent_session(
             surface,
             allow_fresh,
             review_mcp_config: review_mcp_config.as_deref(),
+            account: account
+                .as_ref()
+                .map(|(id, env)| (id.as_str(), env.as_slice())),
         })
-        .await?)
+        .await?;
+    Ok(match account {
+        Some((id, env)) => session.with_account(Some(id), env),
+        None => session,
+    })
 }
 
 /// Where this session's review tools are described, re-derived from the PR its
@@ -2749,11 +2864,13 @@ pub async fn session_usage_live(db: State<'_, Db>) -> CmdResult<Vec<SessionUsage
 
 /// Claude's account-level subscription rate-limit windows (5-hour, 7-day, ...),
 /// as its own status line last reported them — captured from the same stdin as
-/// [`session_usage_live`], never from a credential. Empty until a subscriber
-/// session has rendered a status line after its first API response. Display-only.
+/// [`session_usage_live`], never from a credential. One entry per account, the
+/// Default first; an account's windows are empty until one of its subscriber
+/// sessions has rendered a status line after its first API response.
+/// Display-only.
 #[tauri::command]
 #[specta::specta]
-pub async fn claude_rate_limits(db: State<'_, Db>) -> CmdResult<Vec<ClaudeRateLimitWindow>> {
+pub async fn claude_rate_limits(db: State<'_, Db>) -> CmdResult<Vec<ClaudeAccountRateLimits>> {
     Ok(crate::hooks::claude_rate_limits(&db).await?)
 }
 
@@ -2768,7 +2885,7 @@ pub async fn claude_rate_limits(db: State<'_, Db>) -> CmdResult<Vec<ClaudeRateLi
 pub async fn claude_fetch_usage(
     app: AppHandle,
     db: State<'_, Db>,
-) -> CmdResult<santree_core::domain::ClaudeUsageFetch> {
+) -> CmdResult<Vec<ClaudeAccountUsage>> {
     let fetched = crate::claude_usage::fetch(&db).await?;
     // The same event the status-line capture raises, so every usage reader
     // refreshes from one signal however the numbers arrived.
