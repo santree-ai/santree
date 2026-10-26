@@ -3168,15 +3168,18 @@ export const useSetWorktreeTitle = (repo: string) =>
  */
 const gitIndexScope = (repo: string, id: string) => ({ id: `git-index:${repo}:${id}` });
 
-/** Draft a commit message from the staged diff (headless `claude -p`).
+/** Draft a commit message for what the commit would contain — the index, or
+ *  everything when the box stages all — via the repo's headless helper. A
+ *  failure toasts; nothing canned ever lands in the box.
  *
- *  Deliberately *not* in {@link gitIndexScope}: it only reads the index, and it
+ *  Deliberately *not* in {@link gitIndexScope}: it only reads git, and it
  *  waits on a multi-second model call — queueing staging clicks behind it would
  *  hold their optimistic patches open long enough for a watcher-driven status
  *  refetch to reconcile them away, flipping checkboxes back under the user. */
 export const useCommitMessage = (repo: string) =>
   useMutation({
-    mutationFn: (id: string) => unwrap(commands.commitMessage(repo, id)),
+    mutationFn: ({ id, stageAll }: { id: string; stageAll: boolean }) =>
+      unwrap(commands.commitMessage(repo, id, stageAll)),
   });
 
 /** Commit a worktree (optionally staging everything first). A commit only touches

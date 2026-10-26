@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use base64::Engine;
 use tauri::ipc::Channel;
 
@@ -1620,9 +1620,13 @@ pub async fn commit(
     Ok(())
 }
 
-/// Draft a commit message from the worktree's staged diff using its configured
-/// headless provider and the `fill-commit` prompt template. Falls back to a plain
-/// message when the provider isn't available, the diff is empty, or the call fails.
+/// Draft a commit message for what the next commit would contain — the index,
+/// or everything when `stage_all` is on, matching [`git::commit`] — using the
+/// repo's configured headless provider and the `fill-commit` prompt template.
+///
+/// Every failure is an error the user sees, never a canned subject in the box:
+/// a placeholder like "update" reads as the AI's answer, and hid both an empty
+/// diff and a helper that never answered.
 ///
 /// The diff is read wherever the worktree lives; the helper always runs here,
 /// fed the text ([`crate::agent::HelperDir`]).
@@ -1631,25 +1635,30 @@ pub async fn commit_message(
     daedalus: &DaedalusHost,
     repo: &str,
     issue_id: &str,
+    stage_all: bool,
 ) -> Result<String> {
+    /// The prompt carries at most this much of the diff.
+    const DIFF_BUDGET: usize = 12_000;
+
     let ticket = ticket_id(db, repo, issue_id).await?;
     // The base sentinel commits the repo root on its own branch; a per-issue
     // worktree commits to the branch its link row records.
-    let (branch, diff, dir) = with_checkout(db, daedalus, repo, issue_id, |w| {
+    let (branch, diff, dir) = with_checkout(db, daedalus, repo, issue_id, move |w| {
         let branch = w.branch.clone().unwrap_or_else(|| head_branch(&w.dir));
-        Ok((branch, git::staged_diff(&w.dir), w.dir.clone()))
+        let diff = git::commit_diff(&w.dir, stage_all, DIFF_BUDGET)?;
+        Ok((branch, diff, w.dir.clone()))
     })
     .await?;
 
-    let fallback = ticket
-        .as_ref()
-        .map_or_else(|| "update".to_string(), |id| format!("[{id}] update"));
     if diff.trim().is_empty() {
-        return Ok(fallback);
+        bail!(if stage_all {
+            "There are no changes to describe."
+        } else {
+            "Nothing is staged — stage the changes to describe, or turn on \"stage all\"."
+        });
     }
 
-    // Cap the diff so the prompt stays within sane arg/token limits.
-    let diff: String = diff.chars().take(12_000).collect();
+    let diff: String = diff.chars().take(DIFF_BUDGET).collect();
     let prompt = crate::prompts::render(
         db,
         Some(repo),
@@ -1668,8 +1677,7 @@ pub async fn commit_message(
     // Agent CLIs can take tens of seconds; run them off the async runtime's
     // worker threads.
     let drafted = tokio::task::spawn_blocking(move || {
-        // Best-effort: falls back to the generated subject below.
-        let cwd = crate::agent::HelperDir::for_checkout(&dir).ok()?;
+        let cwd = crate::agent::HelperDir::for_checkout(&dir)?;
         crate::agent::run_helper(
             &helper,
             cwd.path(),
@@ -1677,15 +1685,17 @@ pub async fn commit_message(
             &[],
             crate::agent::SHORT_TIMEOUT,
         )
-        .ok()
     })
     .await
-    .ok()
-    .flatten();
+    .context("commit message helper")?
+    .inspect_err(|e| log::warn!("drafting a commit message for {repo}/{issue_id} failed: {e:#}"))
+    .context("Couldn't draft a commit message")?;
 
-    Ok(drafted
-        .map(|s| s.trim_matches(['"', '\'', '`']).trim().to_string())
-        .unwrap_or(fallback))
+    let message = drafted.trim_matches(['"', '\'', '`']).trim().to_string();
+    if message.is_empty() {
+        bail!("The commit message helper answered with nothing.");
+    }
+    Ok(message)
 }
 
 // ── Agent work-prompt file ───────────────────────────────────────────────────

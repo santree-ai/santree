@@ -103,7 +103,8 @@ export function CommitBox({
   const committable = stageAll ? totalCount : stagedCount;
   const canCommit = committable > 0 && message.trim().length > 0 && !committing;
 
-  const onDraft = () => draft(worktreeId, { onSuccess: (msg) => setMessage(msg) });
+  const onDraft = () =>
+    draft({ id: worktreeId, stageAll }, { onSuccess: (msg) => setMessage(msg) });
   const onCommit = () =>
     commit(
       { message: message.trim(), stageAll },

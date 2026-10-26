@@ -1410,9 +1410,37 @@ pub fn commit(cwd: &Checkout, message: &str, stage_all: bool) -> Result<()> {
     .map(|_| ())
 }
 
-/// The full staged diff, for AI commit-message generation.
-pub fn staged_diff(cwd: &Checkout) -> String {
-    git_output(cwd, &["diff", "--cached"]).unwrap_or_default()
+/// What the next [`commit`] would contain, as a diff, for AI commit-message
+/// generation — the same `stage_all` the commit is given, so the draft describes
+/// the commit it is for. Reading only the index while "stage all" was on handed
+/// the model an empty diff for every unstaged change, so it was never asked.
+///
+/// With `stage_all`: every tracked change against HEAD, then each untracked file
+/// as an all-adds diff, stopping once `budget` bytes are collected — the caller
+/// caps the prompt anyway, and one huge new file must not cost a git call per
+/// file after it.
+pub fn commit_diff(cwd: &Checkout, stage_all: bool, budget: usize) -> Result<String> {
+    if !stage_all {
+        return git_output(cwd, &["diff", "--cached"]);
+    }
+    // No HEAD yet (a repo's first commit): everything is new, so the index and
+    // the working tree together are the change.
+    let mut out = match git_output(cwd, &["diff", "HEAD"]) {
+        Ok(diff) => diff,
+        Err(_) => git_output(cwd, &["diff", "--cached"])? + &git_output(cwd, &["diff"])?,
+    };
+    let untracked = git_output(cwd, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for path in untracked.split('\0').filter(|p| !p.is_empty()) {
+        if out.len() >= budget {
+            break;
+        }
+        // A file that can't be read (a broken link, one swapped mid-listing) is
+        // left out of the draft's context, not a reason to draft nothing.
+        if let Ok(diff) = file_diff(cwd, path, true) {
+            out.push_str(&diff);
+        }
+    }
+    Ok(out)
 }
 
 /// Push `branch` to origin, setting upstream. Network op — slow / may fail.
@@ -1600,6 +1628,29 @@ mod tests {
             .unwrap()
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    /// The commit box's draft once read only the index, so with "stage all" on
+    /// an unstaged edit and a new file gave the model an empty diff and the box
+    /// a canned "update". The draft must see exactly what the commit would take.
+    #[test]
+    fn commit_diff_sees_what_a_stage_all_commit_would_take() {
+        let repo = scratch_dir("commit-diff");
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.test"]);
+        run_git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        run_git(&repo, &["add", "-A"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        std::fs::write(repo.join("a.txt"), "one\nedited\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "brand new\n").unwrap();
+        let cwd = Checkout::local(&repo);
+
+        assert!(commit_diff(&cwd, false, 12_000).unwrap().trim().is_empty());
+        let all = commit_diff(&cwd, true, 12_000).unwrap();
+        assert!(all.contains("+edited"), "{all}");
+        assert!(all.contains("+brand new"), "{all}");
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     // ---- safe_branch (flag injection + git's own ref rules) ----

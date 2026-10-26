@@ -894,7 +894,9 @@ pub async fn commit_worktree(
     Ok(worktree::commit(&db, &daedalus, &repo, &issue_id, &message, stage_all).await?)
 }
 
-/// Draft a commit message from the staged diff via a headless `claude -p` call.
+/// Draft a commit message for what the next commit would contain via the
+/// repo's headless helper. `stage_all` is the commit box's own setting, so the
+/// draft describes the commit the button would make.
 #[tauri::command]
 #[specta::specta]
 pub async fn commit_message(
@@ -903,7 +905,7 @@ pub async fn commit_message(
     db: State<'_, Db>,
     daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {
-    Ok(worktree::commit_message(&db, &daedalus, &repo, &issue_id).await?)
+    Ok(worktree::commit_message(&db, &daedalus, &repo, &issue_id, stage_all).await?)
 }
 
 /// Refresh a worktree's stored Linear title (the Issue tab calls this when the
@@ -974,6 +976,7 @@ pub async fn investigate_prompt(
     app: AppHandle,
     repo: String,
     issue_id: String,
+    stage_all: bool,
     db: State<'_, Db>,
     daedalus: State<'_, DaedalusHost>,
 ) -> CmdResult<String> {

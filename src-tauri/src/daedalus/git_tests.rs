@@ -326,7 +326,7 @@ async fn nothing_runs_locally_when_the_link_is_down() {
         "update base",
     );
     refused(
-        worktree::commit_message(&db, &link, &repo, BASE_ID)
+        worktree::commit_message(&db, &link, &repo, BASE_ID, true)
             .await
             .map(drop),
         "commit message",

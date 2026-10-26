@@ -201,7 +201,7 @@ describe("the Santree demo", () => {
 
   it("commits, pushes and opens the PR", async () => {
     await settle(cmd("stageAllPaths")(INFRA, ISSUE), 200);
-    const message = await settle(cmd("commitMessage")(INFRA, ISSUE));
+    const message = await settle(cmd("commitMessage")(INFRA, ISSUE, true));
     expect(message).toMatch(/^fix\(webhooks\): claim deliveries/);
     vi.mocked(events.worktreeBasesChanged.emit).mockClear();
     await settle(cmd("commitWorktree")(INFRA, ISSUE, message, false));
@@ -293,7 +293,7 @@ describe("the Santree demo", () => {
 
     expect((await status()).length).toBeGreaterThan(0);
     await settle(cmd("stageAllPaths")(INFRA, ISSUE), 200);
-    const message = await settle(cmd("commitMessage")(INFRA, ISSUE));
+    const message = await settle(cmd("commitMessage")(INFRA, ISSUE, true));
     expect(message).toMatch(/renew the lease/);
     await settle(cmd("commitWorktree")(INFRA, ISSUE, message, false));
     await settle(cmd("pushWorktree")(INFRA, ISSUE));

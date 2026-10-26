@@ -315,8 +315,12 @@ export const commands = {
 	unstageAllPaths: (repo: string, issueId: string) => typedError<null, CmdError>(__TAURI_INVOKE("unstage_all_paths", { repo, issueId })),
 	/**  Commit the worktree (optionally staging everything first). */
 	commitWorktree: (repo: string, issueId: string, message: string, stageAll: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("commit_worktree", { repo, issueId, message, stageAll })),
-	/**  Draft a commit message from the staged diff via a headless `claude -p` call. */
-	commitMessage: (repo: string, issueId: string) => typedError<string, CmdError>(__TAURI_INVOKE("commit_message", { repo, issueId })),
+	/**
+	 *  Draft a commit message for what the next commit would contain via the
+	 *  repo's headless helper. `stage_all` is the commit box's own setting, so the
+	 *  draft describes the commit the button would make.
+	 */
+	commitMessage: (repo: string, issueId: string, stageAll: boolean) => typedError<string, CmdError>(__TAURI_INVOKE("commit_message", { repo, issueId, stageAll })),
 	/**
 	 *  The saved commit-message draft for a worktree, or `None`. Survives tab
 	 *  switches / restarts until the worktree commits (which clears it).
