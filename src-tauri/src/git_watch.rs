@@ -148,6 +148,22 @@ struct Active {
 }
 
 impl WorktreeWatcher {
+    /// Stop watching `repo_root` if it is the repo being watched: its project
+    /// was forgotten, and nothing will point the watcher anywhere else until
+    /// another repo is opened.
+    pub async fn forget(&self, repo_root: &Path) {
+        let root = repo_root.to_path_buf();
+        let Ok(root) =
+            tokio::task::spawn_blocking(move || std::fs::canonicalize(&root).unwrap_or(root)).await
+        else {
+            return;
+        };
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.as_ref().is_some_and(|a| a.repo_root == root) {
+            *inner = None;
+        }
+    }
+
     /// Point the watcher at `repo_root` (its `.santree/worktrees` subtree, plus
     /// the root itself for the base worktree), replacing any previous watch.
     /// Idempotent: re-watching the same repo once both watches are settled is

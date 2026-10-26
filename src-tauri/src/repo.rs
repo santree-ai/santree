@@ -325,6 +325,134 @@ pub async fn add_daedalus(db: &Db, server_path: &str, remote: Option<&str>) -> R
     get(db, &name).await
 }
 
+/// App-scoped settings whose *value* is a registry name (`src/lib/queries.ts`:
+/// `TRIAGE_DEFAULT_REPO_KEY`, `WORK_DEFAULT_REPO_KEY`, `triageRepoKey`).
+const REPO_VALUED_KEYS: [&str; 2] = ["triage_default_repo", "work_default_repo"];
+const TRIAGE_REPO_KEY_PREFIX: &str = "triage_repo:";
+
+/// The registered repo `name`'s stored path and where it lives; `None` when no
+/// repo has that name.
+pub(crate) async fn registration(
+    db: &Db,
+    name: &str,
+) -> Result<Option<(Option<String>, RepoLocation)>> {
+    let row: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT path, location FROM repos WHERE name = ?")
+            .bind(name)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.map(|(path, location)| (path, RepoLocation::from_db(&location))))
+}
+
+/// Forget a registered repo: its row and every row filed under it, in one
+/// transaction, so a failure leaves it registered exactly as it was. Nothing on
+/// disk (or on Daedalus) is touched, which is what lets the same path be added
+/// again later as a fresh project.
+///
+/// The PR-keyed review tables (`reviewed_files`, `review_briefs`,
+/// `review_drafts`, `review_work_items`) stay: they are keyed by GitHub's
+/// `owner/name`, which every clone of the repo shares and the Reviews inbox
+/// reaches across the org, and each has its own sweep.
+pub async fn remove(db: &Db, name: &str) -> Result<()> {
+    let mut tx = db.begin().await?;
+    let row: Option<(Option<String>,)> = sqlx::query_as("SELECT path FROM repos WHERE name = ?")
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((path,)) = row else {
+        bail!("repo '{name}' is not registered");
+    };
+    let scope = format!("repo:{name}");
+    let has_env: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM settings WHERE scope = ? AND key = ?")
+            .bind(&scope)
+            .bind(crate::env::ENV_VARS_KEY)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+    // The conversations bound to its surfaces, before the bindings go: left
+    // behind, `session_states` would draw them as agents nobody can place.
+    for table in ["session_usage_live", "session_state"] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE session_id IN
+                (SELECT session_id FROM terminal_sessions WHERE repo = ?)"
+        ))
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for table in [
+        "terminal_sessions",
+        "worktree_tabs",
+        "task_notes",
+        "commit_drafts",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE repo = ?"))
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(path) = &path {
+        for table in [
+            "worktree_links",
+            "review_worktrees",
+            "split_stacks",
+            "worktree_moves",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE repo_path = ?"))
+                .bind(path)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    sqlx::query("DELETE FROM settings WHERE scope = ?")
+        .bind(&scope)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "DELETE FROM settings WHERE scope = 'app' AND value = ?
+           AND (key IN (?, ?) OR substr(key, 1, length(?)) = ?)",
+    )
+    .bind(name)
+    .bind(REPO_VALUED_KEYS[0])
+    .bind(REPO_VALUED_KEYS[1])
+    .bind(TRIAGE_REPO_KEY_PREFIX)
+    .bind(TRIAGE_REPO_KEY_PREFIX)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM repos WHERE name = ?")
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    // The repo scope's environment values live in the keychain, outside the
+    // transaction; a leftover there is unreachable, so failing to drop it only
+    // costs a log line. Asked only when it had some: a keychain call can prompt.
+    if has_env.is_some() {
+        if let Err(e) = crate::env::forget_scope(db, &scope).await {
+            log::warn!("forgetting {name}'s environment values failed: {e:#}");
+        }
+    }
+    log::info!("forgot repository {name}");
+    Ok(())
+}
+
+/// How many of `cwds` lie inside the checkout at `root` (its main checkout or a
+/// worktree under it) and not inside one of `others` nested deeper in it.
+pub(crate) fn panes_inside(cwds: &[String], root: &str, others: &[String]) -> usize {
+    let root = Path::new(root);
+    let nested: Vec<&Path> = others
+        .iter()
+        .map(Path::new)
+        .filter(|other| *other != root && other.starts_with(root))
+        .collect();
+    cwds.iter()
+        .map(Path::new)
+        .filter(|cwd| cwd.starts_with(root) && !nested.iter().any(|n| cwd.starts_with(n)))
+        .count()
+}
+
 /// The server paths of every registered Daedalus repo — what the workspace
 /// listing marks as already added.
 pub(crate) async fn daedalus_paths(db: &Db) -> Result<Vec<String>> {
@@ -509,6 +637,102 @@ mod tests {
             .unwrap();
         assert_eq!(again.name, "akamai/agent");
         assert_eq!(list(&db).await.unwrap().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Removing a repo clears every row filed under it — by name, by path, by
+    /// settings scope, by a session it bound, and app settings naming it — and
+    /// leaves another repo's rows exactly as they were.
+    #[tokio::test]
+    async fn remove_forgets_only_that_repos_rows() {
+        let base = std::env::temp_dir().join(format!("santree-repo-rm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+
+        let seed = [
+            "INSERT INTO repos (name, tracker, path) VALUES (?1, '', ?2)",
+            "INSERT INTO settings (scope, key, value) VALUES ('repo:' || ?1, 'work_model', 'x')",
+            "INSERT INTO settings (scope, key, value) VALUES ('app', 'triage_repo:' || ?1, ?1)",
+            "INSERT INTO task_notes (repo, task_id, body, updated_at) VALUES (?1, 'T', 'n', 0)",
+            "INSERT INTO commit_drafts (repo, issue_id, message, updated_at) VALUES (?1, 'T', 'm', 0)",
+            "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id) VALUES (?1, 'tree:T:tab:' || ?1, ?2, ?3)",
+            "INSERT INTO worktree_tabs (id, repo, worktree_id, kind, title, position) VALUES (?1, ?1, 'T', 'terminal', 't', 0)",
+            "INSERT INTO worktree_links (repo_path, issue_id, branch, worktree_path, base_branch) VALUES (?2, 'T', 't', ?2 || '/wt', 'main')",
+            "INSERT INTO review_worktrees (repo_path, issue_id, pr_repo, number) VALUES (?2, 'T', 'o/n', 1)",
+            "INSERT INTO split_stacks (id, repo_path, source_id, data) VALUES (?1, ?2, 'T', '{}')",
+            "INSERT INTO worktree_moves (id, repo_path, source_id, data) VALUES (?1, ?2, 'T', '{}')",
+            "INSERT INTO session_state (session_id, state, event, updated_at_ms) VALUES (?3, 'idle', 'Stop', 0)",
+            "INSERT INTO session_usage_live (session_id, used_pct, input_tokens, context_size, model, cost_usd, updated_at_ms) VALUES (?3, 0, 0, 0, 'm', 0, 0)",
+        ];
+        for (name, path, session) in [("gone", "/r/gone", "s-gone"), ("kept", "/r/kept", "s-kept")]
+        {
+            for sql in seed {
+                sqlx::query(sql)
+                    .bind(name)
+                    .bind(path)
+                    .bind(session)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+        }
+        for (key, value) in [
+            ("triage_default_repo", "gone"),
+            ("work_default_repo", "kept"),
+        ] {
+            sqlx::query("INSERT INTO settings (scope, key, value) VALUES ('app', ?, ?)")
+                .bind(key)
+                .bind(value)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+
+        remove(&db, "gone").await.unwrap();
+
+        let checks = [
+            ("repos", "name = ?1"),
+            (
+                "settings",
+                "scope = 'repo:' || ?1 OR (scope = 'app' AND value = ?1)",
+            ),
+            ("task_notes", "repo = ?1"),
+            ("commit_drafts", "repo = ?1"),
+            ("terminal_sessions", "repo = ?1"),
+            ("worktree_tabs", "repo = ?1"),
+            ("worktree_links", "repo_path = ?2"),
+            ("review_worktrees", "repo_path = ?2"),
+            ("split_stacks", "repo_path = ?2"),
+            ("worktree_moves", "repo_path = ?2"),
+            ("session_state", "session_id = ?3"),
+            ("session_usage_live", "session_id = ?3"),
+        ];
+        for (name, path, session, want) in [
+            ("gone", "/r/gone", "s-gone", 0),
+            ("kept", "/r/kept", "s-kept", 1),
+        ] {
+            for (table, filter) in checks {
+                let n: i64 =
+                    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {filter}"))
+                        .bind(name)
+                        .bind(path)
+                        .bind(session)
+                        .fetch_one(&db)
+                        .await
+                        .unwrap();
+                let want = if name == "kept" && table == "settings" {
+                    3
+                } else {
+                    want
+                };
+                assert_eq!(n, want, "{table} rows for {name}");
+            }
+        }
+        assert!(
+            remove(&db, "gone").await.is_err(),
+            "a second remove names nothing"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

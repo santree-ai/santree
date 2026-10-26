@@ -88,6 +88,47 @@ pub async fn add_repo(path: String, db: State<'_, Db>) -> CmdResult<Repo> {
     Ok(repo::add(&db, path).await?)
 }
 
+/// Forget a registered repository: its registry row and everything santree
+/// keeps under it. Nothing on disk or on Daedalus is touched. Refused while a
+/// santree terminal still runs in its checkout, and while the terminals can't
+/// all be asked: forgetting a project under a running agent would orphan it.
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_repo(
+    name: String,
+    db: State<'_, Db>,
+    terminals: State<'_, Arc<Terminals>>,
+    watcher: State<'_, WorktreeWatcher>,
+) -> CmdResult<()> {
+    let Some((path, location)) = repo::registration(&db, &name).await? else {
+        return Err(format!("{name} isn't a registered project.").into());
+    };
+    if let Some(root) = &path {
+        let live = terminals.live_cwds().await;
+        if !live.complete {
+            return Err(format!(
+                "Terminals are still reconnecting, so santree can't tell whether anything is \
+                 still running in {name}. Try again in a moment."
+            )
+            .into());
+        }
+        let (cwds, others) = match location {
+            RepoLocation::Local => (&live.local, repo::paths(&db).await?),
+            RepoLocation::Daedalus => (&live.daedalus, repo::daedalus_paths(&db).await?),
+        };
+        match repo::panes_inside(cwds, root, &others) {
+            0 => {}
+            1 => return Err(format!("{name} has a running terminal. Close it first.").into()),
+            n => return Err(format!("{name} has {n} running terminals. Close them first.").into()),
+        }
+    }
+    repo::remove(&db, &name).await?;
+    if let (Some(root), RepoLocation::Local) = (&path, location) {
+        watcher.forget(std::path::Path::new(root)).await;
+    }
+    Ok(())
+}
+
 // ── Daedalus (docs/remote.md) ────────────────────────────────────────────────
 
 /// How santree reaches Daedalus right now, through the Daedalus agent on this

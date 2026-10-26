@@ -105,6 +105,7 @@ fn specta_builder() -> AppBuilder {
         .commands(collect_commands![
             commands::list_repos,
             commands::add_repo,
+            commands::remove_repo,
             commands::list_agents,
             commands::codex_health,
             commands::codex_account,

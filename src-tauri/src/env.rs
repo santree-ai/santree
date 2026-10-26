@@ -190,6 +190,12 @@ async fn delete_values(db: &Db, scope: &str) -> Result<()> {
 
 // ── Reading and writing the variables ─────────────────────────────────────────
 
+/// Drop a scope's variable values from the keychain, for a scope that is going
+/// away with its project (`repo::remove`); its names go with the `settings` rows.
+pub(crate) async fn forget_scope(db: &Db, scope: &str) -> Result<()> {
+    delete_values(db, scope).await
+}
+
 /// The variable names a scope's [`ENV_VARS_KEY`] blob holds, in UI order. Tolerates
 /// the pre-keychain shape (`[{name, value}]`) so a database whose values couldn't be
 /// moved yet — a locked keychain at startup — still resolves; see [`legacy_values`].

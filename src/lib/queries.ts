@@ -1311,6 +1311,62 @@ export const useAddRepo = () =>
     success: (repo) => `Added ${repo.name}.`,
   });
 
+/** Whether a cached read belongs to `repo`: keyed by its name, or by its
+ *  settings scope. */
+const isRepoScopedKey = (key: QueryKey, repo: string) =>
+  key[1] === repo || key[1] === `repo:${repo}`;
+
+/** Drop `repo` from the registry list, and clear the app settings that named it
+ *  (the defaults and per-ticket picks the backend clears with it), at once.
+ *  Returns the rollback. */
+function patchRepoRemoved(qc: QueryClient, repo: string) {
+  const prevRepos = qc.getQueryData<Repo[]>(queryKeys.repos);
+  if (prevRepos !== undefined) {
+    qc.setQueryData<Repo[]>(
+      queryKeys.repos,
+      prevRepos.filter((r) => r.name !== repo),
+    );
+  }
+  const naming = qc
+    .getQueriesData<string | null>({ queryKey: ["setting", "app"] })
+    .filter(([key, value]) => {
+      const name = String(key[2]);
+      const repoValued =
+        name === TRIAGE_DEFAULT_REPO_KEY ||
+        name === WORK_DEFAULT_REPO_KEY ||
+        name.startsWith(triageRepoKey(""));
+      return repoValued && value === repo;
+    });
+  for (const [key] of naming) qc.setQueryData(key, null);
+  return () => {
+    if (prevRepos !== undefined) qc.setQueryData(queryKeys.repos, prevRepos);
+    for (const [key, value] of naming) qc.setQueryData(key, value);
+  };
+}
+
+/** Forget a registered project: santree's rows for it go, its files on disk
+ *  stay. The backend refuses while a terminal still runs in it; the refusal
+ *  rolls the list back and toasts. */
+export const useRemoveRepo = () => {
+  const qc = useQueryClient();
+  return useOptimisticMutation({
+    mutationKey: ["remove-repo"],
+    mutationFn: async (repo: string) => {
+      await unwrap(commands.removeRepo(repo));
+      // Its own reads name a project that no longer exists: refetching them
+      // would only fail, so they go rather than get invalidated.
+      qc.removeQueries({ predicate: (q) => isRepoScopedKey(q.queryKey, repo) });
+    },
+    optimistic: patchRepoRemoved,
+    invalidate: () => [
+      queryKeys.repos,
+      queryKeys.sessionStates,
+      queryKeys.terminalInventory,
+      queryKeys.daedalusWorkspaces,
+    ],
+  });
+};
+
 /**
  * The repo's branches, for the Create-worktree dialog's Branch source. Each row
  * says whether the branch is already checked out, which is what lets the picker

@@ -873,6 +873,20 @@ impl RemoteTerminals {
             .collect()
     }
 
+    /// The directory each pane [`live`](Self::live) counts was opened in.
+    pub fn live_cwds(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .values()
+            .filter_map(|pane| {
+                let st = pane.lock();
+                (!st.ended && !st.closing && !st.lost)
+                    .then(|| pane.spec.cwd.clone())
+                    .flatten()
+            })
+            .collect()
+    }
+
     /// Which panes have a live process, asked of the host rather than of the
     /// panes — and whether that answer is the whole truth.
     ///

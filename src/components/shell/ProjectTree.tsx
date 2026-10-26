@@ -49,8 +49,8 @@ import {
 import { usePersistedState } from "../../lib/usePersistedState";
 import { type TreeFocus, type TreeFocusPane, useAppUi } from "../../state/AppContext";
 import { RepoAvatar } from "../chrome/RepoAvatar";
-import { BranchIcon, ChevronDownIcon, ChevronRightIcon, PlusIcon } from "../icons";
-import { Skeleton } from "../primitives";
+import { BranchIcon, ChevronDownIcon, ChevronRightIcon, PlusIcon, TrashIcon } from "../icons";
+import { ContextMenu, type ContextMenuItem, Skeleton } from "../primitives";
 import { INDENT_PX, MilestoneHeading, ProjectHeading } from "../WorkSignals";
 import {
   HeaderCount,
@@ -61,6 +61,7 @@ import {
   ProjectReviewsSection,
   showReviewsSection,
 } from "./ProjectReviewsSection";
+import { RemoveProjectDialog } from "./RemoveProjectDialog";
 import {
   type AgentNode,
   ancestorGroupKeys,
@@ -213,6 +214,7 @@ export function ProjectTree({
 }) {
   const { projects, loading, markSeen, agentsByPr } = useProjectTree(location);
   const navigate = useNavigate();
+  const [removing, setRemoving] = useState<string | null>(null);
   const { requestTreeFocus, treeFocus } = useAppUi();
   const openAgent = useOpenAgent();
   const openPr = useOpenPr();
@@ -425,6 +427,7 @@ export function ProjectTree({
             onSelectWorktree={(worktreeId, pane) => selectWorktree(project.repo, worktreeId, pane)}
             onOpenAgent={openAgentRow}
             onCreateWorktree={() => setCreateFor(project.repo)}
+            onRemove={() => setRemoving(project.repo)}
             actionsDisabled={actionsDisabled}
             reviews={reviewsByProject.get(project.repo) ?? null}
             showEmptyReviews={showEmptyReviews}
@@ -448,6 +451,7 @@ export function ProjectTree({
         ))
       )}
       {createFor && <CreateWorktreeDialog repo={createFor} onClose={() => setCreateFor(null)} />}
+      {removing && <RemoveProjectDialog repo={removing} onClose={() => setRemoving(null)} />}
     </div>
   );
 }
@@ -465,6 +469,7 @@ export function ProjectSection({
   onSelectWorktree,
   onOpenAgent,
   onCreateWorktree,
+  onRemove,
   actionsDisabled,
   reviews = null,
   showEmptyReviews = false,
@@ -491,6 +496,8 @@ export function ProjectSection({
   onOpenAgent: (agent: AgentNode) => void;
   /** Open the "Create worktree" dialog for this repo. */
   onCreateWorktree: () => void;
+  /** Ask to remove this project from santree (the header's right-click menu). */
+  onRemove?: () => void;
   /** See {@link ProjectTree}'s prop of the same name. */
   actionsDisabled?: string;
   /** This project's review inbox, or `null` while the read is in flight (or when
@@ -526,6 +533,18 @@ export function ProjectSection({
   // The breakdown behind the header's reviews count lives on the header's own
   // tooltip: the count sits under the stretched toggle and can't hold one.
   const reviewsHint = headerReviewsHint(reviewRow);
+  const menu: ContextMenuItem[] = onRemove
+    ? [
+        {
+          kind: "action",
+          key: "remove",
+          label: "Remove from santree…",
+          icon: <TrashIcon size={13} />,
+          danger: true,
+          run: onRemove,
+        },
+      ]
+    : [];
 
   return (
     <div className="mb-1">
@@ -545,39 +564,40 @@ export function ProjectSection({
           ARIA makes a button's children presentational — nested, it would vanish
           from the accessibility tree (the same pattern `WorktreeRow` uses for its
           Linear/GitHub marks). */}
-      <div
-        className="tree-band group relative mx-1.5 flex w-[calc(100%-12px)] items-center gap-2 py-(--density-compact) pr-1.5"
-        style={{ paddingLeft: HEADER_GUTTER - 6 }}
-      >
-        <button
-          type="button"
-          onClick={(e) => onToggle(isBulkToggle(e))}
-          aria-expanded={open}
-          aria-label={`${open ? "Collapse" : "Expand"} ${project.label}`}
-          title={[project.repo, reviewsHint, BULK_TOGGLE_HINT].filter(Boolean).join("\n")}
-          className="absolute inset-0 cursor-pointer"
-        />
-        <RepoAvatar repo={project.repo} size={16} bordered={false} />
-        <span className="pointer-events-none min-w-0 truncate text-[12px] font-semibold text-fg-2">
-          {project.label}
-        </span>
-        <Chevron
-          size={10}
-          className={`pointer-events-none -ml-1 flex-none text-muted-4 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 ${
-            open ? "opacity-0" : "opacity-100"
-          }`}
-        />
-        <button
-          type="button"
-          onClick={onCreateWorktree}
-          disabled={actionsDisabled !== undefined}
-          aria-label={`Create worktree in ${project.label}`}
-          title={actionsDisabled ?? "Create worktree"}
-          className="relative flex h-4 w-4 flex-none cursor-pointer items-center justify-center rounded text-muted-4 opacity-0 transition-opacity hover:bg-hover-2 hover:text-fg-2 focus-visible:opacity-100 group-hover:opacity-100 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted-4"
+      <ContextMenu items={menu}>
+        <div
+          className="tree-band group relative mx-1.5 flex w-[calc(100%-12px)] items-center gap-2 py-(--density-compact) pr-1.5"
+          style={{ paddingLeft: HEADER_GUTTER - 6 }}
         >
-          <PlusIcon size={11} />
-        </button>
-        {/* Two counts, always on, open or folded: what is waiting on you, and how
+          <button
+            type="button"
+            onClick={(e) => onToggle(isBulkToggle(e))}
+            aria-expanded={open}
+            aria-label={`${open ? "Collapse" : "Expand"} ${project.label}`}
+            title={[project.repo, reviewsHint, BULK_TOGGLE_HINT].filter(Boolean).join("\n")}
+            className="absolute inset-0 cursor-pointer"
+          />
+          <RepoAvatar repo={project.repo} size={16} bordered={false} />
+          <span className="pointer-events-none min-w-0 truncate text-[12px] font-semibold text-fg-2">
+            {project.label}
+          </span>
+          <Chevron
+            size={10}
+            className={`pointer-events-none -ml-1 flex-none text-muted-4 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 ${
+              open ? "opacity-0" : "opacity-100"
+            }`}
+          />
+          <button
+            type="button"
+            onClick={onCreateWorktree}
+            disabled={actionsDisabled !== undefined}
+            aria-label={`Create worktree in ${project.label}`}
+            title={actionsDisabled ?? "Create worktree"}
+            className="relative flex h-4 w-4 flex-none cursor-pointer items-center justify-center rounded text-muted-4 opacity-0 transition-opacity hover:bg-hover-2 hover:text-fg-2 focus-visible:opacity-100 group-hover:opacity-100 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted-4"
+          >
+            <PlusIcon size={11} />
+          </button>
+          {/* Two counts, always on, open or folded: what is waiting on you, and how
             much of this repo is checked out. Both are reference the user asked to
             read at a glance rather than hover for — folded, they are all that is
             left of the project; open, a number beside the name is still quicker
@@ -590,17 +610,18 @@ export function ProjectSection({
             in flight the count keeps its slot with blank digits ("0" beside
             skeleton rows is a claim), so a number that lands doesn't move the
             row; a zero that lands takes the slot with it. */}
-        <span className="pointer-events-none ml-auto flex flex-none items-center gap-2">
-          {reviewRow && <ProjectReviewsBadge reviews={reviewRow} />}
-          {(project.loading || project.worktreeCount > 0) && (
-            <HeaderCount
-              icon={<BranchIcon size={10} />}
-              count={project.loading ? null : project.worktreeCount}
-              srLabel="worktrees"
-            />
-          )}
-        </span>
-      </div>
+          <span className="pointer-events-none ml-auto flex flex-none items-center gap-2">
+            {reviewRow && <ProjectReviewsBadge reviews={reviewRow} />}
+            {(project.loading || project.worktreeCount > 0) && (
+              <HeaderCount
+                icon={<BranchIcon size={10} />}
+                count={project.loading ? null : project.worktreeCount}
+                srLabel="worktrees"
+              />
+            )}
+          </span>
+        </div>
+      </ContextMenu>
 
       {/* Above the checkout and above the work: what is coming *in* to this
           project, before what is already on disk. Outside the `loading` gate on

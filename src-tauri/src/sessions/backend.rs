@@ -93,6 +93,14 @@ pub struct Snapshot {
     pub complete: bool,
 }
 
+/// The directories live panes run in, by host. See [`Terminals::live_cwds`].
+#[derive(Debug, Clone, Default)]
+pub struct LiveCwds {
+    pub local: Vec<String>,
+    pub daedalus: Vec<String>,
+    pub complete: bool,
+}
+
 /// What an id resolved to.
 enum Target {
     InApp(PtyManager),
@@ -492,6 +500,25 @@ impl Terminals {
         };
         all.merge(self.daedalus.liveness().await);
         all
+    }
+
+    /// Where every live pane was opened, this Mac's apart from Daedalus's (a
+    /// server path can share its spelling with a local one), and whether that
+    /// is every pane there is. What refuses forgetting a project something still
+    /// runs in: an incomplete answer can't say that nothing does.
+    pub async fn live_cwds(&self) -> LiveCwds {
+        let local = self.snapshot().await;
+        let daedalus = self.daedalus.liveness().await;
+        LiveCwds {
+            local: local
+                .sessions
+                .into_iter()
+                .filter(|s| s.alive)
+                .filter_map(|s| s.cwd)
+                .collect(),
+            daedalus: self.daedalus.live_cwds(),
+            complete: local.complete && daedalus.complete,
+        }
     }
 
     /// How many of this Mac's terminals quitting the app would end: the live

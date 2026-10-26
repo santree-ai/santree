@@ -33,6 +33,7 @@ import {
   TickTickLogo,
 } from "../../components/icons";
 import { Dropdown, Tabs } from "../../components/primitives";
+import { RemoveProjectDialog } from "../../components/shell/RemoveProjectDialog";
 import { ServerBanner } from "../../components/shell/ServerBanner";
 import { TRAFFIC_LIGHTS_INSET } from "../../components/shell/Sidebar";
 import { useRepos } from "../../lib/queries";
@@ -272,7 +273,7 @@ function resolveSection(nodes: NavNode[], key: string | undefined): SectionDef {
 }
 
 export function SettingsView() {
-  const { data: repos = [] } = useRepos();
+  const { data: repos = [], isSuccess: reposKnown } = useRepos();
   const router = useRouter();
   const canGoBack = useCanGoBack();
   const navigate = useNavigate();
@@ -283,7 +284,9 @@ export function SettingsView() {
     scope: initialScope,
     repo: initialRepo,
   } = useSearch({ strict: false }) as { section?: string; scope?: "repo"; repo?: string };
-  const [scope, setScope] = useState<Scope>(initialScope ?? "app");
+  const [pickedScope, setScope] = useState<Scope>(initialScope ?? "app");
+  // The last project removed takes the Repo scope with it.
+  const scope: Scope = reposKnown && repos.length === 0 ? "app" : pickedScope;
   const [section, setSection] = useState<string>(
     () => resolveSection(initialScope === "repo" ? REPO_NAV : APP_NAV, initialSection).key,
   );
@@ -298,6 +301,7 @@ export function SettingsView() {
     if (settingsRepo && repos.some((r) => r.name === settingsRepo)) return;
     setSettingsRepo(repos[0]?.name ?? "");
   }, [repos, settingsRepo]);
+  const [removing, setRemoving] = useState<string | null>(null);
 
   const goBack = () => (canGoBack ? router.history.back() : navigate({ to: "/" }));
   const switchScope = (next: Scope) => {
@@ -414,7 +418,19 @@ export function SettingsView() {
             )}
           </nav>
         </div>
+        {scope === "repo" && settingsRepo && (
+          <div className="flex-none border-t border-line p-2">
+            <button
+              type="button"
+              onClick={() => setRemoving(settingsRepo)}
+              className="flex w-full cursor-pointer items-center rounded-md px-3 py-[7px] text-left text-[12px] text-muted-3 transition-colors hover:bg-hover hover:text-status-red"
+            >
+              Remove project…
+            </button>
+          </div>
+        )}
       </div>
+      {removing && <RemoveProjectDialog repo={removing} onClose={() => setRemoving(null)} />}
 
       {/* Content column: a drag strip at the top keeps the window draggable
           across its whole width, then the one section pane. */}

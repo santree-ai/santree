@@ -11,6 +11,13 @@ export const commands = {
 	listRepos: () => typedError<Repo[], CmdError>(__TAURI_INVOKE("list_repos")),
 	/**  Add a repository from a local folder, validating it is a git work tree. */
 	addRepo: (path: string) => typedError<Repo, CmdError>(__TAURI_INVOKE("add_repo", { path })),
+	/**
+	 *  Forget a registered repository: its registry row and everything santree
+	 *  keeps under it. Nothing on disk or on Daedalus is touched. Refused while a
+	 *  santree terminal still runs in its checkout, and while the terminals can't
+	 *  all be asked: forgetting a project under a running agent would orphan it.
+	 */
+	removeRepo: (name: string) => typedError<null, CmdError>(__TAURI_INVOKE("remove_repo", { name })),
 	/**  Available coding agents and their models. */
 	listAgents: () => __TAURI_INVOKE<AgentDef[]>("list_agents"),
 	/**
