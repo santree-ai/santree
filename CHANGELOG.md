@@ -7,6 +7,14 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.6 — 2026-10-26
+
+- Use several Claude Code and Codex accounts. Add one in Settings, Agents, and sign in with the CLI's own login in the terminal that opens. Your conversations, settings, skills and agents are shared across accounts.
+- Switch accounts from the status bar: it shows the account new sessions use, and its panel lists every account with its 5-hour and weekly usage. Click one to start new sessions on it. When the one in use is nearly full, the account with the most room left says so.
+- Right-click an agent tab and choose "Continue on" another account to resume the same conversation there.
+- Remove a project from santree: right-click it in the sidebar, or use Settings for that project. Your files and worktrees on disk are kept, and you can add the folder again later.
+- Generate in the commit box now writes the message from everything the commit will include, staged or not, instead of "update". If it can't write one, it says why.
+
 ## 0.1.19-beta.5 — 2026-10-14
 
 - Clicking an agent in the sidebar that belongs to another project no longer shows "That session is still running in another tab". Santree now waits for that project's tabs to load before deciding the agent's tab was closed.

@@ -4287,7 +4287,7 @@ dependencies = [
 
 [[package]]
 name = "santree"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4336,7 +4336,7 @@ dependencies = [
 
 [[package]]
 name = "santree-agent-kind"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "serde",
  "specta",
@@ -4344,7 +4344,7 @@ dependencies = [
 
 [[package]]
 name = "santree-core"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "santree-agent-kind",
  "serde",
@@ -4354,7 +4354,7 @@ dependencies = [
 
 [[package]]
 name = "santree-hook"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "santree-core",
  "serde",
@@ -4365,7 +4365,7 @@ dependencies = [
 
 [[package]]
 name = "santree-host"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "libc",
  "log",
@@ -4379,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "santree-pty"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "anyhow",
  "log",
@@ -4389,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "santree-remote-client"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "log",
  "santree-host",
@@ -4404,7 +4404,7 @@ dependencies = [
 
 [[package]]
 name = "santree-remote-proto"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "base64 0.22.1",
  "santree-agent-kind",
@@ -4415,7 +4415,7 @@ dependencies = [
 
 [[package]]
 name = "santree-remote-tls"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "ring",
  "rustls",
@@ -4426,7 +4426,7 @@ dependencies = [
 
 [[package]]
 name = "santree-server"
-version = "0.1.19-beta.5"
+version = "0.1.19-beta.6"
 dependencies = [
  "anyhow",
  "libc",
