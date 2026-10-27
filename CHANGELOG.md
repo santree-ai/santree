@@ -7,6 +7,11 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.8 — 2026-10-27
+
+- Bring your sign-ins into Web tabs. Settings, Web imports cookies from another browser on this Mac — Chrome, Arc, Brave, Edge, Vivaldi, Opera, Chromium or Firefox — so a page opens already signed in.
+- Pick a browser and the sites you want, and santree copies only those cookies into the Web tabs' own store. Importing from Chrome and the like asks macOS once to let santree read that browser's cookie key.
+
 ## 0.1.19-beta.7 — 2026-10-26
 
 - Open web pages inside santree. The "+" menu in Trees, Triage and a review's checkout now opens a Web tab: type an address or a search, and the page opens beside your agents and terminals.
