@@ -349,6 +349,8 @@ export const queryKeys = {
     ["session-providers", repo, termKey] as const,
   worktreeTabs: (repo: string) => ["worktree-tabs", repo] as const,
   browserSupported: ["browser-supported"] as const,
+  cookieSources: ["cookie-sources"] as const,
+  cookieSites: (source: string) => ["cookie-sites", source] as const,
   worktreeTabLaunch: (repo: string, id: string) => ["worktree-tab-launch", repo, id] as const,
   worktreeTabLaunchPrefix: ["worktree-tab-launch"] as const,
   commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
@@ -3724,6 +3726,33 @@ export const useBrowserSupported = () =>
     queryKey: queryKeys.browserSupported,
     queryFn: () => commands.browserSupported(),
     staleTime: Number.POSITIVE_INFINITY,
+  });
+
+/** The browser profiles on this Mac whose cookies the Web tabs can import. Read
+ *  from disk each time it's asked: a browser can be installed or removed between
+ *  visits to Settings. */
+export const useCookieSources = () =>
+  useUnwrappedQuery(queryKeys.cookieSources, () => commands.browserCookieSources(), {
+    staleTime: 0,
+  });
+
+/** The sites a browser profile has cookies for, used-last first. Reads no cookie
+ *  value and asks for no Keychain access — only which sites are there. */
+export const useCookieSites = (source: string | null) =>
+  useUnwrappedQuery(
+    queryKeys.cookieSites(source ?? ""),
+    () => commands.browserCookieSites(source ?? ""),
+    { enabled: !!source, staleTime: 0 },
+  );
+
+/** Copy a profile's cookies for the picked sites into the Web tabs' store. A
+ *  Chromium profile makes macOS ask for its Keychain item first. Nothing to
+ *  invalidate: the cookies live in WebKit, not in any read here. */
+export const useImportCookies = () =>
+  useActionMutation({
+    mutationFn: ({ source, sites }: { source: string; sites: string[] }) =>
+      unwrap(commands.browserImportCookies(source, sites)),
+    invalidate: () => [],
   });
 
 /** Persist a new extra tab. The caller mints the id/title (see the Trees model),

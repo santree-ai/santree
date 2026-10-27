@@ -59,6 +59,7 @@ vi.mock("./sections/RepoTracker", () => ({
 }));
 vi.mock("./sections/Terminal", () => ({ TerminalSection: () => <div>Terminal pane</div> }));
 vi.mock("./sections/Usage", () => ({ UsageSection: () => <div>Usage pane</div> }));
+vi.mock("./sections/Web", () => ({ WebSection: () => <div>Web pane</div> }));
 vi.mock("./sections/Work", () => ({ WorkSection: () => <div>Work pane</div> }));
 
 /** The nav item buttons under a group's heading. */
@@ -87,7 +88,7 @@ describe("Settings → nav", () => {
     expect(groupItems("Code hosting")).toEqual(["GitHub", "Daedalus"]);
     expect(groupItems("AI harness")).toEqual(["Claude Code", "Codex"]);
     expect(groupItems("Environment")).toEqual(["Variables", "Terminal"]);
-    expect(groupItems("Extra")).toEqual(["English tutor", "Usage"]);
+    expect(groupItems("Extra")).toEqual(["Web", "English tutor", "Usage"]);
   });
 
   it("opens the pane the nav item names", () => {

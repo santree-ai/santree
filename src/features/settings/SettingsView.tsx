@@ -21,6 +21,7 @@ import {
   DocsIcon,
   GearIcon,
   GitHubLogo,
+  GlobeIcon,
   JiraLogo,
   KeyIcon,
   LinearLogo,
@@ -53,6 +54,7 @@ import { RepoTrackerSection } from "./sections/RepoTracker";
 import { TerminalSection } from "./sections/Terminal";
 import { TickTickSection } from "./sections/TickTick";
 import { UsageSection } from "./sections/Usage";
+import { WebSection } from "./sections/Web";
 import { WorkSection } from "./sections/Work";
 
 type Scope = "app" | "repo";
@@ -212,6 +214,12 @@ const APP_NAV: NavNode[] = [
   {
     group: "Extra",
     sections: [
+      {
+        key: "web",
+        label: "Web",
+        icon: <GlobeIcon size={ICON_SIZE} />,
+        render: () => <WebSection />,
+      },
       {
         key: "english-tutor",
         label: "English tutor",

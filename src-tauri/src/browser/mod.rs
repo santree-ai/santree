@@ -18,6 +18,7 @@
 //! ([`on_main`]) and the pages are kept there (`native`).
 
 pub mod address;
+mod import;
 mod keys;
 mod native;
 
@@ -282,6 +283,55 @@ pub async fn browser_snapshot(app: AppHandle, id: String) -> CmdResult<Option<St
 pub async fn browser_state(app: AppHandle, id: String) -> CmdResult<Option<BrowserState>> {
     let id = tab_id(id)?;
     Ok(on_main(&app, move |_| native::state(&id)).await?)
+}
+
+/// The browser profiles on this Mac whose cookies could be imported into the Web
+/// tabs' store (`import::sources`). Empty when none is installed.
+#[tauri::command]
+#[specta::specta]
+pub fn browser_cookie_sources(app: AppHandle) -> CmdResult<Vec<import::CookieSource>> {
+    Ok(import::sources(&support_dir(&app)?))
+}
+
+/// The sites a chosen profile has cookies for, so the user can pick which to
+/// bring over. Reads no cookie value and asks for no Keychain access — only which
+/// sites are there.
+#[tauri::command]
+#[specta::specta]
+pub async fn browser_cookie_sites(
+    app: AppHandle,
+    source: String,
+) -> CmdResult<Vec<import::CookieSite>> {
+    Ok(import::sites(&support_dir(&app)?, &source).await?)
+}
+
+/// Copy the chosen profile's cookies for `sites` into the Web tabs' own store.
+/// For a Chromium profile this reads its cookie key from the login Keychain, so
+/// macOS asks the user to allow it. Nothing is kept but the cookies themselves,
+/// in WebKit's store.
+#[tauri::command]
+#[specta::specta]
+pub async fn browser_import_cookies(
+    app: AppHandle,
+    source: String,
+    sites: Vec<String>,
+) -> CmdResult<import::CookieImport> {
+    let read = import::read(&support_dir(&app)?, &source, &sites).await?;
+    let offered = read.cookies.len();
+    let taken = on_main(&app, move |_| native::import_cookies(read.cookies)).await?;
+    Ok(import::CookieImport {
+        cookies: taken as u32,
+        // Decryption failures, plus any WebKit itself turned away.
+        skipped: read.skipped + (offered - taken) as u32,
+    })
+}
+
+/// The user's `~/Library/Application Support`, where the browsers keep their
+/// profiles. This reads other apps' folders there, never santree's own.
+fn support_dir(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
+    app.path()
+        .data_dir()
+        .map_err(|_| anyhow::anyhow!("the Application Support folder is unavailable"))
 }
 
 /// Close a tab's page, if it has one. Called with the tab's row going away

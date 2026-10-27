@@ -68,15 +68,21 @@ one bounded read is below. App-owned secrets never land in plaintext SQLite.
 → `a_vendor_credential_is_read_in_one_module_and_reachable_through_one_command`,
 `no_migration_stores_a_secret_in_plaintext`
 
-**The Web tab reads no page and stores no credential.** A Web tab's page is a
-native WKWebView santree only places and navigates: santree never reads a page's
-content or its cookies, and gives a page no IPC. What it keeps of a page is the
+**The Web tab reads no page and stores no credential of an agent's.** A Web
+tab's page is a native WKWebView santree only places and navigates: santree never
+reads a page's content, and gives a page no IPC. What it keeps of a page is the
 address a tab reopens on, cleaned of anything credential-shaped — a CLI's
 sign-in callback (`codex login`'s `localhost:1455/success?id_token=…`) is just
-the page a tab would otherwise remember. Importing another browser's cookies
-(planned, docs/web.md) would read vendor web sessions among them, and needs its
-own written exception here before it is built.
+the page a tab would otherwise remember.
 → `a_saved_address_keeps_no_credential`
+
+Cookie import (docs/web.md, "Cookie import") is the one place santree reads
+cookies, and it is the user's own browser cookies on this Mac, moved into the
+Web tabs' store on the user's click, for the sites the user picks — the same
+thing a browser's own import does. It reads one login-Keychain item per Chromium
+source, with macOS's consent prompt, and writes the cookies only into WebKit's
+store; nothing of a cookie is logged or stored elsewhere. This is distinct from
+an agent CLI's credentials, which santree still never stores or proxies.
 
 **Untrusted content must not be able to trigger tool use.** Text reaching a
 model prompt from a diff, a PR, a Linear ticket, or a transcript is

@@ -591,6 +591,79 @@ pub fn close(id: &str) {
     tab.slot.removeFromSuperview();
 }
 
+/// Put `cookies` (read from another browser, [`super::import`]) into the shared
+/// store every local Web tab uses, so a page there opens signed in. Returns how
+/// many WebKit took — a cookie whose fields it won't accept is dropped, never
+/// forced. The store is the one [`fresh_configuration`] gives every page, reached
+/// here even when no page is open yet.
+pub fn import_cookies(cookies: Vec<super::import::Cookie>) -> usize {
+    let store = unsafe {
+        WKWebsiteDataStore::dataStoreForIdentifier(&NSUUID::from_bytes(LOCAL_PROFILE), mtm())
+            .httpCookieStore()
+    };
+    let mut taken = 0;
+    for cookie in cookies {
+        let Some(cookie) = make_cookie(&cookie) else {
+            continue;
+        };
+        unsafe { store.setCookie_completionHandler(&cookie, None) };
+        taken += 1;
+    }
+    taken
+}
+
+/// One imported cookie as an `NSHTTPCookie`, or `None` if WebKit can't make one
+/// from its fields (an empty name or domain). A session cookie (no expiry) is
+/// written without `NSHTTPCookieExpires`.
+fn make_cookie(cookie: &super::import::Cookie) -> Option<Retained<objc2_foundation::NSHTTPCookie>> {
+    use objc2_foundation::{
+        NSHTTPCookie, NSHTTPCookieDomain, NSHTTPCookieExpires, NSHTTPCookieName, NSHTTPCookiePath,
+        NSHTTPCookieSameSiteLax, NSHTTPCookieSameSitePolicy, NSHTTPCookieSameSiteStrict,
+        NSHTTPCookieSecure, NSHTTPCookieValue,
+    };
+
+    let mut keys: Vec<&NSString> = vec![
+        unsafe { NSHTTPCookieName },
+        unsafe { NSHTTPCookieValue },
+        unsafe { NSHTTPCookieDomain },
+        unsafe { NSHTTPCookiePath },
+    ];
+    let name = NSString::from_str(&cookie.name);
+    let value = NSString::from_str(&cookie.value);
+    let domain = NSString::from_str(&cookie.domain);
+    let path = NSString::from_str(&cookie.path);
+    let mut values: Vec<&AnyObject> = vec![&name, &value, &domain, &path];
+
+    let expires;
+    if let Some(at) = cookie.expires {
+        expires = objc2_foundation::NSDate::dateWithTimeIntervalSince1970(at);
+        keys.push(unsafe { NSHTTPCookieExpires });
+        values.push(&expires);
+    }
+    // The cookie is secure or http-only only when it says so: NSHTTPCookie reads
+    // the key's mere presence as true, whatever string it holds. "HttpOnly" has
+    // no exported constant; its literal name is what NSHTTPCookie reads (measured).
+    let yes = NSString::from_str("TRUE");
+    let http_only = NSString::from_str("HttpOnly");
+    if cookie.secure {
+        keys.push(unsafe { NSHTTPCookieSecure });
+        values.push(&yes);
+    }
+    if cookie.http_only {
+        keys.push(&http_only);
+        values.push(&yes);
+    }
+    if let Some(same_site) = cookie.same_site {
+        keys.push(unsafe { NSHTTPCookieSameSitePolicy });
+        values.push(match same_site {
+            super::import::SameSite::Lax => unsafe { NSHTTPCookieSameSiteLax },
+            super::import::SameSite::Strict => unsafe { NSHTTPCookieSameSiteStrict },
+        });
+    }
+    let properties = NSDictionary::from_slices(&keys, &values);
+    unsafe { NSHTTPCookie::cookieWithProperties(&properties) }
+}
+
 /// A page opened by another (`window.open`, `target=_blank`), made from WebKit's
 /// `configuration` so it keeps its opener, and handed to the app as a new tab
 /// beside the one that opened it.

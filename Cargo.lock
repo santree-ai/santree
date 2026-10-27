@@ -4292,10 +4292,12 @@ dependencies = [
 name = "santree"
 version = "0.1.19-beta.7"
 dependencies = [
+ "aes",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "block2",
+ "cbc",
  "chrono",
  "chrono-tz",
  "dotenvy",
@@ -4317,11 +4319,13 @@ dependencies = [
  "portable-pty",
  "rand 0.8.6",
  "reqwest 0.12.28",
+ "ring",
  "santree-core",
  "santree-hook",
  "santree-pty",
  "santree-remote-client",
  "santree-server",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",

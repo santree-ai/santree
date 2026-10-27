@@ -487,6 +487,24 @@ export const commands = {
 	crashed: boolean,
 } | null, CmdError>(__TAURI_INVOKE("browser_state", { id })),
 	/**
+	 *  The browser profiles on this Mac whose cookies could be imported into the Web
+	 *  tabs' store (`import::sources`). Empty when none is installed.
+	 */
+	browserCookieSources: () => typedError<CookieSource[], CmdError>(__TAURI_INVOKE("browser_cookie_sources")),
+	/**
+	 *  The sites a chosen profile has cookies for, so the user can pick which to
+	 *  bring over. Reads no cookie value and asks for no Keychain access — only which
+	 *  sites are there.
+	 */
+	browserCookieSites: (source: string) => typedError<CookieSite[], CmdError>(__TAURI_INVOKE("browser_cookie_sites", { source })),
+	/**
+	 *  Copy the chosen profile's cookies for `sites` into the Web tabs' own store.
+	 *  For a Chromium profile this reads its cookie key from the login Keychain, so
+	 *  macOS asks the user to allow it. Nothing is kept but the cookies themselves,
+	 *  in WebKit's store.
+	 */
+	browserImportCookies: (source: string, sites: string[]) => typedError<CookieImport, CmdError>(__TAURI_INVOKE("browser_import_cookies", { source, sites })),
+	/**
 	 *  What a persisted review tab must relaunch with — the review deny list, and
 	 *  santree's review MCP server scoped to its PR.
 	 * 
@@ -2377,6 +2395,40 @@ export type CommentKind =
 "Review" | 
 /**  An inline comment anchored to a file in a review thread. */
 "ReviewThread";
+
+/**  What an import did. */
+export type CookieImport = {
+	cookies: number,
+	/**  Cookies that couldn't be decrypted, or that WebKit wouldn't take. */
+	skipped: number,
+};
+
+/**
+ *  A site a source has cookies for: a host, standing for itself and every
+ *  subdomain with cookies under it.
+ */
+export type CookieSite = {
+	site: string,
+	cookies: number,
+};
+
+/**  A browser profile on this Mac whose cookies can be imported. */
+export type CookieSource = {
+	/**
+	 *  `<browser>/<profile folder>`, as found here. The frontend hands it back,
+	 *  and it is only ever looked up among the sources found again, never made
+	 *  into a path.
+	 */
+	id: string,
+	browser: string,
+	/**  The profile's name in the browser, when the browser has more than one. */
+	profile: string | null,
+	/**
+	 *  Its cookies are locked with a key in the Keychain, so importing them makes
+	 *  macOS ask the user.
+	 */
+	keychain: boolean,
+};
 
 /**  The Linear cycle an issue is scheduled into. */
 export type CycleRef = {

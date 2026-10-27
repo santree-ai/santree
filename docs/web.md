@@ -166,12 +166,42 @@ machine. The plan, measured on macOS 26:
 - Both ride one new protocol-v1 stream, `net.open {host, port}`, dialed on the
   box (docs/remote.md), on the santree side and Daedalus's session host.
 
+## Cookie import
+
+Settings → Web imports cookies from another browser on this Mac into the Web
+tabs' own store, per site the user picks, so a page here opens signed in
+(`src-tauri/src/browser/import/`). It runs only on the user's click.
+
+- **Sources** are the browser profiles found under `~/Library/Application
+  Support` (`import::sources`): Chromium-family (Chrome, Arc, Brave, Edge,
+  Vivaldi, Opera, Chromium) and Firefox. Picking one lists the sites it has
+  cookies for (`browser_cookie_sites`), used-last first; no cookie value is read
+  and no Keychain is touched to list them.
+- **A site** is a host standing for itself and every subdomain with cookies
+  under it. Sites are grouped under the shortest parent host that has cookies of
+  its own (`site_of`) — a browser refuses a cookie for a public suffix, so
+  `co.uk` and `github.io` are never hosts to group under, and no suffix list is
+  needed.
+- **Reading** copies the browser's cookie file (with its `-wal`/`-journal`) to a
+  private temp dir first, since the browser holds the original open. Chromium
+  values are encrypted: the key is derived (PBKDF2-HMAC-SHA1, salt `saltysalt`,
+  1003 rounds) from the browser's `"<Browser> Safe Storage"` secret in the login
+  Keychain — so an import asks macOS for that one item — then each value is
+  AES-128-CBC decrypted (a 16-space IV), and on store version ≥ 24 its SHA-256
+  host-key prefix is checked and dropped. A value that doesn't decrypt is
+  skipped, never guessed. Firefox keeps cookies in plain text. Cookies in a
+  container or set inside another site's frame (partitioned) are left out.
+- **Writing**: each cookie becomes an `NSHTTPCookie` set on the shared store's
+  `httpCookieStore` (`native::import_cookies`), keeping its expiry, Secure,
+  HttpOnly and SameSite. The result says how many went in and how many were
+  skipped. A value only ever goes from the browser's file to WebKit — nothing of
+  a cookie is logged or saved anywhere else.
+
 ## Not built
 
-Agent tools (the user deferred them: no MCP browser tools), cookie import
-(planned: Chromium-family and Firefox, per site, Keychain through
-Security.framework), find in page, favicons, permission prompts beyond the
-defaults, HTTP basic auth, restoring back/forward history across restarts.
+Agent tools (the user deferred them: no MCP browser tools), find in page,
+favicons, permission prompts beyond the defaults, HTTP basic auth, restoring
+back/forward history across restarts.
 
 ## Prior art
 
