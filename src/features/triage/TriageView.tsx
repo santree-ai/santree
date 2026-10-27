@@ -55,6 +55,7 @@ import { usePersistedState } from "../../lib/usePersistedState";
 import { useApp, useAppUi } from "../../state/AppContext";
 import { agentProvider } from "../terminal/agentProvider";
 import { tabRefId } from "../trees/useTabSessions";
+import { WebTabPane } from "../web/WebTabPane";
 import { useTriageKeyboard } from "./hooks";
 import { InvestigatePane } from "./InvestigatePane";
 import { INTERACTIVE_AGENTS, triageTermKey } from "./providerSessions";
@@ -234,6 +235,7 @@ function TicketWorkspace({
   // anywhere but the registered repository root, so this is not a choice the
   // frontend could get wrong quietly.
   const cwd = (repo && repos.find((r) => r.name === repo)?.path) || null;
+  const onDaedalus = !!repo && repos.find((r) => r.name === repo)?.location === "Daedalus";
   const { openAgent, addTab, select } = tabs;
 
   /** Run something on the ticket's project, asking for one first when there is
@@ -335,6 +337,8 @@ function TicketWorkspace({
     const rowId = rowTabId(tab);
     const row = rowId ? tabs.rows.find((t) => t.id === rowId) : undefined;
     if (!row) return null;
+    // A web tab runs nothing on the project; its page lives natively.
+    if (row.kind === "web") return <WebTabPane tab={row} focused={tabs.active === tab} />;
     if (!ready) return <Attaching />;
     // A shell row's process ending is what closes the row — the strip's
     // `useTabSessions` sees the session go — so the pane has nothing to do on
@@ -362,6 +366,7 @@ function TicketWorkspace({
           repo={repo}
           ticket={ticket}
           tabs={gatedTabs}
+          remote={onDaedalus}
           rightCollapsed={rightCollapsed}
           onToggleRight={onToggleRight}
           renderTab={renderTab}

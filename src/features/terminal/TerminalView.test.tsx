@@ -628,7 +628,7 @@ describe("the pane's link state", () => {
           untrusted={untrusted}
           backend={new FakeBackend()}
           createRenderer={(opts) => {
-            built.push(opts);
+            built.push({ untrusted: opts.untrusted });
             return new FakeRenderer();
           }}
         />,

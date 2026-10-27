@@ -292,6 +292,7 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
         title: str(a, "title"),
         pr: null,
         account: null,
+        url: null,
       });
       return null;
     },

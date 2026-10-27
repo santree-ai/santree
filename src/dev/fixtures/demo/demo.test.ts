@@ -135,7 +135,7 @@ describe("the Santree demo", () => {
       ),
     );
   const addTab = (worktreeId: string, id: string, kind: TabKind, pr: TabPr | null = null) =>
-    unwrap(cmd("addWorktreeTab")(INFRA, worktreeId, id, kind, "Claude", kind, pr));
+    unwrap(cmd("addWorktreeTab")(INFRA, worktreeId, id, kind, "Claude", kind, pr, null));
   const ISSUE = "PLAT-421";
   const status = () => unwrap(cmd("worktreeStatus")(INFRA, ISSUE));
   const target = (number: number): ReviewTarget => ({

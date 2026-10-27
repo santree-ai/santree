@@ -22,7 +22,7 @@
  *  The trailing cluster is not part of the tablist: the right rail's expand
  *  control, here only while the rail is hidden — the same hand-off Trees and
  *  Reviews make, so the button stays put across the toggle. */
-import type { ReactNode } from "react";
+import { type ReactNode, useCallback } from "react";
 
 import type { AgentKind, TabKind, TriageTicket } from "../../bindings";
 import { AgentIcon, TerminalIcon, TrackerLogo } from "../../components/icons";
@@ -41,8 +41,12 @@ import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { liveTabFor } from "../agents/registry";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
+import type { NewTabOpts } from "../trees/model";
 import { useTabAccounts } from "../trees/useTabAccounts";
 import { useTabSessions } from "../trees/useTabSessions";
+import { useWebOff } from "../web/availability";
+import { usePageLabels } from "../web/pageState";
+import { useStripWebHost, WebMenuRow, webStripTab } from "../web/strip";
 import { triageTermKey } from "./providerSessions";
 import { agentTab, rowTab, type TriageMainTab, type TriageTabs } from "./useTriageTabs";
 
@@ -50,6 +54,7 @@ export function TriageTabBar({
   repo,
   ticket,
   tabs,
+  remote,
   rightCollapsed,
   onToggleRight,
   renderTab,
@@ -59,6 +64,8 @@ export function TriageTabBar({
   repo: string | null;
   ticket: TriageTicket;
   tabs: TriageTabs;
+  /** The attached project is on Daedalus, whose pages santree can't browse yet. */
+  remote: boolean;
   rightCollapsed: boolean;
   onToggleRight: () => void;
   /** A tab's content; `visible` is whether it is showing in its group. */
@@ -80,6 +87,23 @@ export function TriageTabBar({
     if (live) endSession(live.key);
     tabs.closeAgent(agent);
   };
+  const pageLabel = usePageLabels();
+
+  // Links printed in this ticket's terminals, and its pages' popups, open Web
+  // tabs here.
+  const { addTab, select } = tabs;
+  useStripWebHost({
+    surfaces: [termKey],
+    rows: tabs.rows,
+    addWeb: useCallback(
+      (url: string, opts?: NewTabOpts) => {
+        if (!remote) addTab("web", undefined, { ...opts, url });
+      },
+      [addTab, remote],
+    ),
+    closeTab: tabs.closeTab,
+    show: useCallback((id: string) => select(rowTab(id)), [select]),
+  });
 
   const items: StripTab<TriageMainTab>[] = [
     {
@@ -93,20 +117,24 @@ export function TriageTabBar({
       icon: <AgentIcon kind={agent} size={11} className="text-muted-3" />,
       onClose: () => closeAgent(agent),
     })),
-    ...tabs.rows.map((t) => ({
-      tab: rowTab(t.id),
-      label: t.title,
-      icon:
-        t.kind === "terminal" ? (
-          <TerminalIcon size={11} className="text-muted-3" />
-        ) : (
-          <AgentIcon kind={t.agentKind ?? "Claude"} size={11} className="text-muted-3" />
-        ),
-      onClose: () => closeWithSession(t),
-      onRename: (title: string) => tabs.renameTab(t.id, title),
-      menu: menuFor(t),
-      detail: detailFor(t),
-    })),
+    ...tabs.rows.map((t) =>
+      t.kind === "web"
+        ? webStripTab(rowTab(t.id), t, pageLabel, () => tabs.closeTab(t.id))
+        : {
+            tab: rowTab(t.id),
+            label: t.title,
+            icon:
+              t.kind === "terminal" ? (
+                <TerminalIcon size={11} className="text-muted-3" />
+              ) : (
+                <AgentIcon kind={t.agentKind ?? "Claude"} size={11} className="text-muted-3" />
+              ),
+            onClose: () => closeWithSession(t),
+            onRename: (title: string) => tabs.renameTab(t.id, title),
+            menu: menuFor(t),
+            detail: detailFor(t),
+          },
+    ),
   ];
 
   return (
@@ -115,33 +143,37 @@ export function TriageTabBar({
       items={items}
       renderTab={renderTab}
       ariaLabel="Ticket tabs"
-      newTabMenu={(close) => <NewTabMenu onAdd={tabs.addTab} close={close} />}
+      newTabMenu={(close) => <NewTabMenu onAdd={tabs.addTab} close={close} remote={remote} />}
       newTabMenuClassName="w-40 overflow-hidden"
       trailing={rightCollapsed ? <PanelToggle collapsed onToggle={onToggleRight} /> : null}
     />
   );
 }
 
-/** New-tab menu rows: a new Codex or Claude Code session, or a terminal — the
- *  same three Trees offers, in the same order, so the digits mean the same
- *  thing on every strip (1 → Codex, 2 → Claude Code, 3 → Terminal). Mounted only
- *  while the menu is open, so its digit-key listener is live exactly when the
- *  menu is visible. */
+/** New-tab menu rows: a new Codex or Claude Code session, a terminal, or a web
+ *  page — the same four Trees offers, in the same order, so the digits mean the
+ *  same thing on every strip (1 → Codex, 2 → Claude Code, 3 → Terminal, 4 → Web).
+ *  Mounted only while the menu is open, so its digit-key listener is live exactly
+ *  when the menu is visible. */
 function NewTabMenu({
   onAdd,
   close,
+  remote,
 }: {
   onAdd: (kind: TabKind, agentKind?: AgentKind) => void;
   close: () => void;
+  remote: boolean;
 }) {
   const claudeReady = !!useAgentAuth("Claude").data?.connected;
   const codexHealth = useCodexHealth().data;
   const codexAccount = useCodexAccount(codexHealth?.available === true).data;
   const codexReady = !!codexHealth?.available && !!codexAccount?.connected;
   const ready = (agent: AgentKind) => (agent === "Codex" ? codexReady : claudeReady);
+  const webOff = useWebOff(remote);
 
   const add = (kind: TabKind, agentKind?: AgentKind) => {
     if (agentKind && !ready(agentKind)) return;
+    if (kind === "web" && webOff) return;
     if (agentKind) onAdd(kind, agentKind);
     else onAdd(kind);
     close();
@@ -151,6 +183,7 @@ function NewTabMenu({
     () => add("agent", "Codex"),
     () => add("agent", "Claude"),
     () => add("terminal"),
+    () => add("web"),
   ]);
 
   return (
@@ -184,6 +217,7 @@ function NewTabMenu({
         Terminal
         <span className="ml-auto text-[10px] text-muted-4">3</span>
       </button>
+      <WebMenuRow off={webOff} digit={4} onAdd={() => add("web")} />
     </>
   );
 }

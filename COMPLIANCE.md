@@ -68,6 +68,16 @@ one bounded read is below. App-owned secrets never land in plaintext SQLite.
 → `a_vendor_credential_is_read_in_one_module_and_reachable_through_one_command`,
 `no_migration_stores_a_secret_in_plaintext`
 
+**The Web tab reads no page and stores no credential.** A Web tab's page is a
+native WKWebView santree only places and navigates: santree never reads a page's
+content or its cookies, and gives a page no IPC. What it keeps of a page is the
+address a tab reopens on, cleaned of anything credential-shaped — a CLI's
+sign-in callback (`codex login`'s `localhost:1455/success?id_token=…`) is just
+the page a tab would otherwise remember. Importing another browser's cookies
+(planned, docs/web.md) would read vendor web sessions among them, and needs its
+own written exception here before it is built.
+→ `a_saved_address_keeps_no_credential`
+
 **Untrusted content must not be able to trigger tool use.** Text reaching a
 model prompt from a diff, a PR, a Linear ticket, or a transcript is
 attacker-influenceable — a malicious diff hunk, a comment any org member can

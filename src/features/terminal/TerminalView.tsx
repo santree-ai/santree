@@ -5,6 +5,7 @@
  * unmount. Backend and renderer are injectable so the wiring is unit-testable
  * with fakes. No xterm import here — only the `TerminalRenderer` interface.
  */
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AgentKind } from "../../bindings";
@@ -71,8 +72,14 @@ export interface TerminalViewProps {
    *  and only web links openable. Read once, when the pane mounts — it must be
    *  settled before the first byte. */
   untrusted?: boolean;
+  /** Where a link clicked in the pane opens, when the pane's surface has a say
+   *  (its Web tab). Read when clicked, so it may change between renders. */
+  openLink?: (url: string, event: MouseEvent) => void;
   backend?: TerminalBackend;
-  createRenderer?: (opts: { untrusted: boolean }) => TerminalRenderer;
+  createRenderer?: (opts: {
+    untrusted: boolean;
+    openLink: (url: string, event: MouseEvent) => void;
+  }) => TerminalRenderer;
 }
 
 /** How long a resize burst has to be quiet before the new grid is sent to the
@@ -110,10 +117,14 @@ export function TerminalView({
   unansweredHint,
   onLink,
   onReady,
+  openLink,
   backend = tauriBackend,
   createRenderer = (opts) => new XtermRenderer(opts),
 }: TerminalViewProps) {
   const host = useRef<HTMLDivElement>(null);
+  // The renderer is built once; a click reads the latest handler through this.
+  const openLinkRef = useRef(openLink);
+  openLinkRef.current = openLink;
   // Whether the session is reachable right now. Only a remote session (Daedalus,
   // or the local santree server) ever says otherwise, and `reconnecting` is never
   // an exit: the process is still running there, and the backend catches this pane
@@ -175,7 +186,13 @@ export function TerminalView({
     const el = host.current;
     if (!el) return;
 
-    const renderer = createRenderer({ untrusted });
+    const renderer = createRenderer({
+      untrusted,
+      openLink: (url, event) => {
+        if (openLinkRef.current) openLinkRef.current(url, event);
+        else void openUrl(url);
+      },
+    });
     rendererRef.current = renderer;
     renderer.mount(el);
     // Passive and display-only: a coding CLI animates its OSC title while it

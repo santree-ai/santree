@@ -32,6 +32,7 @@ vi.mock("../../lib/queries", () => ({
 vi.mock("../trees/model", () => ({
   defaultTabTitle: (kind: string, agent: string | null) =>
     kind === "terminal" ? "Terminal" : (agent ?? "Agent"),
+  tabAgent: (kind: string, agent?: string) => (kind === "terminal" ? null : (agent ?? "Codex")),
 }));
 
 import { useTriageTabs } from "./useTriageTabs";
@@ -48,6 +49,7 @@ const row = (id: string, worktreeId = "triage:AK-1"): WorktreeTab => ({
   title: "Terminal",
   pr: null,
   account: null,
+  url: null,
 });
 
 function mount(ticketId = "AK-1", repo = "acme/app") {

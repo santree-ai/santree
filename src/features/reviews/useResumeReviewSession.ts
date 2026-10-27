@@ -42,7 +42,7 @@ export function useResumeReviewSession(tabs: ReviewTabs): SessionResumer {
             sessionId: session.sessionId,
             agentKind: session.agentKind,
           });
-          tabs.addTab("agent", session.agentKind, tabId);
+          tabs.addTab("agent", session.agentKind, { id: tabId });
         } catch {
           // A failed mutation already red-toasts globally (main.tsx); the tab is
           // simply not opened.

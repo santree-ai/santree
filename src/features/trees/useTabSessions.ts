@@ -47,6 +47,8 @@ export function useTabSessions(
     if (seen.current.worktreeId !== worktreeId) seen.current = { worktreeId, ids: new Set() };
     const { ids } = seen.current;
     for (const t of tabs) {
+      // A web tab has no process: its page lives natively and goes with the row.
+      if (t.kind === "web") continue;
       const refId = tabRefId(worktreeId, t.id);
       const alive = sessions.some((x) => x.refId === refId);
       if (alive) ids.add(t.id);

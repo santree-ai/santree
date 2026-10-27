@@ -132,7 +132,15 @@ export class XtermRenderer implements TerminalRenderer {
    *
    *  `untrusted` is for bytes from Daedalus (design S5): a program there must not
    *  reach this Mac through the terminal. See {@link distrust}. */
-  constructor(opts: { readOnly?: boolean; untrusted?: boolean } = {}) {
+  constructor(
+    opts: {
+      readOnly?: boolean;
+      untrusted?: boolean;
+      /** Where a clicked link goes, when not to the default browser — the
+       *  surface's Web tab (`features/web/links`). Never for an untrusted pane. */
+      openLink?: (url: string, event: MouseEvent) => void;
+    } = {},
+  ) {
     this.term = new Terminal({
       allowProposedApi: true,
       cursorBlink: !opts.readOnly,
@@ -155,8 +163,12 @@ export class XtermRenderer implements TerminalRenderer {
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
     // Default handler is `window.open`, which WKWebView doesn't route to the
-    // system browser — send matched links through the opener plugin instead.
-    this.term.loadAddon(new WebLinksAddon((_e, uri) => void openUrl(uri)));
+    // system browser — send matched links to the surface's Web tab, or through
+    // the opener plugin. A Daedalus pane's links go to the default browser.
+    const openLink = opts.untrusted ? undefined : opts.openLink;
+    this.term.loadAddon(
+      new WebLinksAddon((e, uri) => (openLink ? openLink(uri, e) : void openUrl(uri))),
+    );
 
     // Re-theme live when the app theme flips. `data-theme` on <html> is the only
     // thing that moves the accent (each theme declares its own literal in CSS;

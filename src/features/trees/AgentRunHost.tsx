@@ -124,6 +124,7 @@ function RepoLaunches({ repo }: { repo: string }) {
         ),
         pr: null,
         account: null,
+        url: null,
       });
       beginRun(repo, id, tabId);
     }

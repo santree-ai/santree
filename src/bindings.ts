@@ -416,17 +416,76 @@ export const commands = {
 	 * 
 	 *  `pr` is required for (and only for) the review kinds: it is what
 	 *  [`worktree_tab_launch`] re-derives the tab's `--settings` and `--mcp-config`
-	 *  from after a restart.
+	 *  from after a restart. `url` is the page a web tab opens on, checked as one.
 	 */
 	addWorktreeTab: (repo: string, worktreeId: string, id: string, kind: TabKind, agentKind: "Claude" | "Codex" | "Cursor" | "Opencode" | null, title: string, pr: {
 	/**  "owner/name" — the PR's own repo, which need not be the active one. */
 	repo: string,
 	number: number,
-} | null) => typedError<null, CmdError>(__TAURI_INVOKE("add_worktree_tab", { repo, worktreeId, id, kind, agentKind, title, pr })),
+} | null, url: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("add_worktree_tab", { repo, worktreeId, id, kind, agentKind, title, pr, url })),
 	/**  Rename an extra tab (blank titles are rejected). */
 	renameWorktreeTab: (repo: string, id: string, title: string) => typedError<null, CmdError>(__TAURI_INVOKE("rename_worktree_tab", { repo, id, title })),
-	/**  Remove an extra tab; a Claude tab's stored session is forgotten with it. */
+	/**
+	 *  Remove an extra tab; a Claude tab's stored session is forgotten with it, and a
+	 *  web tab's page is closed.
+	 */
 	removeWorktreeTab: (repo: string, id: string) => typedError<null, CmdError>(__TAURI_INVOKE("remove_worktree_tab", { repo, id })),
+	/**
+	 *  Whether this Mac can run a Web tab: its cookie store is one of WebKit's named
+	 *  stores (`WKWebsiteDataStore(forIdentifier:)`), which is macOS 14 and later.
+	 */
+	browserSupported: () => __TAURI_INVOKE<boolean>("browser_supported"),
+	/**  The address bar's text as the URL a page would load (`address::resolve`). */
+	browserResolve: (input: string) => typedError<string, CmdError>(__TAURI_INVOKE("browser_resolve", { input })),
+	/**
+	 *  Show a tab's page over `rect`, creating it on `url` the first time. `false`
+	 *  when there is no page yet and no `url` to make one with — a new, blank tab.
+	 */
+	browserShow: (id: string, url: string | null, rect: BrowserRect) => typedError<boolean, CmdError>(__TAURI_INVOKE("browser_show", { id, url, rect })),
+	/**  Move a shown page onto `rect` — its placeholder moved or resized. */
+	browserPlace: (id: string, rect: BrowserRect) => typedError<null, CmdError>(__TAURI_INVOKE("browser_place", { id, rect })),
+	/**
+	 *  Hide a page whose tab stopped showing. It keeps running (throttled by WebKit),
+	 *  and the oldest of the hidden pages past a few are put to sleep (`native`).
+	 */
+	browserHide: (id: string) => typedError<null, CmdError>(__TAURI_INVOKE("browser_hide", { id })),
+	/**  Load `url` in a tab's page. */
+	browserLoad: (id: string, url: string) => typedError<null, CmdError>(__TAURI_INVOKE("browser_load", { id, url })),
+	browserNav: (id: string, nav: BrowserNav) => typedError<null, CmdError>(__TAURI_INVOKE("browser_nav", { id, nav })),
+	/**  Give a page the keyboard — its tab was just picked. */
+	browserFocus: (id: string) => typedError<null, CmdError>(__TAURI_INVOKE("browser_focus", { id })),
+	/**
+	 *  Hand the keyboard back to the app's webview: something there took focus (a
+	 *  field, the palette) while a page still held it natively.
+	 */
+	browserReleaseFocus: () => typedError<null, CmdError>(__TAURI_INVOKE("browser_release_focus")),
+	/**  Cut the app overlays crossing a page out of it (an empty list restores it). */
+	browserSetHoles: (id: string, holes: BrowserHole[]) => typedError<null, CmdError>(__TAURI_INVOKE("browser_set_holes", { id, holes })),
+	/**
+	 *  A still of a page (a JPEG `data:` URL), to stand in for it while a modal
+	 *  covers it — the modal's blurred scrim then draws over a picture of the page
+	 *  instead of over nothing. `None` when there is no page or WebKit can't draw one.
+	 */
+	browserSnapshot: (id: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("browser_snapshot", { id })),
+	/**  A page's current state, for a toolbar mounting after the page was made. */
+	browserState: (id: string) => typedError<{
+	id: string,
+	/**  The committed address; empty before the first page. */
+	url: string,
+	title: string,
+	loading: boolean,
+	/**  0–1, WebKit's estimate for the load in flight. */
+	progress: number | null,
+	canGoBack: boolean,
+	canGoForward: boolean,
+	/**
+	 *  An address the page couldn't open. It stands in front of the page until
+	 *  another one commits or the user goes back to the page behind it.
+	 */
+	failure: BrowserFailure | null,
+	/**  The page's process died. It shows nothing until it is reloaded. */
+	crashed: boolean,
+} | null, CmdError>(__TAURI_INVOKE("browser_state", { id })),
 	/**
 	 *  What a persisted review tab must relaunch with — the review deny list, and
 	 *  santree's review MCP server scoped to its PR.
@@ -1552,6 +1611,13 @@ export const commands = {
 
 /** Events */
 export const events = {
+	browserChanged: makeEvent<BrowserChanged>("browser-changed"),
+	browserClosed: makeEvent<BrowserClosed>("browser-closed"),
+	browserDownload: makeEvent<BrowserDownload>("browser-download"),
+	browserFocus: makeEvent<BrowserFocus>("browser-focus"),
+	browserOpened: makeEvent<BrowserOpened>("browser-opened"),
+	browserPointerDown: makeEvent<BrowserPointerDown>("browser-pointer-down"),
+	browserShortcut: makeEvent<BrowserShortcut>("browser-shortcut"),
 	claudeRateLimitsChanged: makeEvent<ClaudeRateLimitsChanged>("claude-rate-limits-changed"),
 	daedalusLinkChanged: makeEvent<DaedalusLinkChanged>("daedalus-link-changed"),
 	reviewAiChanged: makeEvent<ReviewAiChanged>("review-ai-changed"),
@@ -1913,6 +1979,131 @@ export type BinaryStatus = {
 	 *  wrong thing.
 	 */
 	version: string | null,
+};
+
+/**  A page's state changed. */
+export type BrowserChanged = BrowserState;
+
+/**  A page closed itself (`window.close()`), and its tab should go. */
+export type BrowserClosed = {
+	id: string,
+};
+
+/**  A download a page started ended: saved at `path`, or failed with `error`. */
+export type BrowserDownload = {
+	id: string,
+	file: string,
+	path: string | null,
+	error: string | null,
+};
+
+/**  An address a page couldn't open, for its tab to say why. */
+export type BrowserFailure = {
+	/**
+	 *  The address that failed. By the time WebKit reports a failure it is back
+	 *  to naming the page before it as the page's URL, so this is the only
+	 *  record of what was tried.
+	 */
+	url: string,
+	reason: BrowserFailureReason,
+	/**  WebKit's own words for it. */
+	message: string,
+};
+
+/**  What kept a page from opening. */
+export type BrowserFailureReason = 
+/**  Nothing answered at that address: a server that isn't running. */
+"NotRunning" | 
+/**  No host goes by that name. */
+"NoSuchHost" | "Offline" | "TimedOut" | 
+/**  Anything else; the message says what. */
+"Other";
+
+/**  A page took the keyboard (`focused`) or gave it up. */
+export type BrowserFocus = {
+	id: string,
+	focused: boolean,
+};
+
+/**
+ *  A part of a page an app overlay covers (a menu, a toast), relative to the
+ *  page's top-left, in CSS pixels. The page doesn't draw there and clicks fall
+ *  through to the overlay. `radius` follows the overlay's own corners.
+ */
+export type BrowserHole = {
+	rect: BrowserRect,
+	radius: number | null,
+};
+
+/**  A page's back, forward, reload and stop. */
+export type BrowserNav = "Back" | "Forward" | "Reload" | "Stop";
+
+/**
+ *  A page opened another, which becomes a tab beside its opener: a script's
+ *  `window.open` or a `target=_blank` link (`existing`: the page was already made
+ *  here, from the opener's configuration, so it keeps `window.opener` — what an
+ *  OAuth popup reports back through), or a ⌘-click (`background`: a new page, left
+ *  behind the current one).
+ */
+export type BrowserOpened = {
+	opener: string,
+	id: string,
+	url: string,
+	existing: boolean,
+	background: boolean,
+};
+
+/**
+ *  The user pressed a mouse button in a page. A click there never reaches the
+ *  app's webview, so this is how its menus close and its split activates.
+ */
+export type BrowserPointerDown = {
+	id: string,
+};
+
+/**
+ *  A rectangle in the app webview's CSS pixels — what `getBoundingClientRect`
+ *  reports. The page multiplies it by the app's own zoom.
+ */
+export type BrowserRect = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
+
+/**
+ *  One of santree's shortcuts was pressed while a page had the keyboard
+ *  (`keys::route`). The app replays it as if it had been pressed in its own
+ *  webview; `key` is what a DOM `KeyboardEvent.key` would carry.
+ */
+export type BrowserShortcut = {
+	id: string,
+	key: string,
+	shift: boolean,
+};
+
+/**
+ *  A page, as its tab and toolbar draw it. Pushed on every change
+ *  ([`BrowserChanged`]), so neither polls.
+ */
+export type BrowserState = {
+	id: string,
+	/**  The committed address; empty before the first page. */
+	url: string,
+	title: string,
+	loading: boolean,
+	/**  0–1, WebKit's estimate for the load in flight. */
+	progress: number | null,
+	canGoBack: boolean,
+	canGoForward: boolean,
+	/**
+	 *  An address the page couldn't open. It stands in front of the page until
+	 *  another one commits or the user goes back to the page behind it.
+	 */
+	failure: BrowserFailure | null,
+	/**  The page's process died. It shows nothing until it is reloaded. */
+	crashed: boolean,
 };
 
 /**
@@ -4233,7 +4424,10 @@ export type SubagentStatus = "Running" | "Completed" | "Failed" |
 /**  The user stopped it, or it was killed. */
 "Stopped" | "Unknown";
 
-/**  What an extra Trees main-area tab hosts: an agent session or a login shell. */
+/**
+ *  What an extra Trees main-area tab hosts: an agent session, a login shell, or
+ *  a web page.
+ */
 export type TabKind = "agent" | "terminal" | 
 /**
  *  The guarded "Address review" session that works a PR's saved improvement
@@ -4242,7 +4436,12 @@ export type TabKind = "agent" | "terminal" |
  */
 "fixCi" | 
 /**  The AI review of your own PR, run in its worktree. */
-"aiReview";
+"aiReview" | 
+/**
+ *  An in-app browser page ([`WorktreeTab::url`]). It has no terminal: the
+ *  page lives in a native web view the app keeps per tab (docs/web.md).
+ */
+"web";
 
 /**  What a persisted review tab relaunches with, re-derived from its row. */
 export type TabLaunch = {
@@ -5125,6 +5324,11 @@ export type WorktreeTab = {
 	 *  session yet.
 	 */
 	account: string | null,
+	/**
+	 *  A web tab's page: the address it reopens on. `None` for every other kind,
+	 *  and for a web tab that hasn't loaded a page yet.
+	 */
+	url: string | null,
 };
 
 /**

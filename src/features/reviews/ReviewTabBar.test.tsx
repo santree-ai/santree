@@ -28,6 +28,7 @@ vi.mock("../../lib/queries", () => ({
   useAgentAuth: () => ({ data: { connected: true } }),
   useCodexAccount: () => ({ data: { connected: true } }),
   useCodexHealth: () => ({ data: { available: true } }),
+  useBrowserSupported: () => ({ data: true }),
 }));
 
 import { ReviewTabBar } from "./ReviewTabBar";
@@ -45,6 +46,7 @@ const row = (id: string, kind: TabKind, title: string): WorktreeTab => ({
   title,
   pr: null,
   account: null,
+  url: null,
 });
 
 /** The model the bar draws, dialled per test — all but its split layout, which
@@ -256,12 +258,16 @@ describe("ReviewTabBar", () => {
   });
 
   describe("the new-tab menu with a checkout", () => {
-    it("opens terminals and agents in it, apart from the AI review", () => {
+    it("opens terminals, agents and web pages in it, apart from the AI review", () => {
       const tabs = checkedOut();
       mount(tabs);
       openMenu();
       fireEvent.click(screen.getByRole("button", { name: /Terminal/ }));
       expect(tabs.addTab).toHaveBeenCalledWith("terminal");
+
+      openMenu();
+      fireEvent.click(screen.getByRole("button", { name: /Web/ }));
+      expect(tabs.addTab).toHaveBeenCalledWith("web");
 
       openMenu();
 

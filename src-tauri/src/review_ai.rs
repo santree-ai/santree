@@ -869,6 +869,7 @@ mod tests {
             title: "AI review".into(),
             pr,
             account: None,
+            url: None,
         }
     }
 

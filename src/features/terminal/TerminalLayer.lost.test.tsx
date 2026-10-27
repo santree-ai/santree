@@ -118,6 +118,7 @@ const ROW: WorktreeTab = {
   title: "Codex",
   pr: null,
   account: null,
+  url: null,
 };
 
 let registry: TerminalTabs;

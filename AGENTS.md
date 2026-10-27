@@ -150,6 +150,10 @@ docs/server.md     the local santree server: modes, lifecycle, trust, revisions,
                    crates/server and src-tauri/src/{sessions,server}/
 docs/remote.md     Daedalus projects, protocol v1, the link — the source of
                    truth for crates/remote{,-proto,-tls} and src-tauri/src/daedalus/
+docs/web.md        the Web tab: its page as a native WKWebView laid over the
+                   app's webview, placement, overlays, keys and focus, and the
+                   Daedalus plan — the source of truth for src-tauri/src/browser/,
+                   src/features/web/ and src/lib/overlays.ts
 crates/core/src/   domain.rs (types) · config.rs (static config/defaults) · linear.rs
                    + jira.rs (tracker → domain mapping) · layout.rs (dagre-free graph helpers) · diff_index.rs
                    (a PR's commentable hunk spans; written by the app, read by the
@@ -240,6 +244,10 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    santree_dir.rs (a managed repo's `.santree/`: what santree
                    owns there vs what the repo commits, and the nested
                    `.gitignore` that keeps them apart)
+                   · browser/ (the Web tab's page, docs/web.md: `address` — what
+                   a page may load — `keys` — who a ⌘-chord in a page belongs
+                   to — `native` — the WKWebViews, their host view and slots,
+                   the delegate — and the commands)
 src-tauri/migrations/  0001_init … (SQLite schema; applied on startup)
 src/
   main.tsx         QueryClient (+ global mutation→toast) · providers · router ·
@@ -294,6 +302,11 @@ src/
                    that project. The queue itself lives in the
                    sidebar's `TriageSection`.
   lib/queries.ts   ALL data hooks (useUnwrappedQuery, useOptimisticMutation, …)
+  lib/overlays.ts  the app's open overlays (menus, modals, toasts, drop previews),
+                   which a Web tab's native page gives way to — docs/web.md
+  features/web/    the Web tab: WebTabPane (toolbar + placeholder), useBrowserPage
+                   (placement and overlays), the page-state store, the strips'
+                   shared Web pieces, terminal links, the root event listeners
   lib/attention.ts what needs a human: level ladder, seen-gating, tree ordering
   state/           AppContext (theme, settings, cross-view UI) · AgentRuns (runs
                    that outlive their view) · WorkRepoGate (which project a
@@ -543,6 +556,12 @@ src/
   incomplete answer keeps agents as they were and refuses a resume. A lost agent
   tab's Resume is `useLostTabResume`, one path for every tab that is a row.
   docs/server.md, "Sessions".
+- **A Web tab's page is drawn above the app.** It is a native WKWebView, not
+  DOM (docs/web.md), so anything floating that can cross it must register in
+  `lib/overlays.ts` — `Dropdown`, `PositionedMenu`, `useModalA11y`, the toast
+  viewport and the drop preview already do, so build overlays from them. A page
+  never gets Tauri IPC, and every URL that reaches it from IPC or the DB passes
+  `browser::address::checked`.
 - **One place renders a diff.** `features/trees/DiffPane` picks the source with
   `prDiffModeFor`: GitHub's own patch when the file is in the PR (its line numbers
   are what the comments anchor to), the local branch-vs-base diff otherwise, and

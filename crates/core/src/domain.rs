@@ -1183,7 +1183,8 @@ impl AgentSession {
     }
 }
 
-/// What an extra Trees main-area tab hosts: an agent session or a login shell.
+/// What an extra Trees main-area tab hosts: an agent session, a login shell, or
+/// a web page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum TabKind {
@@ -1195,6 +1196,9 @@ pub enum TabKind {
     FixCi,
     /// The AI review of your own PR, run in its worktree.
     AiReview,
+    /// An in-app browser page ([`WorktreeTab::url`]). It has no terminal: the
+    /// page lives in a native web view the app keeps per tab (docs/web.md).
+    Web,
 }
 
 impl TabKind {
@@ -1205,6 +1209,7 @@ impl TabKind {
             TabKind::Terminal => "terminal",
             TabKind::FixCi => "fixci",
             TabKind::AiReview => "ai_review",
+            TabKind::Web => "web",
         }
     }
 
@@ -1215,6 +1220,7 @@ impl TabKind {
             "agent" | "claude" => TabKind::Agent,
             "fixci" => TabKind::FixCi,
             "ai_review" => TabKind::AiReview,
+            "web" => TabKind::Web,
             _ => TabKind::Terminal,
         }
     }
@@ -1224,6 +1230,11 @@ impl TabKind {
     /// Both re-derive that configuration from [`WorktreeTab::pr`] on every open.
     pub fn is_review(self) -> bool {
         matches!(self, TabKind::FixCi | TabKind::AiReview)
+    }
+
+    /// Whether this tab runs an agent, and so is stored with its provider.
+    pub fn runs_agent(self) -> bool {
+        !matches!(self, TabKind::Terminal | TabKind::Web)
     }
 }
 
@@ -1276,6 +1287,9 @@ pub struct WorktreeTab {
     /// for its key and provider). `None` is the Default account, or no stored
     /// session yet.
     pub account: Option<String>,
+    /// A web tab's page: the address it reopens on. `None` for every other kind,
+    /// and for a web tab that hasn't loaded a page yet.
+    pub url: Option<String>,
 }
 
 /// A proposed PR (title + body) for the create-PR dialog, before it's opened.

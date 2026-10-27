@@ -19,6 +19,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { useModalOverlay, useOverlay } from "../lib/overlays";
 import { formatElapsed, useElapsed } from "../lib/useElapsed";
 import { alpha, raisedActiveStyle } from "../theme/colors";
 import { ChevronDownIcon } from "./icons";
@@ -907,6 +908,8 @@ export function Dropdown({
   const menuRef = useRef<HTMLDivElement>(null);
   // Fixed-position coordinates for the portaled menu, anchored to the trigger.
   const [coords, setCoords] = useState<CSSProperties | null>(null);
+  // A Web tab's page is drawn above the app; it cuts the menu out of itself.
+  useOverlay(menuRef, open);
 
   // The portal escapes panel clipping, but still has to fit the app viewport.
   // Measure before paint and again when filtering, scrolling, or resizing changes it.
@@ -1142,6 +1145,7 @@ export function PositionedMenu({
   const restoreTo = useRef<HTMLElement | null>(null);
 
   useDismiss(at !== null, onClose, [menuRef]);
+  useOverlay(menuRef, at !== null);
 
   // Measure, then clamp. Runs before paint, so the menu never shows at the
   // unclamped position first. The element to hand focus back to is noted here,
@@ -1262,6 +1266,8 @@ export function useModalA11y({
   initialFocusRef: RefObject<HTMLElement | null>;
 }) {
   const restoreRef = useRef<HTMLElement | null>(null);
+  // A modal covers the window, Web tab pages included (`lib/overlays`).
+  useModalOverlay(open);
 
   // Move focus in on open, restore it on close. initialFocusRef is a ref
   // object (stable by contract) so it's deliberately left off the deps list.

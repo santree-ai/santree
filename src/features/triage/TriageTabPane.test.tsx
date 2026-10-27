@@ -46,6 +46,7 @@ const tab: WorktreeTab = {
   title: "Codex",
   pr: null,
   account: null,
+  url: null,
 };
 
 const mount = () =>

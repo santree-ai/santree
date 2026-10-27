@@ -6,6 +6,7 @@ import { WelcomeScreen } from "../components/WelcomeScreen";
 import { TerminalAdoption } from "../features/terminal/TerminalAdoption";
 import { TerminalLayer } from "../features/terminal/TerminalLayer";
 import { AgentRunHost } from "../features/trees/AgentRunHost";
+import { useBrowserEvents } from "../features/web/useBrowserEvents";
 import {
   useRepos,
   useUpdateWatcher,
@@ -40,6 +41,7 @@ export const Route = createRootRoute({
 function RootLayout() {
   useKeyboardShortcuts();
   useNativeContextMenu();
+  useBrowserEvents();
   useUpdateWatcher();
   useWorktreeBaseChanges();
   const { data: repos } = useRepos();

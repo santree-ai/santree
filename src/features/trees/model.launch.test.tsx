@@ -48,6 +48,7 @@ const row = (id: string, worktreeId: string): WorktreeTab => ({
   title: "Codex",
   pr: null,
   account: null,
+  url: null,
 });
 
 /** The route the provider reads its project and selection off. */

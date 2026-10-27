@@ -1,9 +1,9 @@
-//! Persisted extra main-area tabs (the "+" menu): agent tabs and plain terminal
-//! tabs, stored in `worktree_tabs` so they come back after an app restart. An
-//! agent tab's conversation lives in the shared session registry
+//! Persisted extra main-area tabs (the "+" menu): agent tabs, plain terminal
+//! tabs and web tabs, stored in `worktree_tabs` so they come back after an app
+//! restart. An agent tab's conversation lives in the shared session registry
 //! (`terminal_sessions`) under [`term_key`], so reopening it resumes the same
 //! conversation; a terminal tab just reopens a fresh shell (a dead shell's
-//! history can't be restored).
+//! history can't be restored); a web tab reopens on the page it last showed.
 //!
 //! The `worktree_id` column names the surface a tab hangs off, which is a
 //! worktree for Trees and Reviews, and a triage ticket's own surface key
@@ -29,6 +29,9 @@ pub struct NewTab<'a> {
     /// The pull request a review tab relaunches from. Required for (and only for)
     /// the review kinds.
     pub pr: Option<TabPr>,
+    /// The page a web tab opens on. Only a web tab has one, and it may start
+    /// without (a blank tab waiting for an address).
+    pub url: Option<String>,
 }
 
 /// The session-registry key for an agent tab — the same key the frontend uses
@@ -65,7 +68,7 @@ pub fn validate_term_key(term_key: &str) -> Result<(), String> {
 }
 
 /// The columns every read selects, in the order [`row_to_tab`] destructures them.
-const COLUMNS: &str = "id, worktree_id, kind, agent_kind, title, pr_repo, pr_number";
+const COLUMNS: &str = "id, worktree_id, kind, agent_kind, title, pr_repo, pr_number, url";
 
 type Row = (
     String,
@@ -75,18 +78,20 @@ type Row = (
     String,
     Option<String>,
     Option<u32>,
+    Option<String>,
 );
 
 fn row_to_tab(row: Row) -> Result<WorktreeTab> {
-    let (id, worktree_id, raw_kind, raw_agent, title, pr_repo, pr_number) = row;
+    let (id, worktree_id, raw_kind, raw_agent, title, pr_repo, pr_number, url) = row;
     let kind = TabKind::from_db_str(&raw_kind);
-    let agent_kind = match kind {
-        TabKind::Terminal => None,
-        TabKind::Agent | TabKind::FixCi | TabKind::AiReview => Some(
+    let agent_kind = if kind.runs_agent() {
+        Some(
             raw_agent
                 .ok_or_else(|| anyhow::anyhow!("agent tab {id:?} has no provider"))?
                 .parse()?,
-        ),
+        )
+    } else {
+        None
     };
     Ok(WorktreeTab {
         id,
@@ -100,6 +105,7 @@ fn row_to_tab(row: Row) -> Result<WorktreeTab> {
             .zip(pr_number)
             .map(|(repo, number)| TabPr { repo, number }),
         account: None,
+        url,
     })
 }
 
@@ -179,18 +185,28 @@ pub async fn add(db: &Db, repo: &str, tab: NewTab<'_>) -> Result<()> {
         agent_kind,
         title,
         pr,
+        url,
     } = tab;
     let title = title.trim();
     if title.is_empty() {
         bail!("tab title can't be empty");
     }
-    match (kind, agent_kind) {
-        (TabKind::Terminal, Some(_)) => bail!("terminal tabs cannot have an agent provider"),
-        (TabKind::Agent | TabKind::FixCi | TabKind::AiReview, None) => {
-            bail!("agent tabs require a provider")
-        }
+    match (kind.runs_agent(), agent_kind) {
+        (false, Some(_)) => bail!("only agent tabs have an agent provider"),
+        (true, None) => bail!("agent tabs require a provider"),
         _ => {}
     }
+    // The address a web tab opens on is loaded as it stands the next time the tab
+    // is shown, so it is held to what the browser itself would navigate to — and
+    // stored without what only that moment needed (`address::persistable`).
+    let url = match url {
+        Some(_) if kind != TabKind::Web => bail!("only a web tab has a page address"),
+        Some(url) => Some(
+            crate::browser::address::persistable(&crate::browser::address::checked(&url)?)
+                .to_string(),
+        ),
+        None => None,
+    };
     // A review tab's `--settings` and `--mcp-config` are re-derived from this pair
     // every time it opens, so a row without it would silently resume under the plain
     // no-git profile — no `gh` deny rules, no review tools. Storing one on a tab that
@@ -206,8 +222,8 @@ pub async fn add(db: &Db, repo: &str, tab: NewTab<'_>) -> Result<()> {
     }
     sqlx::query(
         "INSERT INTO worktree_tabs
-             (id, repo, worktree_id, kind, agent_kind, title, pr_repo, pr_number, position)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+             (id, repo, worktree_id, kind, agent_kind, title, pr_repo, pr_number, url, position)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
                  (SELECT COALESCE(MAX(position), 0) + 1 FROM worktree_tabs
                   WHERE repo = ? AND worktree_id = ?))",
     )
@@ -219,8 +235,31 @@ pub async fn add(db: &Db, repo: &str, tab: NewTab<'_>) -> Result<()> {
     .bind(title)
     .bind(pr.as_ref().map(|p| p.repo.as_str()))
     .bind(pr.as_ref().map(|p| p.number))
+    .bind(url.as_deref())
     .bind(repo)
     .bind(worktree_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Remember the page a web tab shows, so it reopens there after a restart. The
+/// browser calls this as the page navigates; the title rides along so the strip
+/// names the tab before its page has loaded again.
+///
+/// Keyed by id alone: the browser knows its tab, not the repo, and a tab id is a
+/// UUID. A row that is gone (the tab closed mid-navigation) is no error.
+pub async fn set_page(db: &Db, id: &str, url: &str, title: &str) -> Result<()> {
+    let url = crate::browser::address::persistable(&crate::browser::address::checked(url)?);
+    let title = title.trim();
+    sqlx::query(
+        "UPDATE worktree_tabs SET url = ?, title = CASE WHEN ? = '' THEN title ELSE ? END
+         WHERE id = ? AND kind = 'web'",
+    )
+    .bind(url.as_str())
+    .bind(title)
+    .bind(title)
+    .bind(id)
     .execute(db)
     .await?;
     Ok(())
@@ -265,6 +304,18 @@ pub async fn remove(db: &Db, repo: &str, id: &str) -> Result<()> {
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// The web tabs a worktree has, by id — whose pages close with it.
+pub async fn web_ids(db: &Db, repo: &str, worktree_id: &str) -> Result<Vec<String>> {
+    let ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM worktree_tabs WHERE repo = ? AND worktree_id = ? AND kind = 'web'",
+    )
+    .bind(repo)
+    .bind(worktree_id)
+    .fetch_all(db)
+    .await?;
+    Ok(ids.into_iter().map(|(id,)| id).collect())
 }
 
 /// Drop every tab of a worktree (called when the worktree itself is removed),
@@ -312,6 +363,7 @@ mod tests {
             agent_kind: Some(AgentKind::Claude),
             title,
             pr: None,
+            url: None,
         }
     }
 
@@ -326,6 +378,7 @@ mod tests {
                 repo: "acme/app".into(),
                 number: 42,
             }),
+            url: None,
         }
     }
 
@@ -346,6 +399,7 @@ mod tests {
                 agent_kind: None,
                 title: "Terminal 2",
                 pr: None,
+                url: None,
             },
         )
         .await
@@ -399,6 +453,7 @@ mod tests {
                         agent_kind: None,
                         title: "Terminal",
                         pr: None,
+                        url: None,
                     },
                 )
                 .await
@@ -510,6 +565,7 @@ mod tests {
                     repo: "not-a-slug".into(),
                     number: 42
                 }),
+                url: None,
                 ..review("AK-1", "bad-slug", TabKind::AiReview, "AI review")
             },
         )

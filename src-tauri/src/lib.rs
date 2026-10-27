@@ -7,6 +7,7 @@ mod accounts;
 mod agent;
 mod agent_procs;
 mod awake;
+mod browser;
 mod bundled_bin;
 mod claude_usage;
 mod codex_cli;
@@ -91,6 +92,13 @@ const BINDINGS_PATH: &str = "../src/bindings.ts";
 fn specta_builder() -> AppBuilder {
     Builder::<tauri::Wry>::new()
         .events(collect_events![
+            browser::BrowserChanged,
+            browser::BrowserClosed,
+            browser::BrowserDownload,
+            browser::BrowserFocus,
+            browser::BrowserOpened,
+            browser::BrowserPointerDown,
+            browser::BrowserShortcut,
             daedalus::host::DaedalusLinkChanged,
             git_watch::WorktreeChanged,
             pr::WorktreeBasesChanged,
@@ -169,6 +177,18 @@ fn specta_builder() -> AppBuilder {
             commands::add_worktree_tab,
             commands::rename_worktree_tab,
             commands::remove_worktree_tab,
+            browser::browser_supported,
+            browser::browser_resolve,
+            browser::browser_show,
+            browser::browser_place,
+            browser::browser_hide,
+            browser::browser_load,
+            browser::browser_nav,
+            browser::browser_focus,
+            browser::browser_release_focus,
+            browser::browser_set_holes,
+            browser::browser_snapshot,
+            browser::browser_state,
             commands::worktree_tab_launch,
             commands::pr_draft,
             commands::worktree_has_transcripts,
@@ -616,6 +636,9 @@ pub fn run() {
 
     tauri_builder
         .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                browser::hide_all(webview.app_handle());
+            }
             // The smoke run's success condition: the window's document loaded, so
             // the frontend bundle shipped and the webview came up.
             let loaded = matches!(payload.event(), tauri::webview::PageLoadEvent::Finished);

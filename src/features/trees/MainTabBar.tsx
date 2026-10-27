@@ -19,17 +19,10 @@
  *
  *  This file is only Trees' *wiring*: the chrome, the fitting and the keyboard
  *  model belong to the strip, which knows nothing about either host's model. */
-import type { ReactNode } from "react";
+import { type ReactNode, useCallback } from "react";
 
 import type { AgentKind, TabKind } from "../../bindings";
-import {
-  AgentIcon,
-  GitHubLogo,
-  GlobeIcon,
-  PlayIcon,
-  TerminalIcon,
-  TrackerLogo,
-} from "../../components/icons";
+import { AgentIcon, GitHubLogo, PlayIcon, TerminalIcon, TrackerLogo } from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
 import { SplitWorkspace } from "../../components/split/SplitWorkspace";
@@ -41,7 +34,10 @@ import {
   useTicketProvider,
 } from "../../lib/queries";
 import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
-import { BASE_ID, extraTab, type MainTab, useTrees } from "./model";
+import { useWebOff } from "../web/availability";
+import { usePageLabels } from "../web/pageState";
+import { useStripWebHost, WebMenuRow, webStripTab } from "../web/strip";
+import { BASE_ID, extraTab, type MainTab, type NewTabOpts, useTrees } from "./model";
 import { useTabAccounts } from "./useTabAccounts";
 import { useTabSessions } from "./useTabSessions";
 
@@ -81,26 +77,44 @@ export function MainTabBar({
   const { closeWithSession } = useTabSessions(activeId, tabs, closeTab);
   const { menuFor, detailFor } = useTabAccounts(repo, activeId, tabs);
   const isBase = activeId === BASE_ID;
+  const pageLabel = usePageLabels();
+
+  // This worktree's terminal links and its pages' popups open Web tabs here.
+  const { select } = split;
+  useStripWebHost({
+    surfaces: activeId ? [activeId] : [],
+    rows: tabs,
+    addWeb: useCallback(
+      (url: string, opts?: NewTabOpts) => void addTab("web", undefined, { ...opts, url }),
+      [addTab],
+    ),
+    closeTab,
+    show: useCallback((id: string) => select(extraTab(id)), [select]),
+  });
 
   // One list, so the fit/hide decision sees every tab — the persisted rows and
   // the on-demand ones, in `openMainTabs`' order.
   const items: StripTab<MainTab>[] = [
-    ...tabs.map((t) => ({
-      tab: extraTab(t.id),
-      label: t.title,
-      icon:
-        t.kind === "terminal" ? (
-          <TerminalIcon size={11} className="text-muted-3" />
-        ) : (
-          // The agent's logomark. Claude's spark reads as "Claude" at a glance;
-          // every mark takes the text colour so the strip stays one weight.
-          <AgentIcon kind={t.agentKind ?? "Claude"} size={11} className="text-muted-3" />
-        ),
-      onClose: () => closeWithSession(t),
-      onRename: (title: string) => renameTab(t.id, title),
-      menu: menuFor(t),
-      detail: detailFor(t),
-    })),
+    ...tabs.map((t) =>
+      t.kind === "web"
+        ? webStripTab(extraTab(t.id), t, pageLabel, () => closeTab(t.id))
+        : {
+            tab: extraTab(t.id),
+            label: t.title,
+            icon:
+              t.kind === "terminal" ? (
+                <TerminalIcon size={11} className="text-muted-3" />
+              ) : (
+                // The agent's logomark. Claude's spark reads as "Claude" at a glance;
+                // every mark takes the text colour so the strip stays one weight.
+                <AgentIcon kind={t.agentKind ?? "Claude"} size={11} className="text-muted-3" />
+              ),
+            onClose: () => closeWithSession(t),
+            onRename: (title: string) => renameTab(t.id, title),
+            menu: menuFor(t),
+            detail: detailFor(t),
+          },
+    ),
     ...(prViewOpen
       ? [
           {
@@ -178,10 +192,10 @@ export function MainTabBar({
   );
 }
 
-/** New-tab menu rows: a new Claude/Codex session or a terminal (or a browser,
- *  once that's built). Mounted only while the menu is open, so its digit-key
- *  listener (1 → Codex, 2 → Claude Code, 3 → Terminal) is live exactly when the
- *  menu is visible. */
+/** New-tab menu rows: a new Claude/Codex session, a terminal, or a web page.
+ *  Mounted only while the menu is open, so its digit-key listener (1 → Codex,
+ *  2 → Claude Code, 3 → Terminal, 4 → Web) is live exactly when the menu is
+ *  visible. */
 function NewTabMenu({
   onAdd,
   close,
@@ -206,19 +220,22 @@ function NewTabMenu({
   const codexReady =
     !codexOff && (remote || (!!codexHealth?.available && !!codexAccount?.connected));
   const claudeReady = !claudeOff && (remote || !!claude?.connected);
+  const webOff = useWebOff(remote);
   const add = (kind: TabKind, agentKind?: AgentKind) => {
     if (agentKind === "Codex" && !codexReady) return;
     if (agentKind === "Claude" && !claudeReady) return;
+    if (kind === "web" && webOff) return;
     if (agentKind) onAdd(kind, agentKind);
     else onAdd(kind);
     close();
   };
 
-  // Provider choice is explicit: 1 → Codex, 2 → Claude Code, 3 → Terminal.
+  // Provider choice is explicit: 1 → Codex, 2 → Claude Code, 3 → Terminal, 4 → Web.
   useDigitShortcuts([
     () => add("agent", "Codex"),
     () => add("agent", "Claude"),
     () => add("terminal"),
+    () => add("web"),
   ]);
 
   return (
@@ -250,11 +267,7 @@ function NewTabMenu({
         Terminal
         <span className="ml-auto text-[10px] text-muted-4">3</span>
       </button>
-      <button type="button" disabled title="Coming soon" className={MENU_ITEM}>
-        <GlobeIcon />
-        Web
-        <span className="ml-auto text-[10px] text-muted-4">WIP</span>
-      </button>
+      <WebMenuRow off={webOff} digit={4} onAdd={() => add("web")} />
     </>
   );
 }

@@ -30,6 +30,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { relayoutTerminals } from "../../features/terminal/relayout";
+import { useOverlay } from "../../lib/overlays";
 import { type StripTab, TabStrip } from "../TabStrip";
 import { type Box, type DropTarget, type GroupGeometry, resolveDrop } from "./dropZone";
 import {
@@ -425,6 +426,14 @@ function DragOverlay<T extends string>({
   const { target } = drag;
   // Mount the preview where it first appears, then let it glide between zones.
   const [shown, setShown] = useState(false);
+  // A Web tab's page is drawn above the app: the drop's picture is cut out of it
+  // (or, filling the page, has it step aside for a still).
+  const preview = useRef<HTMLDivElement>(null);
+  const line = useRef<HTMLDivElement>(null);
+  const chip = useRef<HTMLDivElement>(null);
+  useOverlay(preview, target?.kind === "pane");
+  useOverlay(line, target?.kind === "strip");
+  useOverlay(chip, true);
   useEffect(() => {
     const raf = requestAnimationFrame(() => setShown(true));
     return () => cancelAnimationFrame(raf);
@@ -433,6 +442,7 @@ function DragOverlay<T extends string>({
     <>
       {target?.kind === "pane" && (
         <div
+          ref={preview}
           className={`pointer-events-none fixed z-[60] flex items-center justify-center rounded-md border-2 border-accent ${
             shown ? "transition-all duration-150 ease-out" : ""
           }`}
@@ -451,11 +461,13 @@ function DragOverlay<T extends string>({
       )}
       {target?.kind === "strip" && (
         <div
+          ref={line}
           className="pointer-events-none fixed z-[60] w-[2px] bg-accent"
           style={{ left: target.x - 1, top: target.box.top + 6, height: target.box.height - 12 }}
         />
       )}
       <div
+        ref={chip}
         className="pointer-events-none fixed z-[70] flex max-w-[200px] items-center gap-1.5 rounded border border-line-2 bg-raised px-2.5 py-1 text-[11.5px] font-medium text-fg-2 shadow-md"
         style={{ left: drag.x + 12, top: drag.y + 10 }}
       >

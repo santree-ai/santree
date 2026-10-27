@@ -50,6 +50,7 @@ export function useResumeSessionInWorktree(): SessionResumer {
             // hand-off, never from here.
             pr: null,
             account: null,
+            url: null,
           });
           setActiveTab(extraTab(tabId));
         } catch {

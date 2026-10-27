@@ -348,6 +348,7 @@ export const queryKeys = {
   sessionProviders: (repo: string, termKey: string) =>
     ["session-providers", repo, termKey] as const,
   worktreeTabs: (repo: string) => ["worktree-tabs", repo] as const,
+  browserSupported: ["browser-supported"] as const,
   worktreeTabLaunch: (repo: string, id: string) => ["worktree-tab-launch", repo, id] as const,
   worktreeTabLaunchPrefix: ["worktree-tab-launch"] as const,
   commitDraft: (repo: string, id: string) => ["commit-draft", repo, id] as const,
@@ -3716,6 +3717,15 @@ export const useWorktreeTabs = (repo: string) =>
     staleTime: SETTING_STALE_TIME,
   });
 
+/** Whether this Mac runs Web tabs: a page's cookie store of its own is macOS 14
+ *  and later. A fact of the machine, asked once. */
+export const useBrowserSupported = () =>
+  useQuery({
+    queryKey: queryKeys.browserSupported,
+    queryFn: () => commands.browserSupported(),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+
 /** Persist a new extra tab. The caller mints the id/title (see the Trees model),
  *  so the cache patch is the exact row the backend will store. */
 export const useAddWorktreeTab = (repo: string) =>
@@ -3730,6 +3740,7 @@ export const useAddWorktreeTab = (repo: string) =>
           tab.agentKind,
           tab.title,
           tab.pr,
+          tab.url,
         ),
       ),
     optimistic: (qc, tab) => {

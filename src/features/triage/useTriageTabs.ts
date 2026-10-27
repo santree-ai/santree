@@ -44,7 +44,7 @@ import {
   useWorktreeTabs,
 } from "../../lib/queries";
 import { useTerminals } from "../terminal/TerminalsContext";
-import { defaultTabTitle } from "../trees/model";
+import { defaultTabTitle, type NewTabOpts, tabAgent } from "../trees/model";
 import { INTERACTIVE_AGENTS, orderedProviders, triageTermKey } from "./providerSessions";
 
 /** Each ticket's split layout, by ticket id. */
@@ -92,7 +92,7 @@ export interface TriageTabs {
   /** The ticket's own `worktree_tabs` rows, in strip order. */
   rows: WorktreeTab[];
   /** Open a new row and show it; its pane spawns on mount. */
-  addTab: (kind: TabKind, agentKind?: AgentKind) => void;
+  addTab: (kind: TabKind, agentKind?: AgentKind, opts?: NewTabOpts) => void;
   /** Drop a row. The strip ends the PTY, as for every closable tab; the backend
    *  forgets an agent row's stored session with it. */
   closeTab: (id: string) => void;
@@ -166,15 +166,15 @@ export function useTriageTabs(repo: string, ticketId: string): TriageTabs {
   );
 
   const addTab = useCallback(
-    (kind: TabKind, agentKind?: AgentKind) => {
+    (kind: TabKind, agentKind?: AgentKind, opts: NewTabOpts = {}) => {
       // No project, no row: there is no directory to run in, and no repo to
       // store the row under. The gate in `TriageView` asks first, so this is
       // only the guard behind it.
       if (!repo) return;
       // The id is minted here (not by the backend) so the optimistic cache patch
       // is the exact row the DB will hold and the tab can be focused immediately.
-      const id = crypto.randomUUID();
-      const resolvedAgent = kind === "terminal" ? null : (agentKind ?? "Codex");
+      const id = opts.id ?? crypto.randomUUID();
+      const resolvedAgent = tabAgent(kind, agentKind);
       addTabRow({
         id,
         worktreeId: termKey,
@@ -183,8 +183,9 @@ export function useTriageTabs(repo: string, ticketId: string): TriageTabs {
         title: defaultTabTitle(kind, resolvedAgent, rows),
         pr: null,
         account: null,
+        url: opts.url ?? null,
       });
-      select(rowTab(id));
+      if (!opts.background) select(rowTab(id));
     },
     [repo, termKey, rows, addTabRow, select],
   );

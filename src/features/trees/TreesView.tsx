@@ -26,6 +26,7 @@ import { useAppUi } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
 import type { FileFocus } from "../reviews/model";
 import { PrPage, PrPageSkeleton, type PrTab } from "../reviews/PrPage";
+import { WebTabPane } from "../web/WebTabPane";
 import { AgentTabPane } from "./AgentTabPane";
 import { CheckLogView } from "./CheckLogView";
 import { CreatePrDialog } from "./CreatePrDialog";
@@ -229,6 +230,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
     selectedFile,
     prViewOpen,
     issueViewOpen,
+    split,
   } = useTrees();
 
   // A tab's content, wherever its split group puts it. A row's host is mounted
@@ -246,6 +248,8 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
     if (tab.startsWith("tab:")) {
       const t = tabs.find((row) => extraTab(row.id) === tab);
       if (!t || !visible) return null;
+      // A web tab's page lives natively; unmounting this only hides it.
+      if (t.kind === "web") return <WebTabPane tab={t} focused={split.active === tab} />;
       return t.kind !== "terminal" ? (
         <AgentTabPane
           repo={repo}

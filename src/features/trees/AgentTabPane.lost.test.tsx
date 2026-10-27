@@ -84,6 +84,7 @@ const ROW: WorktreeTab = {
   title: "Codex",
   pr: null,
   account: null,
+  url: null,
 };
 const WORKTREE = { id: "wt1", path: "/src/web-wt1", title: "wt1" } as Worktree;
 

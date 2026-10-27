@@ -70,6 +70,7 @@ vi.mock("../../lib/queries", () => ({
   useAgentAuth: () => ({ data: { connected: true } }),
   useCodexAccount: () => ({ data: { connected: q.macCodex } }),
   useCodexHealth: () => ({ data: { available: q.macCodex } }),
+  useBrowserSupported: () => ({ data: true }),
 }));
 
 /** Whether this Mac's Codex is signed in — asked only for a project here. */
@@ -91,6 +92,7 @@ const tab = (id: string, kind: TabKind): WorktreeTab => ({
   title: kind === "agent" ? "Codex" : "Terminal 2",
   pr: null,
   account: null,
+  url: null,
 });
 
 const refIdOf = (id: string) => `tree:${trees.activeId}:tab:${id}`;
@@ -197,7 +199,7 @@ describe("MainTabBar", () => {
         window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
       });
 
-    it("opens with ⌘T; 1 adds Codex, 2 Claude, and 3 a terminal", () => {
+    it("opens with ⌘T; 1 adds Codex, 2 Claude, 3 a terminal and 4 a web page", () => {
       mount();
       openMenu();
       expect(screen.getByRole("button", { name: /Codex/ })).toBeInTheDocument();
@@ -212,6 +214,10 @@ describe("MainTabBar", () => {
       openMenu();
       press("3");
       expect(trees.addTab).toHaveBeenCalledWith("terminal");
+
+      openMenu();
+      press("4");
+      expect(trees.addTab).toHaveBeenCalledWith("web");
     });
 
     // The bar is on screen precisely when an agent is running, so focus is
@@ -316,6 +322,7 @@ describe("fitting the tabs to the pane", () => {
       title: "Claude Code",
       pr: null,
       account: null,
+      url: null,
     },
     ...Array.from({ length: n }, (_, i) => ({
       id: `t${i + 1}`,
@@ -325,6 +332,7 @@ describe("fitting the tabs to the pane", () => {
       title: `Session ${i + 1}`,
       pr: null,
       account: null,
+      url: null,
     })),
   ];
   const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent);

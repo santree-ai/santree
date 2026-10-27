@@ -147,3 +147,90 @@ tokio = { workspace = true, features = ["test-util"] }
 # decorum pulls in linicon → memmap2 0.5 (RUSTSEC-2026-0186, unsound, no fix on the
 # 0.5 line) — an unsound crate compiled into the Linux binary to power nothing.
 tauri-plugin-decorum = "1.1"
+
+# The Web tab's browser: a WKWebView santree creates itself and lays over the
+# app's own webview (docs/web.md) — not a Tauri webview, whose plugin scripts
+# would land in every page. All of these are already in the tree through wry and
+# tao, at these versions; listed here with the classes santree's browser names.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGImage", "CGPath"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "CALayer",
+    "CAShapeLayer",
+    "CATransaction",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSError",
+    "NSGeometry",
+    "NSKeyValueObserving",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "NSURLError",
+    "NSURLRequest",
+    "NSURLResponse",
+    "NSUUID",
+    "NSValue",
+    "NSBundle",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-quartz-core",
+    "NSAlert",
+    "NSApplication",
+    "NSBezierPath",
+    "NSBitmapImageRep",
+    "NSButton",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
+    "NSMenu",
+    "NSOpenPanel",
+    "NSPanel",
+    "NSResponder",
+    "NSSavePanel",
+    "NSText",
+    "NSTextField",
+    "NSView",
+    "NSWindow",
+    "NSWorkspace",
+] }
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
+    "WKDownload",
+    "WKDownloadDelegate",
+    "WKFrameInfo",
+    "WKNavigation",
+    "WKNavigationAction",
+    "WKNavigationDelegate",
+    "WKNavigationResponse",
+    "WKOpenPanelParameters",
+    "WKPreferences",
+    "WKSecurityOrigin",
+    "WKSnapshotConfiguration",
+    "WKUIDelegate",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKWebsiteDataStore",
+    "WKWindowFeatures",
+] }

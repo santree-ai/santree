@@ -416,6 +416,7 @@ function extraTabRow(
     title,
     pr: null,
     account: null,
+    url: null,
   };
 }
 

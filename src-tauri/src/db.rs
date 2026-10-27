@@ -328,6 +328,7 @@ mod tests {
         (38, "repo connection", "07c317b748f9bf0ccc062a4a5b8feb1a50d2d7da91a1b8ba79d0c53e5fe9698534df37ff2d1e383587a3d4f91b683536"),
         (39, "ticktick", "ed027b987f4a5c5af9fe43a5aa77ee2e09c8f37750023b3633a4402acd90245be70c0869dc554f2df00fc7502c3a2434"),
         (40, "agent accounts", "1f311f26bb353ff3bcaac830ca8cf63086fdf31cefbe656b455e864008371bc50ef90c4a22b931c39bbefe3bd303dfd9"),
+        (41, "web tabs", "9b2e16bbf41abba97ee068b64a7d7c53a52c887980b0eeb08a01819ad9b54564fd3bd6a11a7dbfbfe86bbf741caad062"),
     ];
 
     /// See [`SHIPPED_MIGRATIONS`]. Checked against the embedded set, so it fails at

@@ -534,16 +534,19 @@ pub async fn existing_review_workspace(
 /// The full worktree removal, branch included, exactly as deleting one from Trees
 /// does: it is a real worktree now, and a half-removal would leave git's admin
 /// entry pointing at a directory that is gone.
+///
+/// Returns the checkout's web tabs, whose pages the caller closes with them.
 pub async fn remove_review_workspace(
     db: &Db,
     repo: &str,
     pr_repo: &str,
     number: u32,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let Some(found) = project_for_pr(db, repo, pr_repo).await? else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let id = review_worktree_id(&found.owner, &found.name, number)?;
+    let pages = crate::tabs::web_ids(db, &found.project, &id).await?;
     // No prompts root: a per-worktree prompt file is written when *you* start a
     // task in a tree, and nothing writes one for a pull request you are reading.
     crate::worktree::remove(
@@ -556,7 +559,7 @@ pub async fn remove_review_workspace(
     .await?;
     // The membership row goes with the worktree it classified.
     unmark_review(db, &found.root, &id).await;
-    Ok(())
+    Ok(pages)
 }
 
 /// Every registered project paired with the GitHub repo its `origin` resolves to.

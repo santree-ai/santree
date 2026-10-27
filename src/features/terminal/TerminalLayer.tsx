@@ -40,6 +40,7 @@ import { useRepos, useServerStatus } from "../../lib/queries";
 import { serverStateView } from "../../lib/serverStatus";
 import { parseTermKey } from "../agents/registry";
 import { type AgentTarget, useOpenAgent } from "../agents/useOpenAgent";
+import { openTerminalLink } from "../web/links";
 import type { TerminalEmbed, TerminalTab } from "./orchestrator";
 import { paneAddress } from "./paneAddress";
 import { RELAYOUT_EVENT } from "./relayout";
@@ -258,6 +259,8 @@ export function TerminalLayer() {
             resumeBlocked={remote ? undefined : serverView?.blocksResume}
             unansweredHint={remote ? "Check the link in Settings → Daedalus." : localHint}
             onLink={(link) => onLink(t.key, link)}
+            // A link opens in a Web tab of the surface the terminal is on.
+            openLink={(url, event) => void openTerminalLink(t.refId, url, event)}
             onReady={(handle) => registerPane(t.key, handle)}
             // The process ended.
             onExit={() => end(t.key)}
@@ -297,6 +300,7 @@ function LayerPane({
   resumeBlocked,
   unansweredHint,
   onLink,
+  openLink,
   onReady,
   onExit,
   onClose,
@@ -314,6 +318,7 @@ function LayerPane({
   /** Where to look when the pane's host is slow to answer. */
   unansweredHint?: string;
   onLink: (link: PaneLink) => void;
+  openLink: (url: string, event: MouseEvent) => void;
   onReady: Parameters<typeof TerminalView>[0]["onReady"];
   onExit: () => void;
   onClose: () => void;
@@ -408,6 +413,7 @@ function LayerPane({
         resumeBlocked={resumeBlocked}
         unansweredHint={unansweredHint}
         onLink={onLink}
+        openLink={openLink}
       />
     </div>
   );

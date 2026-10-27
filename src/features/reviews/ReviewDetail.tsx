@@ -32,6 +32,7 @@ import { useAgentRuns } from "../../state/AgentRuns";
 import { agentProvider } from "../terminal/agentProvider";
 import { AgentTabPane } from "../trees/AgentTabPane";
 import { WorktreeTerminal } from "../trees/WorktreeTerminal";
+import { WebTabPane } from "../web/WebTabPane";
 import { AiReviewSessionPane } from "./AiReviewSessionPane";
 import { MergeQueuePane } from "./MergeQueuePane";
 import { useReviewsModel } from "./model";
@@ -216,6 +217,8 @@ function PrWorkspace({ pr, tabs }: { pr: ReviewPr; tabs: ReviewTabs }) {
     }
     const row = tabs.rows.find((t) => checkoutTab(t.id) === tab);
     if (!row || !worktree || !visible) return null;
+    // A web tab runs nothing in the checkout; its page lives natively.
+    if (row.kind === "web") return <WebTabPane tab={row} focused={tabs.active === tab} />;
     return row.kind !== "terminal" ? (
       <AgentTabPane repo={tabs.checkout.repo} worktree={worktree} tab={row} tabs={tabs.rows} />
     ) : (

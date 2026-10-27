@@ -15,7 +15,7 @@
  *  an ordinary agent needs a directory to run in. With no checkout the menu offers
  *  to cut one — through the header's own "Open as tree" flow, not a second copy of
  *  it. */
-import type { ReactNode } from "react";
+import { type ReactNode, useCallback } from "react";
 
 import type { AgentKind, ReviewPr } from "../../bindings";
 import {
@@ -33,6 +33,7 @@ import {
   useAgentAuth,
   useCodexAccount,
   useCodexHealth,
+  useRepos,
   useReviewDrafts,
   useTicketProvider,
 } from "../../lib/queries";
@@ -41,8 +42,12 @@ import { palette } from "../../theme/colors";
 import { liveTabFor } from "../agents/registry";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
+import type { NewTabOpts } from "../trees/model";
 import { useTabAccounts } from "../trees/useTabAccounts";
 import { useTabSessions } from "../trees/useTabSessions";
+import { useWebOff } from "../web/availability";
+import { usePageLabels } from "../web/pageState";
+import { useStripWebHost, WebMenuRow, webStripTab } from "../web/strip";
 import { aiReviewTermKey, REVIEW_AGENTS, REVIEW_CHECKOUT_NOTE } from "./checkoutSource";
 import { useReviewsModel } from "./model";
 import { aiTab, checkoutTab, type ReviewMainTab, type ReviewTabs } from "./useReviewTabs";
@@ -77,23 +82,43 @@ export function ReviewTabBar({
     if (live) endSession(live.key);
     tabs.closeReview(agent);
   };
+  const pageLabel = usePageLabels();
+
+  // Links printed in the checkout's terminals and its AI reviews, and its pages'
+  // popups, open Web tabs in the checkout — the only place a row can live.
+  const { addTab, select } = tabs;
+  const worktreeId = tabs.checkout.worktreeId;
+  useStripWebHost({
+    surfaces: worktreeId ? [worktreeId, aiReviewTermKey(pr)] : [],
+    rows: tabs.rows,
+    addWeb: useCallback(
+      (url: string, opts?: NewTabOpts) => addTab("web", undefined, { ...opts, url }),
+      [addTab],
+    ),
+    closeTab: tabs.closeTab,
+    show: useCallback((id: string) => select(checkoutTab(id)), [select]),
+  });
 
   const items: StripTab<ReviewMainTab>[] = [
     { tab: "pr", label: "Pull Request", icon: <GitHubLogo size={11} className="text-muted-3" /> },
-    ...tabs.rows.map((t) => ({
-      tab: checkoutTab(t.id),
-      label: t.title,
-      icon:
-        t.kind === "terminal" ? (
-          <TerminalIcon size={11} className="text-muted-3" />
-        ) : (
-          <AgentIcon kind={t.agentKind ?? "Claude"} size={11} className="text-muted-3" />
-        ),
-      onClose: () => closeWithSession(t),
-      onRename: (title: string) => tabs.renameTab(t.id, title),
-      menu: menuFor(t),
-      detail: detailFor(t),
-    })),
+    ...tabs.rows.map((t) =>
+      t.kind === "web"
+        ? webStripTab(checkoutTab(t.id), t, pageLabel, () => tabs.closeTab(t.id))
+        : {
+            tab: checkoutTab(t.id),
+            label: t.title,
+            icon:
+              t.kind === "terminal" ? (
+                <TerminalIcon size={11} className="text-muted-3" />
+              ) : (
+                <AgentIcon kind={t.agentKind ?? "Claude"} size={11} className="text-muted-3" />
+              ),
+            onClose: () => closeWithSession(t),
+            onRename: (title: string) => tabs.renameTab(t.id, title),
+            menu: menuFor(t),
+            detail: detailFor(t),
+          },
+    ),
     // The ticket, at reading width. Between the checkout's rows and the AI
     // reviews so that opening a review does not shift it — same place Trees
     // puts its own reference tabs.
@@ -158,6 +183,9 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
   const checkedOut = tabs.checkout.worktree !== null;
   const reviewable = tabs.checkout.source.worktree !== null;
   const askForWorktree = useWorktreeGate();
+  const onDaedalus =
+    useRepos().data?.find((r) => r.name === tabs.checkout.repo)?.location === "Daedalus";
+  const webOff = useWebOff(onDaedalus);
 
   const review = (agent: AgentKind) => {
     if (!ready(agent)) return;
@@ -188,6 +216,11 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
     else tabs.addTab("terminal");
     close();
   };
+  const browse = () => {
+    if (webOff) return;
+    tabs.addTab("web");
+    close();
+  };
   const createCheckout = () => {
     tabs.checkout.openAsTree();
     close();
@@ -197,7 +230,7 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
     () => review("Codex"),
     () => review("Claude"),
     ...(checkedOut
-      ? [() => work("Codex"), () => work("Claude"), () => work(null)]
+      ? [() => work("Codex"), () => work("Claude"), () => work(null), browse]
       : [tabs.checkout.canOpen && !tabs.checkout.opening ? createCheckout : null]),
   ]);
 
@@ -252,6 +285,7 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
             Terminal
             <span className="ml-auto text-[10px] text-muted-4">5</span>
           </button>
+          <WebMenuRow off={webOff} digit={6} onAdd={browse} />
         </>
       ) : (
         <>

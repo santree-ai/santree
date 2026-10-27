@@ -631,8 +631,8 @@ export function buildDemoCommands(real: Commands): Partial<Commands> {
     }),
     addWorktreeTab: forRepo(
       real.addWorktreeTab,
-      async (_repo, worktreeId, id, kind, agentKind, title, pr) => {
-        tabs.push({ id, worktreeId, kind, agentKind, title, pr, account: null });
+      async (_repo, worktreeId, id, kind, agentKind, title, pr, url) => {
+        tabs.push({ id, worktreeId, kind, agentKind, title, pr, account: null, url });
         return ok(null);
       },
     ),

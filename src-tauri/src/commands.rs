@@ -570,7 +570,12 @@ pub async fn remove_worktree(
     worktree::cancel_setup(&db, &daedalus, &repo, &issue_id).await?;
     let prompts = worktree::prompts_root(&app);
     let root = worktree::root(&db, &daedalus, &repo).await?;
-    Ok(worktree::remove(&db, &root, &repo, &issue_id, prompts.as_deref()).await?)
+    // Its web tabs' pages go with their rows — closed even when a later step of
+    // the removal fails, by which point the rows may be gone already.
+    let pages = tabs::web_ids(&db, &repo, &issue_id).await?;
+    let removed = worktree::remove(&db, &root, &repo, &issue_id, prompts.as_deref()).await;
+    crate::browser::close(&app, pages).await;
+    Ok(removed?)
 }
 
 /// Merge the base branch into the worktree (the "pull from main/master" button).
@@ -1424,18 +1429,18 @@ async fn persisted_tab(
     .map_err(|error| error.to_string())?;
     let (kind, agent, pr_repo, pr_number) =
         row.ok_or_else(|| "worktree tab does not exist".to_string())?;
-    if kind == "terminal" {
-        return Err("plain terminal tabs cannot start an agent session".into());
-    }
-    let agent = agent
-        .ok_or_else(|| "agent tab has no persisted provider".to_string())?
-        .parse::<AgentKind>()
-        .map_err(|error| error.to_string())?;
     // The two review kinds are the ones that launch with the review deny list
     // and santree's review tools, and `TabKind` is where that is decided —
     // reading the column through it keeps this from drifting the way it did
     // when `ai_review` was added and only `fixci` was matched here.
     let kind = TabKind::from_db_str(&kind);
+    if !kind.runs_agent() {
+        return Err("only an agent tab can start an agent session".into());
+    }
+    let agent = agent
+        .ok_or_else(|| "agent tab has no persisted provider".to_string())?
+        .parse::<AgentKind>()
+        .map_err(|error| error.to_string())?;
     let review_pr = kind
         .is_review()
         .then(|| pr_repo.zip(pr_number))
@@ -1490,7 +1495,8 @@ async fn session_context(
             surface: match kind {
                 TabKind::FixCi => SessionSurface::FixCi,
                 TabKind::AiReview => SessionSurface::Review,
-                TabKind::Agent | TabKind::Terminal => SessionSurface::Work,
+                // `persisted_tab` refused a web tab already: it runs no session.
+                TabKind::Agent | TabKind::Terminal | TabKind::Web => SessionSurface::Work,
             },
             agent: Some(agent),
             review_pr,
@@ -1646,7 +1652,7 @@ pub async fn list_worktree_tabs(repo: String, db: State<'_, Db>) -> CmdResult<Ve
 ///
 /// `pr` is required for (and only for) the review kinds: it is what
 /// [`worktree_tab_launch`] re-derives the tab's `--settings` and `--mcp-config`
-/// from after a restart.
+/// from after a restart. `url` is the page a web tab opens on, checked as one.
 #[tauri::command]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)] // Typed IPC fields stay explicit at this security boundary.
@@ -1658,6 +1664,7 @@ pub async fn add_worktree_tab(
     agent_kind: Option<AgentKind>,
     title: String,
     pr: Option<TabPr>,
+    url: Option<String>,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
     Ok(tabs::add(
@@ -1670,6 +1677,7 @@ pub async fn add_worktree_tab(
             agent_kind,
             title: &title,
             pr,
+            url,
         },
     )
     .await?)
@@ -1716,11 +1724,19 @@ pub async fn rename_worktree_tab(
     Ok(tabs::rename(&db, &repo, &id, &title).await?)
 }
 
-/// Remove an extra tab; a Claude tab's stored session is forgotten with it.
+/// Remove an extra tab; a Claude tab's stored session is forgotten with it, and a
+/// web tab's page is closed.
 #[tauri::command]
 #[specta::specta]
-pub async fn remove_worktree_tab(repo: String, id: String, db: State<'_, Db>) -> CmdResult<()> {
-    Ok(tabs::remove(&db, &repo, &id).await?)
+pub async fn remove_worktree_tab(
+    app: AppHandle,
+    repo: String,
+    id: String,
+    db: State<'_, Db>,
+) -> CmdResult<()> {
+    tabs::remove(&db, &repo, &id).await?;
+    crate::browser::close(&app, vec![id]).await;
+    Ok(())
 }
 
 /// Draft a PR title + body for the create-PR dialog. With `fill`, the body is
@@ -1830,12 +1846,15 @@ pub async fn review_checkout(
 #[tauri::command]
 #[specta::specta]
 pub async fn remove_review_workspace(
+    app: AppHandle,
     repo: String,
     pr_repo: String,
     number: u32,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    Ok(reviews::remove_review_workspace(&db, &repo, &pr_repo, number).await?)
+    let pages = reviews::remove_review_workspace(&db, &repo, &pr_repo, number).await?;
+    crate::browser::close(&app, pages).await;
+    Ok(())
 }
 
 /// Close one provider's AI review on a pull request.

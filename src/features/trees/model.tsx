@@ -272,6 +272,22 @@ export interface OpenCheckLog {
 /** The main-tab id for a persisted extra tab. */
 export const extraTab = (id: string): MainTab => `tab:${id}`;
 
+/** How a new row opens, beyond its kind: a web tab's first page, an id already
+ *  chosen (a page a browser made for it), and whether it stays behind the tab
+ *  that is showing. */
+export interface NewTabOpts {
+  url?: string | null;
+  id?: string;
+  background?: boolean;
+}
+
+/** The provider a new row of `kind` is stored with: a terminal and a web tab run
+ *  no agent; an agent row runs the one picked, Codex when none was. Every strip
+ *  that adds rows (Trees, Reviews, Triage) asks here. */
+export function tabAgent(kind: TabKind, agentKind?: AgentKind): AgentKind | null {
+  return kind === "terminal" || kind === "web" ? null : (agentKind ?? "Codex");
+}
+
 /** Default title for a new extra tab, unique among the worktree's existing tab
  *  titles and derived from the selected provider: "Claude Code", "Codex 2", … /
  *  "Terminal 2", "Terminal 3", … (the primary Terminal tab is #1 implicitly).
@@ -281,6 +297,8 @@ export function defaultTabTitle(
   agentKind: AgentKind | null,
   existing: WorktreeTab[],
 ): string {
+  // A web tab is named by its page once it has one.
+  if (kind === "web") return "New tab";
   const base =
     kind === "agent" ? agentLabel(agentKind ?? "Codex") : kind === "fixCi" ? "Fix CI" : "Terminal";
   const titles = new Set(existing.map((t) => t.title));
@@ -485,9 +503,9 @@ interface TreesModel {
   closePrView: () => void;
   openIssueView: () => void;
   closeIssueView: () => void;
-  /** Open (and persist) a new agent or terminal tab for the active worktree and
-   *  focus it. Returns the new tab's id. */
-  addTab: (kind: TabKind, agentKind?: AgentKind) => string | null;
+  /** Open (and persist) a new agent, terminal or web tab for the active worktree
+   *  and focus it (unless `opts.background`). Returns the new tab's id. */
+  addTab: (kind: TabKind, agentKind?: AgentKind, opts?: NewTabOpts) => string | null;
   /** Close a tab and delete its row (the caller tears down its PTY session). An
    *  agent tab's stored session is forgotten with it — the conversation itself
    *  survives on disk, and Session history is how it comes back. */
@@ -939,6 +957,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         // it reopens — the hand-off carrying them dies with the app.
         pr: fixCiLaunch.pr,
         account: null,
+        url: null,
       });
     }
     select(worktreeId);
@@ -1083,28 +1102,34 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       closeIssueView: () => setIssueViewByWt((current) => omit(current, activeId)),
       // The id is minted here (not by the backend) so the optimistic cache patch
       // is the exact row the DB will hold and the tab can be focused immediately.
-      addTab: (kind, agentKind) => {
+      addTab: (kind, agentKind, opts = {}) => {
         // Every way to open a tab (the "+" menu, its digit keys, ⌘T, the welcome
-        // surface) comes through here, so what a project can't run right now (a
-        // terminal or agent while Daedalus is out of reach, an agent the box
-        // lacks) opens nothing, whichever control was missed.
-        const resolvedAgent = kind === "terminal" ? null : (agentKind ?? "Codex");
-        if (!activeId || (resolvedAgent ? reach.agentOff(resolvedAgent) : reach.runOff)) {
-          return null;
-        }
-        const id = crypto.randomUUID();
+        // surface, a link) comes through here, so what a project can't run right
+        // now (a terminal or agent while Daedalus is out of reach, an agent the
+        // box lacks, a web page browsed from the box) opens nothing, whichever
+        // control was missed.
+        const resolvedAgent = tabAgent(kind, agentKind);
+        const off =
+          kind === "web"
+            ? reach.remote
+            : resolvedAgent
+              ? reach.agentOff(resolvedAgent)
+              : reach.runOff;
+        if (!activeId || off) return null;
+        const id = opts.id ?? crypto.randomUUID();
         addTabRow({
           id,
           worktreeId: activeId,
           kind,
           agentKind: resolvedAgent,
           title: defaultTabTitle(kind, resolvedAgent, tabs),
-          // The "+" menu opens agent and terminal tabs only; a PR belongs to the
-          // review kinds, which arrive through the hand-off above.
+          // The "+" menu opens agent, terminal and web tabs only; a PR belongs to
+          // the review kinds, which arrive through the hand-off above.
           pr: null,
           account: null,
+          url: opts.url ?? null,
         });
-        setTabFor(activeId, extraTab(id));
+        if (!opts.background) setTabFor(activeId, extraTab(id));
         return id;
       },
       closeTab: (id) => {

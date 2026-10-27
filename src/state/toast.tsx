@@ -9,9 +9,10 @@
  * (see `main.tsx`). Components read it via `useSyncExternalStore` in
  * {@link ToastViewport}, and anyone can raise one with the {@link toast} API.
  */
-import { useSyncExternalStore } from "react";
+import { useRef, useSyncExternalStore } from "react";
 
 import { CheckIcon, CloseIcon, WarningIcon } from "../components/icons";
+import { useOverlay } from "../lib/overlays";
 
 export type ToastVariant = "success" | "error" | "info" | "warning";
 
@@ -207,9 +208,13 @@ function ToastCard({ toast: t }: { toast: Toast }) {
 export function ToastViewport() {
   const items = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const errors = items.filter((t) => t.variant === "error");
+  const viewport = useRef<HTMLDivElement>(null);
+  // A Web tab's page is drawn above the app; it cuts the toasts out of itself.
+  useOverlay(viewport, items.length > 0);
   return (
     <>
       <div
+        ref={viewport}
         role="log"
         aria-live="polite"
         className="pointer-events-none fixed right-4 bottom-4 z-[200] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2"

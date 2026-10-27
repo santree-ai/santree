@@ -38,7 +38,7 @@ import {
 } from "../../lib/queries";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { useOptionalAgentRuns } from "../../state/AgentRuns";
-import { defaultTabTitle } from "../trees/model";
+import { defaultTabTitle, type NewTabOpts, tabAgent } from "../trees/model";
 import { aiReviewTermKey, REVIEW_AGENTS } from "./checkoutSource";
 import { type PrCheckout, usePrCheckout } from "./PrCheckout";
 import { ticketIdFor } from "./ticket";
@@ -80,8 +80,9 @@ export interface ReviewTabs {
   checkout: PrCheckout;
   /** The checkout's `worktree_tabs` rows, in strip order. */
   rows: WorktreeTab[];
-  /** `tabId` is for a resume, which has already bound a session to it. */
-  addTab: (kind: TabKind, agentKind?: AgentKind, tabId?: string) => void;
+  /** `opts.id` is for a resume, which has already bound a session to it, and for
+   *  a page a Web tab's browser already made. */
+  addTab: (kind: TabKind, agentKind?: AgentKind, opts?: NewTabOpts) => void;
   closeTab: (id: string) => void;
   renameTab: (id: string, title: string) => void;
   /** AI review providers with a tab: one whose session this PR already has, or
@@ -249,7 +250,7 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
   );
 
   const addTab = useCallback(
-    (kind: TabKind, agentKind?: AgentKind, tabId?: string) => {
+    (kind: TabKind, agentKind?: AgentKind, opts: NewTabOpts = {}) => {
       // Without a checkout there is no directory to run in — the menu offers to
       // cut one instead of opening a tab that would have nowhere to live.
       if (!worktreeId) return;
@@ -257,8 +258,8 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
       // is the exact row the DB will hold and the tab can be focused immediately.
       // A resume passes its own: it has already bound the stored session to that
       // id, and a tab under a different one would resume nothing.
-      const id = tabId ?? crypto.randomUUID();
-      const resolvedAgent = kind === "terminal" ? null : (agentKind ?? "Codex");
+      const id = opts.id ?? crypto.randomUUID();
+      const resolvedAgent = tabAgent(kind, agentKind);
       addTabRow({
         id,
         worktreeId,
@@ -267,8 +268,9 @@ export function useReviewTabs(pr: ReviewPr, santreeRepo: string): ReviewTabs {
         title: defaultTabTitle(kind, resolvedAgent, rows),
         pr: null,
         account: null,
+        url: opts.url ?? null,
       });
-      show(checkoutTab(id));
+      if (!opts.background) show(checkoutTab(id));
     },
     [worktreeId, rows, addTabRow, show],
   );

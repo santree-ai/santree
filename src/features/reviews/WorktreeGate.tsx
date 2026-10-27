@@ -24,6 +24,7 @@ import { createPortal } from "react-dom";
 
 import { BranchIcon } from "../../components/icons";
 import { Button, Toggle } from "../../components/primitives";
+import { useModalOverlay } from "../../lib/overlays";
 
 /** What the user chose. `runSetup` is meaningless when `ok` is false. */
 export interface WorktreeChoice {
@@ -108,6 +109,8 @@ function WorktreeDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  // A modal: a Web tab's page under it stands aside (`lib/overlays`).
+  useModalOverlay(true);
   return createPortal(
     <div className="fixed inset-0 z-[300] flex items-center justify-center p-6">
       <button

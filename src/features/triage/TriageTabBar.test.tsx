@@ -25,6 +25,7 @@ vi.mock("../../lib/queries", () => ({
   useAgentAuth: () => ({ data: { connected: true } }),
   useCodexAccount: () => ({ data: { connected: true } }),
   useCodexHealth: () => ({ data: { available: true } }),
+  useBrowserSupported: () => ({ data: true }),
 }));
 
 import { TriageTabBar } from "./TriageTabBar";
@@ -40,6 +41,7 @@ const row = (id: string, kind: WorktreeTab["kind"], title: string): WorktreeTab 
   title,
   pr: null,
   account: null,
+  url: null,
 });
 
 /** The model the bar draws, dialled per test — all but its split layout, which
@@ -85,6 +87,7 @@ function Bar({ tabs, rightCollapsed }: { tabs: TabsModel; rightCollapsed: boolea
       repo="acme/app"
       ticket={ticket}
       tabs={{ ...tabs, split }}
+      remote={false}
       rightCollapsed={rightCollapsed}
       onToggleRight={onToggleRight}
       renderTab={() => null}
@@ -191,7 +194,7 @@ describe("TriageTabBar", () => {
 
   /** The "+" opens the ticket's own tabs, as many as you like, and never an
    *  investigation — that starts from the ticket page. */
-  it("always offers a session of each provider and a terminal, and never an investigation", () => {
+  it("always offers a session of each provider, a terminal and a web page, and never an investigation", () => {
     const tabs = tabsModel({
       providers: ["Codex", "Claude"],
       rows: [row("a", "terminal", "Terminal")],
@@ -206,6 +209,10 @@ describe("TriageTabBar", () => {
     fireEvent.click(screen.getByRole("button", { name: /New tab/ }));
     fireEvent.click(screen.getByRole("button", { name: "Open a terminal" }));
     expect(tabs.addTab).toHaveBeenCalledWith("terminal");
+
+    fireEvent.click(screen.getByRole("button", { name: /New tab/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Web/ }));
+    expect(tabs.addTab).toHaveBeenCalledWith("web");
   });
 
   /** The rail's own header carries the toggle while it is open; the strip only

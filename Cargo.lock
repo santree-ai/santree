@@ -3085,7 +3085,9 @@ dependencies = [
  "block2",
  "objc2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
+ "objc2-quartz-core",
 ]
 
 [[package]]
@@ -3225,6 +3227,7 @@ dependencies = [
  "bitflags 2.13.0",
  "objc2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
 ]
 
@@ -4292,6 +4295,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "block2",
  "chrono",
  "chrono-tz",
  "dotenvy",
@@ -4303,6 +4307,13 @@ dependencies = [
  "minijinja",
  "notify",
  "notify-debouncer-full",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation",
+ "objc2-quartz-core",
+ "objc2-web-kit",
  "portable-pty",
  "rand 0.8.6",
  "reqwest 0.12.28",
