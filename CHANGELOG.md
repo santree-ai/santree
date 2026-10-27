@@ -7,6 +7,14 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.7 — 2026-10-26
+
+- Open web pages inside santree. The "+" menu in Trees, Triage and a review's checkout now opens a Web tab: type an address or a search, and the page opens beside your agents and terminals.
+- Links you click in a terminal open in a Web tab of the same workspace, in the tab already showing that site if there is one. Shift-click opens your default browser instead.
+- Web tabs keep you signed in between restarts, and each one reopens on the page it was showing.
+- When a page can't open, the tab says why, like "Nothing is running at localhost:3000", and Try again retries that address once your server is up.
+- Web tabs need macOS 14 or later, and aren't available for Daedalus projects yet.
+
 ## 0.1.19-beta.6 — 2026-10-26
 
 - Use several Claude Code and Codex accounts. Add one in Settings, Agents, and sign in with the CLI's own login in the terminal that opens. Your conversations, settings, skills and agents are shared across accounts.
