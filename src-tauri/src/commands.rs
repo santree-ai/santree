@@ -18,16 +18,17 @@ use tauri_specta::Event;
 
 use santree_core::{
     config,
+    conversation::{ConversationCursor, ConversationRead, ConversationTarget},
     domain::{
         AgentAccount, AgentAuth, AgentDef, AgentKind, AgentProcess, AgentSession,
         AgentVersionStatus, AiReviewLaunch, AnalysisScope, BinaryStatus, ChangedFile, CheckLog,
         ClaudeAccountRateLimits, ClaudeAccountUsage, ClaudeGlobalCapture, CodexAccount,
         CodexAccountRateLimits, CodexHealth, CodexModel, DaedalusAgentHooks, DaedalusHealth,
         DaedalusIcon, DaedalusLink, DaedalusMachine, DaedalusSettingAnswer, DaedalusSettingKey,
-        DaedalusWorkspaceList, EnglishAnalysis, EnglishLog, FileSource, GithubApiBudget,
-        GithubStatus, JiraSite, JiraStatus, LegacyCliMigration, LinearApiBudget, LinearOrg,
-        LinearStatus, LinearTeam, LogExport, MergeQueueView, NewInlineComment, NewPr,
-        NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptLayer,
+        DaedalusWorkspaceList, EnglishAnalysis, EnglishLog, ExperimentalFeature, FileSource,
+        GithubApiBudget, GithubStatus, JiraSite, JiraStatus, LegacyCliMigration, LinearApiBudget,
+        LinearOrg, LinearStatus, LinearTeam, LiveText, LogExport, MergeQueueView, NewInlineComment,
+        NewPr, NewReviewWorkItem, Opener, PrDetail, PrDraft, PrLabel, PromptInfo, PromptLayer,
         PromptPreview, PromptWorkItemSample, Repo, RepoBranch, RepoLocation, ResourceUsage,
         ReviewBrief, ReviewCheckout, ReviewDraft, ReviewEvent, ReviewInbox, ReviewPr,
         ReviewPublishOutcome, ReviewTarget, ReviewWorkItem, Reviewer, ScriptInfo, SessionDetail,
@@ -146,13 +147,19 @@ pub fn daedalus_status(link: State<'_, DaedalusHost>) -> DaedalusLink {
 /// box — as the Daedalus agent here keeps them, or why they can't be read. A
 /// value, never an error. Once the box has turned santree on (an admin confirmed
 /// it in the browser), the link is tried at once rather than at the end of its
-/// slow backoff.
+/// slow backoff. With Settings → Experimental → Daedalus off, the agent is not
+/// asked at all.
 #[tauri::command]
 #[specta::specta]
 pub async fn daedalus_settings(
     control: State<'_, santree_remote_client::AgentControl>,
     link: State<'_, DaedalusHost>,
 ) -> CmdResult<DaedalusMachine> {
+    if !link.enabled() {
+        return Ok(DaedalusMachine::Unavailable {
+            reason: daedalus::host::describe(&DaedalusLink::Off),
+        });
+    }
     let machine = daedalus::settings::read(&control).await;
     if matches!(&machine, DaedalusMachine::Ready { settings } if settings.santree)
         && link.state() == DaedalusLink::SantreeOff
@@ -165,7 +172,8 @@ pub async fn daedalus_settings(
 /// Ask the box for one of this Mac's settings, through the Daedalus agent.
 /// santree ON is never sent: the agent names the Daedalus page where an admin
 /// confirms it, and this opens it in the browser (https only). A refusal is a
-/// value the card shows, never an error.
+/// value the card shows, never an error — and with Settings → Experimental →
+/// Daedalus off, every ask is refused unsent.
 #[tauri::command]
 #[specta::specta]
 pub async fn daedalus_set_setting(
@@ -173,8 +181,14 @@ pub async fn daedalus_set_setting(
     value: bool,
     app: AppHandle,
     control: State<'_, santree_remote_client::AgentControl>,
+    link: State<'_, DaedalusHost>,
 ) -> CmdResult<DaedalusSettingAnswer> {
     use tauri_plugin_opener::OpenerExt;
+    if !link.enabled() {
+        return Ok(DaedalusSettingAnswer::Refused {
+            reason: daedalus::host::describe(&DaedalusLink::Off),
+        });
+    }
     Ok(daedalus::settings::set(&control, key, value, |url| {
         app.opener()
             .open_url(url, None::<&str>)
@@ -816,6 +830,22 @@ pub async fn worktree_session_subagents(
     link: State<'_, DaedalusHost>,
 ) -> CmdResult<Vec<SessionSubagent>> {
     Ok(worktree::session_subagents(&db, &link, &repo, &issue_id, &session_id).await?)
+}
+
+/// A conversation as the agent's own record tells it — a tab's live session or
+/// a listed one, or one of its subagents (`agent_id`) — from the reader's
+/// cursor on. The webview names a session; the file is derived here, and
+/// nothing read reaches a model, a prompt or a PTY.
+#[tauri::command]
+#[specta::specta]
+pub async fn conversation_read(
+    target: ConversationTarget,
+    agent_id: Option<String>,
+    cursor: Option<ConversationCursor>,
+    db: State<'_, Db>,
+    conversations: State<'_, crate::conversation::Conversations>,
+) -> CmdResult<ConversationRead> {
+    Ok(crate::conversation::read(&conversations, &db, target, agent_id, cursor).await?)
 }
 
 /// Reveal one of those sessions' transcripts in the OS file browser. The path is
@@ -1702,11 +1732,11 @@ pub async fn worktree_tab_launch(
     let Some(tab) = tabs::get(&db, &repo, &id).await? else {
         return Ok(None);
     };
-    let tutor = tutor_instruction(&app).await;
+    let extras = launch_extras(&app).await;
     // Writes the settings file and stats the MCP config — filesystem work, so it
     // stays off the thread the UI runs on.
     Ok(
-        tokio::task::spawn_blocking(move || review_ai::tab_launch(&app, &tab, tutor.as_deref()))
+        tokio::task::spawn_blocking(move || review_ai::tab_launch(&app, &tab, &extras))
             .await
             .map_err(|e| anyhow::anyhow!("resolving the review tab's launch panicked: {e}"))??,
     )
@@ -1957,8 +1987,8 @@ pub async fn ai_review_launch(
     target: ReviewTarget,
     db: State<'_, Db>,
 ) -> CmdResult<AiReviewLaunch> {
-    let tutor = tutor_instruction(&app).await;
-    Ok(review_ai::launch(&app, &db, &repo, &target, tutor.as_deref()).await?)
+    let extras = launch_extras(&app).await;
+    Ok(review_ai::launch(&app, &db, &repo, &target, &extras).await?)
 }
 
 #[tauri::command]
@@ -1969,8 +1999,8 @@ pub async fn review_fix_launch(
     target: ReviewTarget,
     db: State<'_, Db>,
 ) -> CmdResult<AiReviewLaunch> {
-    let tutor = tutor_instruction(&app).await;
-    Ok(review_ai::fix_launch(&app, &db, &repo, &target, tutor.as_deref()).await?)
+    let extras = launch_extras(&app).await;
+    Ok(review_ai::fix_launch(&app, &db, &repo, &target, &extras).await?)
 }
 
 /// The AI review's draft comments for a PR — written by its MCP tools, held in
@@ -2780,16 +2810,17 @@ pub async fn set_binary_path(
 /// present — capture is unconditional; whether the app *displays* the inline
 /// usage bar is a runtime frontend decision. `None` when the hook binary/db can't
 /// be resolved — the frontend then launches without the flag. Its content depends
-/// only on the English-tutor setting, so the frontend caches the path until that
-/// one flips.
+/// only on the English tutor (its own switch and Settings → Experimental's) and on
+/// Settings → Experimental → Conversation view (which adds `MessageDisplay`), so
+/// the frontend caches the path until one of those flips.
 #[tauri::command]
 #[specta::specta]
 pub async fn claude_hook_settings(app: AppHandle) -> Option<String> {
-    let tutor = tutor_instruction(&app).await;
+    let extras = launch_extras(&app).await;
     // Writes a settings JSON file. A non-async command runs on the *main thread*,
     // where a slow disk stalls the whole UI — everything else in this file that
     // touches the filesystem goes through spawn_blocking for exactly this reason.
-    tokio::task::spawn_blocking(move || crate::hooks::claude_settings(&app, tutor.as_deref()))
+    tokio::task::spawn_blocking(move || crate::hooks::claude_settings(&app, &extras))
         .await
         .ok()
         .flatten()
@@ -2811,11 +2842,27 @@ pub async fn codex_hook_flags(app: AppHandle) -> Option<String> {
         .flatten()
 }
 
+/// The launch-time switches a `--settings` file is built from
+/// ([`crate::hooks::LaunchExtras`]): the English tutor's instruction, and whether
+/// Settings → Experimental → Conversation view is on (which registers
+/// `MessageDisplay`, the reply line by line). Every launch that builds a
+/// `--settings` file asks here, so a flipped switch reaches the next launch.
+/// Resolved from the `AppHandle`'s db rather than a `State<'_, Db>` arg so the
+/// `claude_hook_settings*` commands keep returning a bare `Option<String>`.
+async fn launch_extras(app: &AppHandle) -> crate::hooks::LaunchExtras {
+    let live_text = match app.try_state::<Db>() {
+        Some(db) => settings::experimental(&db, ExperimentalFeature::Conversation).await,
+        None => false,
+    };
+    crate::hooks::LaunchExtras {
+        tutor: tutor_instruction(app).await,
+        live_text,
+    }
+}
+
 /// The English-tutor instruction to inject into a launch, or `None` when the tutor
-/// is off. Resolved from the `AppHandle`'s db rather than a `State<'_, Db>` arg so
-/// the three `claude_hook_settings*` commands keep returning a bare `Option<String>`
-/// (a borrowed-state arg would force them all to `Result`, for a read whose only
-/// failure mode is "no tutor").
+/// is off — either of its switches (`english_tutor::enabled`). Read by
+/// [`launch_extras`], for every launch that builds a `--settings` file.
 ///
 /// A failure here is logged and treated as off: a session that launches without the
 /// tutor is a missing nicety, one that fails to launch is a broken app.
@@ -2835,13 +2882,11 @@ async fn tutor_instruction(app: &AppHandle) -> Option<String> {
 #[tauri::command]
 #[specta::specta]
 pub async fn claude_hook_settings_no_git(app: AppHandle) -> Option<String> {
-    let tutor = tutor_instruction(&app).await;
-    tokio::task::spawn_blocking(move || {
-        crate::hooks::claude_settings_no_git(&app, tutor.as_deref())
-    })
-    .await
-    .ok()
-    .flatten()
+    let extras = launch_extras(&app).await;
+    tokio::task::spawn_blocking(move || crate::hooks::claude_settings_no_git(&app, &extras))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// The English tutor's practice log, read-only. Creates the file when it's missing,
@@ -2879,6 +2924,23 @@ pub async fn run_english_analysis(
 #[specta::specta]
 pub async fn session_usage_live(db: State<'_, Db>) -> CmdResult<Vec<SessionUsageLive>> {
     Ok(crate::hooks::session_usage_live(&db).await?)
+}
+
+/// The reply a Claude session is drawing right now, line by line, from its
+/// `MessageDisplay` hook — registered only while Settings → Experimental →
+/// Conversation view is on. `None` while nothing is streaming. Display only.
+/// `session_id` comes from the webview, so it must have the shape of an id
+/// santree mints before it reaches a query.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_live_text(
+    session_id: String,
+    db: State<'_, Db>,
+) -> CmdResult<Option<LiveText>> {
+    if !crate::session::is_session_id(&session_id) {
+        return Err(anyhow::anyhow!("not a session id: {session_id:?}").into());
+    }
+    Ok(crate::hooks::session_live_text(&db, &session_id).await?)
 }
 
 /// Claude's account-level subscription rate-limit windows (5-hour, 7-day, ...),
@@ -3078,8 +3140,28 @@ pub async fn set_setting(
     value: Option<String>,
     db: State<'_, Db>,
 ) -> CmdResult<()> {
-    settings::validate_user_scope(&scope, &key)?;
+    settings::validate_user_write(&scope, &key)?;
     Ok(settings::set(&db, &scope, &key, value).await?)
+}
+
+/// Turn a Settings → Experimental switch on or off — the switches' one writer
+/// (the generic `set_setting` refuses their keys). Daedalus is applied at once:
+/// on starts the link, off ends it; its projects and everything else it keeps
+/// stay. The English tutor's is read by every launch, and the Conversation
+/// view's by the frontend and by every launch (it registers `MessageDisplay`).
+#[tauri::command]
+#[specta::specta]
+pub async fn set_experimental(
+    feature: ExperimentalFeature,
+    on: bool,
+    db: State<'_, Db>,
+    link: State<'_, DaedalusHost>,
+) -> CmdResult<()> {
+    settings::set_experimental(&db, feature, on).await?;
+    if feature == ExperimentalFeature::Daedalus {
+        link.apply(&db, on).await;
+    }
+    Ok(())
 }
 
 /// Resolve a repo-scoped setting: the repo's override, else the app value.

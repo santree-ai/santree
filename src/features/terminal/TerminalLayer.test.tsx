@@ -23,6 +23,7 @@ import { act, render, waitFor } from "@testing-library/react";
 import { useLayoutEffect, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import { SplitPaneContext } from "../../components/split/SplitPaneContext";
 import type { LayerWorld } from "./testing";
 
 /** Session ids and pane refs the mocked backend and the tests must agree on.
@@ -239,6 +240,8 @@ describe("TerminalLayer", () => {
       height: "520px",
     });
     expect(layer.className).toContain("invisible");
+    // …and out of the keyboard's reach (see the keyboard tests below).
+    expect(layer).toHaveAttribute("inert");
   });
 
   // A split main area shows a terminal in each group at once. Each session has
@@ -331,6 +334,80 @@ describe("TerminalLayer session lifetime", () => {
     expect(backend.attach).toHaveBeenCalledTimes(2);
     // The whole point: one session, two views of it.
     expect(backend.open).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Who takes the keyboard. A split main area shows a terminal per group, and only
+ * the focused group's may take it (`TerminalTabs.embed`).
+ */
+describe("TerminalLayer keyboard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    renderers.live.length = 0;
+  });
+
+  /** A tab's terminal in one split group, as the tab's content mounts it. */
+  function GroupPane({
+    refId,
+    focused,
+    shown,
+  }: {
+    refId: string;
+    focused: boolean;
+    shown: boolean;
+  }) {
+    return (
+      <SplitPaneContext.Provider value={{ visible: true, focused, activate: () => {} }}>
+        <GroupHost refId={refId} shown={shown} />
+      </SplitPaneContext.Provider>
+    );
+  }
+  function GroupHost({ refId, shown }: { refId: string; shown: boolean }) {
+    const { hostRef } = useEmbeddedTerminal({
+      spec: { title: refId, source: "issue", refId },
+      attach: shown,
+    });
+    return shown ? <div ref={hostRef} /> : null;
+  }
+
+  /** A pane takes the keyboard a frame after it is told to. */
+  const nextFrame = () => act(() => new Promise<void>((r) => requestAnimationFrame(() => r())));
+
+  // The regression: a Claude tab in the focused group, a shell in the other.
+  // ⌘J hid Claude's terminal behind its conversation, and releasing its claim
+  // made the shell's the newest — which took the keyboard a frame after the
+  // composer had. The prompt typed next, and its Enter, ran in the shell.
+  //
+  // And the hidden terminal used to keep the keyboard itself: a hidden pane is
+  // only invisible, so with Claude asking, an Enter or a "1" typed after ⌘J
+  // answered a prompt the user could no longer see.
+  test("hiding the focused group's terminal takes the keyboard from it, and leaves it with no other group's", async () => {
+    const tree = (claudeShown: boolean, focus: "claude" | "shell") => (
+      <TerminalsProvider>
+        <GroupPane refId="tree:AK-1:tab:shell" focused={focus === "shell"} shown />
+        <GroupPane refId="tree:AK-1:tab:claude" focused={focus === "claude"} shown={claudeShown} />
+        <TerminalLayer />
+      </TerminalsProvider>
+    );
+    const { rerender } = render(tree(true, "claude"));
+    await waitFor(() => expect(renderers.live.filter((r) => r.input)).toHaveLength(2));
+    await nextFrame();
+    const [shell, claude] = renderers.live;
+    const before = shell.focuses;
+    expect(claude.blurs).toBe(0);
+
+    rerender(tree(false, "claude"));
+    await nextFrame();
+    expect(claude.blurs).toBeGreaterThan(0);
+    expect(shell.blurs).toBe(0);
+    expect(shell.focuses).toBe(before);
+
+    // The keyboard follows the group: once the user works in the shell's, the
+    // shell has it.
+    rerender(tree(false, "shell"));
+    await nextFrame();
+    expect(shell.focuses).toBeGreaterThan(before);
   });
 });
 

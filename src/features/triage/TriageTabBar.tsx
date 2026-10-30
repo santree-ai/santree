@@ -24,7 +24,7 @@
  *  Reviews make, so the button stays put across the toggle. */
 import { type ReactNode, useCallback } from "react";
 
-import type { AgentKind, TabKind, TriageTicket } from "../../bindings";
+import type { AgentKind, TabKind, TriageTicket, WorktreeTab } from "../../bindings";
 import { AgentIcon, TerminalIcon, TrackerLogo } from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
@@ -39,16 +39,29 @@ import {
 } from "../../lib/queries";
 import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { liveTabFor } from "../agents/registry";
+import {
+  useAgentTabViews,
+  useConversationOffer,
+  ViewSwitch,
+  withViewRow,
+} from "../conversation/viewMode";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
 import type { NewTabOpts } from "../trees/model";
 import { useTabAccounts } from "../trees/useTabAccounts";
-import { useTabSessions } from "../trees/useTabSessions";
+import { tabRefId, useTabSessions } from "../trees/useTabSessions";
 import { useWebOff } from "../web/availability";
 import { usePageLabels } from "../web/pageState";
 import { useStripWebHost, WebMenuRow, webStripTab } from "../web/strip";
 import { triageTermKey } from "./providerSessions";
-import { agentTab, rowTab, type TriageMainTab, type TriageTabs } from "./useTriageTabs";
+import {
+  agentTab,
+  agentTabKind,
+  rowTab,
+  rowTabId,
+  type TriageMainTab,
+  type TriageTabs,
+} from "./useTriageTabs";
 
 export function TriageTabBar({
   repo,
@@ -81,9 +94,15 @@ export function TriageTabBar({
   // is the only reason the same hook can't do it for those too.
   const { closeWithSession } = useTabSessions(termKey, tabs.rows, tabs.closeTab);
   const { menuFor, detailFor } = useTabAccounts(repo ?? "", termKey, tabs.rows);
+  // A Claude tab's Terminal/Conversation switch — a row's, or the Claude
+  // investigation's (the ticket's own surface) — in its menu and on its strip.
+  const viewOf = useAgentTabViews();
+  const offer = useConversationOffer(repo);
+  const rowKey = (row: WorktreeTab) => (offer.row(row) ? tabRefId(termKey, row.id) : null);
+  const investigationKey = (agent: AgentKind) => (offer.agent(agent) ? termKey : null);
   const { tabs: sessions, close: endSession } = useTerminals();
   const closeAgent = (agent: AgentKind) => {
-    const live = liveTabFor(termKey, agent, sessions);
+    const live = liveTabFor(repo, termKey, agent, sessions);
     if (live) endSession(live.key);
     tabs.closeAgent(agent);
   };
@@ -116,6 +135,7 @@ export function TriageTabBar({
       label: agentProvider(agent).label,
       icon: <AgentIcon kind={agent} size={11} className="text-muted-3" />,
       onClose: () => closeAgent(agent),
+      menu: withViewRow(investigationKey(agent), viewOf(termKey), undefined),
     })),
     ...tabs.rows.map((t) =>
       t.kind === "web"
@@ -131,7 +151,7 @@ export function TriageTabBar({
               ),
             onClose: () => closeWithSession(t),
             onRename: (title: string) => tabs.renameTab(t.id, title),
-            menu: menuFor(t),
+            menu: withViewRow(rowKey(t), viewOf(tabRefId(termKey, t.id)), menuFor(t)),
             detail: detailFor(t),
           },
     ),
@@ -145,6 +165,13 @@ export function TriageTabBar({
       ariaLabel="Ticket tabs"
       newTabMenu={(close) => <NewTabMenu onAdd={tabs.addTab} close={close} remote={remote} />}
       newTabMenuClassName="w-40 overflow-hidden"
+      groupTrailing={(tab) => {
+        const agent = tab ? agentTabKind(tab) : null;
+        const rowId = tab ? rowTabId(tab) : null;
+        const row = rowId ? tabs.rows.find((t) => t.id === rowId) : undefined;
+        const key = agent ? investigationKey(agent) : row ? rowKey(row) : null;
+        return key ? <ViewSwitch termKey={key} /> : null;
+      }}
       trailing={rightCollapsed ? <PanelToggle collapsed onToggle={onToggleRight} /> : null}
     />
   );

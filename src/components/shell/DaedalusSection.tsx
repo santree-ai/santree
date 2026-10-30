@@ -8,6 +8,8 @@
  * a mark of its own.
  *
  * States, none of them a toast (being away from home is normal):
+ * - Settings → Experimental → Daedalus off (or still being read): not drawn,
+ *   whatever is registered; the projects come back when it is turned on;
  * - no Daedalus project registered and no live link: not drawn at all — an
  *   integration this Mac doesn't use has nothing to say in the rail;
  * - linked, nothing added yet: the header and one quiet line pointing at "+";
@@ -26,7 +28,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { gitOff, linkNotice, linkUp } from "../../lib/daedalusLink";
-import { useDaedalusStatus, useRepos } from "../../lib/queries";
+import { useDaedalusStatus, useExperimental, useRepos } from "../../lib/queries";
 import { usePersistedState } from "../../lib/usePersistedState";
 import { ChevronDownIcon, ChevronRightIcon, DaedalusLogo } from "../icons";
 import { DaedalusProjectsDialog } from "./DaedalusProjectsDialog";
@@ -35,12 +37,14 @@ import { SECTION_HEADER, SectionAddButton } from "./SectionHeader";
 
 export function DaedalusSection() {
   const navigate = useNavigate();
+  const on = useExperimental("Daedalus");
   const { data: repos } = useRepos();
   const { data: link } = useDaedalusStatus();
   const [adding, setAdding] = useState(false);
   const [collapsed, setCollapsed] = usePersistedState("santree.shell.daedalus.collapsed", false);
   const Chevron = collapsed ? ChevronRightIcon : ChevronDownIcon;
 
+  if (!on) return null;
   const hasProjects = repos?.some((repo) => repo.location === "Daedalus") ?? false;
   if (!hasProjects && link?.kind !== "Connected") return null;
 

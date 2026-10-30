@@ -62,6 +62,11 @@ vi.mock("../../lib/queries", () => ({
   useSetting: () => ({ data: null }),
   useTriageDetail: () => ({ data: undefined }),
   useRepos: () => ({ data: [{ name: "acme/app", path: "/src/app" }] }),
+  useOfferedRepos: () => ({
+    data: [{ name: "acme/app", path: "/src/app" }],
+    isFetched: true,
+    hidden: () => false,
+  }),
   useDaedalusStatus: () => ({ data: { kind: "Connected" } }),
 }));
 // The page and the panes are their own tests; here they are the slots the

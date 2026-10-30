@@ -375,8 +375,11 @@ Sessions belong to the document, not to the route.
 - **Each session has its own slot, so several can be on screen.** A split main
   area (`components/split`) shows a terminal per group: every session's newest
   claim (`TerminalTabs.embeds`) places that session's pane over its own host,
-  and the newest claim overall (`embed`) is the one that takes the keyboard
-  (`TerminalView`'s `focused`, distinct from `active`, which is "on screen").
+  and the newest claim in the focused split group is the one that takes the
+  keyboard (`TerminalView`'s `focused`, distinct from `active`, which is "on
+  screen"). A claim records whether its group is focused, so a pane that gives
+  its claim up — a Claude tab switched to its Conversation face — never hands
+  the keyboard to another group's terminal.
   A press inside a pane calls its claim's `onActivate`, which is how a split
   group learns it was clicked — the terminal is drawn by the layer, not inside
   the group. A host that *moves* without resizing (a tab dragged into a group
@@ -384,7 +387,10 @@ Sessions belong to the document, not to the route.
   `ResizeObserver` only reports size.
 
 - **Hidden panes use `invisible`, never `display:none`**, so xterm never reflows
-  from a zero-size state on a tab switch.
+  from a zero-size state on a tab switch. They are also `inert`, and a pane
+  that stops being shown blurs its terminal (WebKit's focus fixup for `inert`
+  is not guaranteed), so a key pressed after switching away — ⌘J to a Claude
+  tab's Conversation face with a prompt up — can't reach a program nobody sees.
 - **A pane's geometry freezes at its last embed rect** when it is not embedded.
   Snapping to the full content area would resize the grid and make zsh reprint
   its prompt, leaving a blank prompt line every time you came back. A session
@@ -426,19 +432,84 @@ described here is unchanged by it.
 ### Claude
 
 Every santree `claude` launch layers a `--settings` file (written by `hooks.rs`)
-registering six state events, each running the bundled `santree-hook` binary:
+registering nine state events, each running the bundled `santree-hook` binary:
 
 | event | recorded state |
 |---|---|
 | `UserPromptSubmit` | `Active` |
-| `SessionStart` · `Stop` | `Idle` |
+| `SessionStart` · `Stop` | `Idle` — except `SessionStart` with source `compact`, which changes nothing (an auto-compact fires it mid-turn) |
+| `StopFailure` | `Idle`, with `message` set to the API error the turn ended on (`last_assistant_message`, ≤ 2 KB). It fires instead of `Stop`, and only once Claude gives up: a 429 or a 401 is retried 10 times over about 3 minutes, with no hook meanwhile. Codes seen: `unknown` (a 400), `rate_limit`, `server_error` (500, 529), `authentication_failed` |
 | `SessionEnd` | `Exited` |
-| `PermissionRequest` | `Permission` |
-| `Notification` | refined by type: `permission_prompt`→`Permission`, `agent_completed`→`Idle`, `agent_needs_input`/`idle_prompt`/`elicitation_dialog`→`Waiting`, otherwise unchanged |
+| `PermissionRequest` | `Permission`, and the dialog itself (below) — a Claude subagent's too (it carries `agent_id`): it marks the parent session. Every one is written, so two parallel calls of one tool are two dialogs, and one written while the dialog before it is still open is marked stacked |
+| `PostToolBatch` | no state: when the calls it lists include the one the permission dialog on record asked about (same thread, tool and input), that dialog's call has finished (below). `PostToolUse` and `PostToolUseFailure` do the same for their own call before their heartbeat |
+| `Elicitation` | `Waiting`, and the dialog: an MCP server's form or URL. The `elicitation_dialog` Notification about 6 s later changes nothing over it |
+| `ElicitationResult` | `Active`: the user accepted, declined or cancelled. Over a permission dialog on record (one stacked behind the form) it changes nothing, and a dialog's notice (`permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog`) never replaces a dialog on record of the other kind |
+| `Notification` | refined by type: `permission_prompt` and `worker_permission_prompt` (an agent team's lead showing a worker's permission dialog; not in the docs' table)→`Permission`; `agent_completed` and `idle_prompt` (Claude finished a minute ago and nobody has typed — a reminder, not a question)→`Idle`; `agent_needs_input`/`elicitation_dialog`/`elicitation_url_dialog`/`quota_auto_resume_stale`→`Waiting`; otherwise unchanged |
 
-Five are `async: true` (10 s) so they **structurally cannot** approve or deny.
-`SessionEnd` is the one synchronous state hook (5 s), because it fires at
-teardown where there is no decision left to gate.
+A pending row remembers who asked (`asker`: the main thread, a subagent, or
+unknown for a prompt only a `Notification` reported). Claude runs subagents in
+the background by default and fires the main thread's `Stop` while a
+subagent's dialog is still on screen, so a main-thread `Stop`, `idle_prompt` or
+`agent_completed` never clears a prompt a subagent asked; the next
+`UserPromptSubmit`, `SessionStart` or `SessionEnd` does, and the reconciler
+settles a pending row only on progress of the thread that asked. One more race
+is handled at the write: a launch that carries a prompt fires `SessionStart` and
+that turn's `UserPromptSubmit` about 50 ms apart, both async, so their writes
+can land either way round. The hook notes when its invocation began, before it
+reads its input, and a `SessionStart` (source `startup` or `resume`) declines
+to write over a row stored after that moment: an event newer than itself.
+
+**The pending dialog.** A `PermissionRequest` or an `Elicitation` stores its own
+payload with the row, in the same statement (`SessionState.prompt`, a
+`PendingPrompt`; migration `0043`): the tool and its input as JSON text,
+`permission_suggestions`, the MCP server, the subagent that asked, the mode, the
+turn's `prompt_id`, and `recordedAtMs`, which tells one occurrence from the
+next. Over 64 KB the longest strings inside are cut, never the JSON. It is read
+back only while the row still holds the state that write stored, and any write
+that changes the row's state, message or dialog clears it; the guards above keep
+it, and the row's clock, exactly as they keep the state. Rows also carry the
+latest `permission_mode` and `effort.level` a payload brought (the status line
+writes the effort too: before the first turn it is the only source).
+
+The row also keeps what has been seen of its dialog since, because the last
+dialog written is not always the one on screen and an answer leaves no hook
+behind. Parallel calls (two Reads, two read-only commands, a background
+subagent asking while the main thread does) fire every `PermissionRequest` at
+once while Claude shows one dialog at a time (`1 of 2`); their hooks land in no
+fixed order, and a queued dialog fires nothing when it comes forward. An
+approved tool fires nothing until it ends, and an Esc fires nothing at all.
+`DialogMarks::closed_at` (`crates/core` `domain.rs`) is the one reading, used
+by the hook and the app alike:
+
+- A dialog is **stacked** (`pending_stacked`) when it is written while the
+  dialog on record is still open. A serial next dialog follows its
+  predecessor's close; one whose hook beats the predecessor's `PostToolUse`
+  reads stacked, which costs only the Conversation view's card.
+- A permission dialog (a question and a plan included) is **closed** by a
+  status-line render that started more than 1 s after it was recorded (a
+  render Claude launched just before the dialog drew can start that late)
+  (`pending_rendered_at_ms`; Claude renders none while any dialog is up and
+  renders 65-120 ms after an answer when no dialog follows), or, when it is
+  not stacked, by its own call finishing (`pending_resolved_at_ms`: the
+  `PostToolUse`, `PostToolUseFailure` or `PostToolBatch` of the call whose
+  hash, over its thread, tool and full input, is `pending_call`). A stacked
+  dialog closes only by a render: the call that finished may be the one that
+  was in front. An elicitation closes by neither (neither was probed for it),
+  only by its answer or another real transition.
+- A render on Daedalus never counts: its start is the box's, and a relayed one
+  can arrive behind the dialog's hook.
+
+The app reads a dialog's `PendingPrompt.stacked`, `closedAtMs` (either sign,
+for display) and `callEndedAtMs` (its own call's end alone, never for a
+stacked dialog) through the same function. A render is timing, so a reader
+that types into the pane trusts only `callEndedAtMs`, and waits past it: a
+dialog that follows another is on screen 45-70 ms before its own hook lands
+(docs/conversation.md).
+
+Every event but `SessionEnd` is `async: true` (10 s), so they **structurally
+cannot** approve, deny or answer anything. `SessionEnd` is the one synchronous
+state hook (5 s), because it fires at teardown where there is no decision left
+to gate.
 
 `PostToolUse`/`PostToolUseFailure` are injected as **heartbeats** — the only
 events that fire mid-turn, and so the only evidence that a long build or a long
@@ -446,15 +517,31 @@ think is still a running turn rather than a finished one. They fire with no
 ordering guarantee, which is why they are heartbeats and not transitions: in
 `crates/hook`'s `record`, a heartbeat may advance the clock but can never move a
 session out of a blocked-on-user state, so a straggler cannot clear a permission
-prompt still on screen. `PreToolUse` and `PermissionDenied` stay out —
-`PreToolUse` is the only hook that can *authorize or rewrite* a tool call
-(`permissionDecision`, `updatedInput`), which is the one thing santree must never
-be able to do.
+prompt still on screen. Each also marks the dialog on record finished when it
+is that dialog's own call, which changes nothing but the mark (above). `PreToolUse`, `PermissionDenied` and `WorktreeCreate`
+stay out — `PreToolUse` is the only hook that can *authorize or rewrite* a tool
+call (`permissionDecision`, `updatedInput`), which is the one thing santree must
+never be able to do, and Claude reads `WorktreeCreate`'s output as the new
+worktree's path, so registering it replaces Claude's own worktree creation.
+
+**Live text.** A launch whose `--settings` file was built while Settings →
+Experimental → Conversation view was on (never a Daedalus one) registers a
+thirteenth event, `MessageDisplay`: Claude's reply as it renders, in whole lines, a
+batch per event, numbered by `index` per message and not always delivered in
+order, with `final` on the message's last. Main-thread text only — no thinking,
+no tool output, no subagent's text. It records no state: the batches go to
+`session_live_text`, which keeps the newest message of the turn (≤ 32 KB), drops
+a batch that lands after its turn ended, and is cleared by a new turn, the
+turn's end, a dialog of that turn, `SessionStart`, `SessionEnd` and an idle
+`Notification`. The hook nudges the socket with `t<session id>`, the app emits
+`SessionLiveTextChanged`, and `session_live_text` serves it to the view.
 
 The status line carries `refreshInterval: 15` (seconds; the CLI's schema requires
 ≥ 1), so every live session stamps `session_usage_live` even while sitting
 silently at the prompt. That is a proof of **life**, never of *work* — the
-status line renders just as happily when idle.
+status line renders just as happily when idle. It also records the output style
+and the vim mode, which freeze while a dialog is up (the status line doesn't
+render under one).
 
 The hook binary **prints nothing on the hook path and always exits 0**, including
 on panic. After writing it nudges a Unix socket (`session_signal.rs`) — a socket,
@@ -472,6 +559,22 @@ run. Activity is the newest of *three* clocks — the transcript, the subagent
 files, and the row's own `updated_at_ms` (the tool heartbeats). Without the third,
 a turn whose transcript went quiet past `IDLE_QUIET_MS` read as **Idle while the
 agent was plainly working**, which is the bug the heartbeats exist to fix.
+
+A closed permission dialog (above) reads as the turn going on, its close time
+counted as activity: after an approval the dot stops saying the session needs
+you about 65 ms later, while the tool still runs, instead of when the tool
+ends. With no record here (a Daedalus session) it reads active until the next
+hook. The stored row keeps its state; only the displayed one moves.
+
+An `Idle` row is read too, while its pane is live and the transcript has
+changed since the idle was stored: Claude starts a turn from its queue right
+after a `Stop` (a message typed while it worked) and no hook fires at delivery,
+so a `promptSource: "queued"` user record with no turn end after it reads as
+`Active` (or `Delegating`). That is the displayed state only; the stored row
+stays `Idle`. One gap is left open: while Claude retries an API error (up to
+about 3 minutes) no hook fires and the transcript gets only `api-request`
+records, so a retrying turn decays to `Idle` after `IDLE_QUIET_MS` until
+`StopFailure` ends it.
 
 `transcript_activity_ms` picks the reader by provider, because the two formats
 share nothing but the extension: a Claude transcript's records are
@@ -528,8 +631,10 @@ terminal's registry row rather than assumed, so a Codex session is never
 painted with the Claude mark. Its rows reconcile like Claude's, against the
 rollout rather than a transcript (`codex_rollouts::last_activity_ms`).
 
-**`SessionStart` is not a launch event here.** Claude fires it while the TUI comes
-up; Codex fires it when the *first turn is submitted*, because that is when it
+**`SessionStart` is not a launch event here.** Claude fires it once its prompt is
+up — after any startup dialog (trust, an `.mcp.json` approval, the resume
+picker), since no hook runs under one (measured on 2.1.312); Codex fires it
+when the *first turn is submitted*, because that is when it
 creates the thread the session id belongs to. Measured on codex-cli 0.151.0 in a
 real pty with santree's exact flags: idle for 95s after boot and only `SessionEnd`
 ever fires, at quit; type one prompt and `SessionStart` lands the instant it is
@@ -593,7 +698,10 @@ Rules that make this safe to trust:
   for a pane the walk could not attribute.
 - **`argv[0]`'s basename, matched against the agent catalog** — not `ucomm`,
   which lies (a running `claude` reports `claude.exe`, and so did a `ugrep` it
-  spawned), and not the whole command line, which would claim `vim codex`.
+  spawned), and not the whole command line, which would claim `vim codex`. An
+  `.exe` is dropped first: Claude Code's npm install links `claude` to its
+  native `bin/claude.exe`, and santree launches the canonical path, so that is
+  the `argv[0]` its own panes carry.
 - One `ps` for the whole app: the listing is cached 500ms and the Resource
   Manager reads the same snapshot. A 3s timeout bounds it, and a failure degrades
   to an empty result rather than an error.

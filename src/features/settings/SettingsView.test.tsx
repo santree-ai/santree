@@ -7,6 +7,8 @@ import { SettingsView } from "./SettingsView";
 // one pane it opens. Every pane is stubbed so the assertions are about the nav
 // structure alone, and the data layer is mocked so it renders without a backend.
 let searchParams: { section?: string } = {};
+/** Settings → Experimental's switches, by feature: on unless a test says. */
+const experimental = vi.hoisted(() => ({ on: {} as Record<string, boolean> }));
 
 vi.mock("@tanstack/react-router", () => ({
   useCanGoBack: () => false,
@@ -19,6 +21,8 @@ vi.mock("../../lib/queries", () => ({
   // RepoAvatar asks for a Daedalus project's icon; none here.
   useDaedalusIcon: () => ({ data: null, status: "success" }),
   useRepos: () => ({ data: [{ name: "acme/app" }] }),
+  useOfferedRepos: () => ({ data: [{ name: "acme/app" }], isFetched: true, hidden: () => false }),
+  useExperimental: (feature: string) => experimental.on[feature] ?? true,
 }));
 
 vi.mock("../../state/AppContext", () => ({
@@ -46,6 +50,9 @@ vi.mock("./sections/EnglishTutor", () => ({
 }));
 vi.mock("./sections/Environment", () => ({
   EnvironmentSection: () => <div>Environment pane</div>,
+}));
+vi.mock("./sections/Experimental", () => ({
+  ExperimentalSection: () => <div>Experimental pane</div>,
 }));
 vi.mock("./sections/General", () => ({ GeneralSection: () => <div>General pane</div> }));
 vi.mock("./sections/GitHub", () => ({ GitHubSection: () => <div>GitHub pane</div> }));
@@ -75,6 +82,7 @@ const groupItems = (group: string): string[] => {
 describe("Settings → nav", () => {
   beforeEach(() => {
     searchParams = {};
+    experimental.on = {};
   });
 
   it("shows the server banner: the shell that normally carries it is not around", () => {
@@ -82,13 +90,26 @@ describe("Settings → nav", () => {
     expect(screen.getByText("server banner")).toBeInTheDocument();
   });
 
-  it("groups the user scope by what each provider is for", () => {
-    render(<SettingsView />);
+  it("groups the user scope by what each provider is for, Experimental last", () => {
+    const { unmount } = render(<SettingsView />);
     expect(groupItems("Issue trackers")).toEqual(["Linear", "Jira", "TickTick"]);
     expect(groupItems("Code hosting")).toEqual(["GitHub", "Daedalus"]);
     expect(groupItems("AI harness")).toEqual(["Claude Code", "Codex"]);
     expect(groupItems("Environment")).toEqual(["Variables", "Terminal"]);
     expect(groupItems("Extra")).toEqual(["Web", "English tutor", "Usage"]);
+    const headings = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings.at(-1)).toBe("Experimental");
+    expect(groupItems("Experimental")).toEqual(["Experimental"]);
+    unmount();
+
+    // A page whose Settings → Experimental switch is off isn't in the nav, and
+    // its deep link lands on the first page instead.
+    experimental.on = { Daedalus: false, EnglishTutor: false };
+    searchParams = { section: "daedalus" };
+    render(<SettingsView />);
+    expect(groupItems("Code hosting")).toEqual(["GitHub"]);
+    expect(groupItems("Extra")).toEqual(["Web", "Usage"]);
+    expect(screen.getByText("General pane")).toBeInTheDocument();
   });
 
   it("opens the pane the nav item names", () => {

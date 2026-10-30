@@ -36,6 +36,8 @@ function session(sessionId: string, termKey: string): SessionState {
     agentKind: "Claude",
     sessionId,
     state: "idle",
+    recordedState: "idle",
+    interruptedAtMs: null,
     event: "Stop",
     cwd: "/tmp/ak-1",
     message: null,
@@ -43,6 +45,9 @@ function session(sessionId: string, termKey: string): SessionState {
     updatedAtMs: Date.now(),
     repo: "acme/app",
     termKey,
+    prompt: null,
+    permissionMode: null,
+    effortLevel: null,
   };
 }
 
@@ -56,6 +61,8 @@ function usage(sessionId: string, usedPct: number, costUsd: number | null): Sess
     model: "claude-opus-5",
     costUsd,
     updatedAtMs: Date.now(),
+    outputStyle: null,
+    vimMode: null,
   };
 }
 

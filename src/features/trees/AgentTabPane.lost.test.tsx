@@ -9,6 +9,9 @@
  * only while the worktree's sessions were still cached; a fresh read lists a
  * pruned tab's conversation with no key. Nothing here reads that list: the row
  * is kept, so the relaunch finds the conversation still bound to it.
+ *
+ * Also the same path under the Terminal/Conversation switch, which has to leave
+ * the terminal — and the launch behind it — exactly as it was.
  */
 import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -21,12 +24,18 @@ const openAgent = vi.hoisted(() => vi.fn());
 vi.mock("../agents/useOpenAgent", () => ({ useOpenAgent: () => openAgent }));
 const check = vi.hoisted(() => vi.fn());
 const world = vi.hoisted((): LayerWorld => ({ repos: [], server: undefined }));
+/** Settings → Experimental → Conversation view, dialled per test. */
+const conversation = vi.hoisted(() => ({ on: true }));
 vi.mock("../../lib/queries", async () => ({
   ...(await import("../terminal/testing")).layerQueries(world),
   useCheckTabResume: (repo: string) => ({
     mutateAsync: (vars: unknown) => check(repo, vars),
   }),
   useWorktreeTabLaunch: () => ({ data: undefined, isLoading: false }),
+  // Which face a Claude tab opens on: never set, so its terminal.
+  CLAUDE_TAB_FACE_KEY: "claude_tab_face",
+  useSetting: () => ({ data: null }),
+  useExperimental: (feature: string) => feature !== "Conversation" || conversation.on,
 }));
 vi.mock("../terminal/TauriBackend", async () => ({
   tauriBackend: (await import("../terminal/testing")).fakeTauriBackend(),
@@ -34,7 +43,11 @@ vi.mock("../terminal/TauriBackend", async () => ({
 vi.mock("../terminal/XtermRenderer", async () => ({
   XtermRenderer: (await import("../terminal/testing")).FakeXtermRenderer,
 }));
-vi.mock("../../state/AgentRuns", () => ({ useAgentRuns: () => ({ clearAgentLaunch: vi.fn() }) }));
+const clearAgentLaunch = vi.hoisted(() => vi.fn());
+vi.mock("../../state/AgentRuns", () => ({ useAgentRuns: () => ({ clearAgentLaunch }) }));
+vi.mock("../conversation/ConversationView", () => ({
+  ConversationView: () => <div data-testid="conversation" />,
+}));
 vi.mock("./model", () => ({ remoteControlTab: () => null }));
 vi.mock("./useWorkLaunch", () => ({
   useWorkLaunch: () => ({ launching: false, initialSetup: false, hold: false, prompt: undefined }),
@@ -42,11 +55,12 @@ vi.mock("./useWorkLaunch", () => ({
 // The launch pipeline's own state, kept to what the pane reads: `ended` once a
 // pane it saw is gone, and `resume` re-arming the launch.
 const relaunch = vi.hoisted(() => vi.fn());
+const exited = vi.hoisted(() => vi.fn());
 vi.mock("./useAgentTab", async () => {
   const { useEffect, useState } = await import("react");
   const { useTerminals } = await import("../terminal/TerminalsContext");
   return {
-    useAgentTab: ({ refId }: { refId: string }) => {
+    useAgentTab: ({ refId, agent }: { refId: string; agent: string }) => {
       const live = useTerminals().tabs.some((t) => t.refId === refId);
       const [seen, setSeen] = useState(false);
       useEffect(() => {
@@ -56,8 +70,8 @@ vi.mock("./useAgentTab", async () => {
         preparing: false,
         ended: seen && !live,
         seed: "codex resume s1",
-        onExited: () => {},
-        agent: { kind: "Codex", repo: "acme/web", termKey: refId },
+        onExited: exited,
+        agent: { kind: agent, repo: "acme/web", termKey: refId },
         resume: () => {
           relaunch();
           setSeen(false);
@@ -68,6 +82,7 @@ vi.mock("./useAgentTab", async () => {
 });
 
 import { toast } from "../../state/toast";
+import { setAgentTabView } from "../conversation/viewMode";
 import { tauriBackend } from "../terminal/TauriBackend";
 import { TerminalLayer } from "../terminal/TerminalLayer";
 import { resetAdoption, TerminalsProvider, useTerminals } from "../terminal/TerminalsContext";
@@ -131,6 +146,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   resetAdoption();
   world.server = undefined;
+  world.repos = [];
+  conversation.on = true;
 });
 
 describe("a lost Trees agent tab", () => {
@@ -200,5 +217,54 @@ describe("a lost Trees agent tab", () => {
     fireEvent.click(getByRole("button", { name: "Close tab" }));
     expect(closeTab).toHaveBeenCalledWith("t1");
     await waitFor(() => expect(getByTestId("held")).toHaveTextContent("0"));
+  });
+});
+
+describe("switching an agent tab between its terminal and its conversation", () => {
+  // The terminal used to be keyed by the face, so every switch remounted it: its
+  // launch cleanup (`clearAgentLaunch`, which can drop a sibling tab's pending
+  // started-task launch) ran again, and it was the remount that kept the exit
+  // latch working. Settings → Experimental's switch is the same kind of move:
+  // off, the tab shows its terminal whatever face it chose, and keeps the choice.
+  test("leaves the terminal mounted: the launch is cleaned up once, and its exit is still seen", async () => {
+    world.repos = [{ name: "acme/web", location: "Local", path: "/src/web" }];
+    const row: WorktreeTab = { ...ROW, id: "t2", agentKind: "Claude", title: "Claude" };
+    const tree = () => (
+      <TerminalsProvider>
+        <AgentTabPane repo="acme/web" worktree={WORKTREE} tab={row} tabs={[row]} />
+        <TabCount />
+        <TerminalLayer />
+      </TerminalsProvider>
+    );
+    const { getByTestId, queryByTestId, rerender } = render(tree());
+    await waitFor(() => expect(backend.seed).toHaveBeenCalledTimes(1));
+    expect(clearAgentLaunch).toHaveBeenCalledTimes(1);
+
+    for (const face of ["conversation", "terminal", "conversation"] as const) {
+      act(() => setAgentTabView("tree:wt1:tab:t2", face));
+      await act(async () => {});
+    }
+    expect(getByTestId("conversation")).toBeInTheDocument();
+
+    conversation.on = false;
+    rerender(tree());
+    await act(async () => {});
+    expect(queryByTestId("conversation")).not.toBeInTheDocument();
+    conversation.on = true;
+    rerender(tree());
+    await act(async () => {});
+    expect(getByTestId("conversation")).toBeInTheDocument();
+    expect(clearAgentLaunch).toHaveBeenCalledTimes(1);
+    expect(backend.open).toHaveBeenCalledTimes(1);
+    expect(backend.seed).toHaveBeenCalledTimes(1);
+
+    // The agent exits while its conversation is up: that is seen, and a switch
+    // after it opens nothing — only a click relaunches an agent.
+    act(() => (backend.open.mock.calls[0][1] as OutputHandlers).onExit());
+    await waitFor(() => expect(getByTestId("tabs")).toHaveTextContent("0"));
+    expect(exited).toHaveBeenCalledTimes(1);
+    act(() => setAgentTabView("tree:wt1:tab:t2", "terminal"));
+    await act(async () => {});
+    expect(backend.open).toHaveBeenCalledTimes(1);
   });
 });

@@ -71,6 +71,11 @@ vi.mock("../../lib/queries", () => ({
   useCodexAccount: () => ({ data: { connected: q.macCodex } }),
   useCodexHealth: () => ({ data: { available: q.macCodex } }),
   useBrowserSupported: () => ({ data: true }),
+  // Which face a Claude tab opens on: never set, so its terminal.
+  CLAUDE_TAB_FACE_KEY: "claude_tab_face",
+  useSetting: () => ({ data: null }),
+  // Settings → Experimental: every switch on.
+  useExperimental: () => true,
 }));
 
 /** Whether this Mac's Codex is signed in — asked only for a project here. */

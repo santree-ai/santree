@@ -8,7 +8,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useState } from "react";
 
-import { useAddRepo } from "../lib/queries";
+import { useAddRepo, useExperimental } from "../lib/queries";
 import { useLegacyMigration } from "../state/LegacyMigration";
 import { DaedalusLogo } from "./icons";
 import { Button, Spinner } from "./primitives";
@@ -19,6 +19,8 @@ export function WelcomeScreen() {
   const addRepo = useAddRepo();
   const [error, setError] = useState<string | null>(null);
   const [daedalusOpen, setDaedalusOpen] = useState(false);
+  // Adding from Daedalus is offered only while Settings → Experimental has it on.
+  const daedalus = useExperimental("Daedalus");
 
   async function pickRepo() {
     setError(null);
@@ -59,17 +61,21 @@ export function WelcomeScreen() {
           {addRepo.isPending ? "Validating…" : "Open a repository…"}
         </Button>
         <p className="mt-3 text-[11px] text-muted-4">Choose any folder inside a git checkout.</p>
-        <Button variant="ghost" onClick={() => setDaedalusOpen(true)} className="mt-2 gap-2">
-          <DaedalusLogo size={14} />
-          Add from Daedalus…
-        </Button>
+        {daedalus && (
+          <Button variant="ghost" onClick={() => setDaedalusOpen(true)} className="mt-2 gap-2">
+            <DaedalusLogo size={14} />
+            Add from Daedalus…
+          </Button>
+        )}
         {error && (
           <p className="mt-3 max-w-[380px] text-center text-[11px] leading-snug text-status-red">
             {error}
           </p>
         )}
       </div>
-      {daedalusOpen && <DaedalusProjectsDialog onClose={() => setDaedalusOpen(false)} />}
+      {daedalus && daedalusOpen && (
+        <DaedalusProjectsDialog onClose={() => setDaedalusOpen(false)} />
+      )}
     </div>
   );
 }

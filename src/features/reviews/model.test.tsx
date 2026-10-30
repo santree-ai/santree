@@ -32,6 +32,11 @@ vi.mock("../../lib/queries", () => ({
   useReviews: () => ({ data: reviews.inbox, isLoading: false }),
   usePrTickets: () => ({ data: [] }),
   useRepos: () => ({ data: [{ name: "acme/app", tracker: "Linear · Acme" }] }),
+  useOfferedRepos: () => ({
+    data: [{ name: "acme/app", tracker: "Linear · Acme" }],
+    isFetched: true,
+    hidden: () => false,
+  }),
 }));
 vi.mock("../../state/AppContext", () => ({
   useAppUi: () => ({ reviewFocus: null, consumeReviewFocus: vi.fn() }),

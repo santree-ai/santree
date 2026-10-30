@@ -208,9 +208,21 @@ async fn launching_an_agent_writes_its_hooks_on_the_box_and_runs_it_there() {
         santree.join("claude-hooks.json").to_string_lossy()
     );
     let settings = read_json(&hooks.claude_settings);
-    for event in ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"] {
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PostToolBatch",
+        "Stop",
+        "StopFailure",
+        "SessionEnd",
+    ] {
         assert_eq!(relayed_event(&settings, event), event);
     }
+    // The reply line by line is this Mac's alone: the relay refuses it.
+    assert!(
+        settings["hooks"].get("MessageDisplay").is_none(),
+        "{settings}"
+    );
     assert_eq!(
         settings["statusLine"]["command"],
         format!("'{HOOK_BIN}' hook statusline"),
@@ -675,10 +687,13 @@ async fn which_agent_runs_in_a_daedalus_pane_is_read_from_the_boxs_process_table
         .seed(pane, crate::terminal::LaunchLine::typed("exec claude\r"))
         .unwrap();
 
+    // A box's pane has no pane id or start time on this Mac.
     let expected = vec![AgentProcess {
         term_key: label.into(),
         pane_agent_kind: Some(AgentKind::Claude),
         agent_kind: AgentKind::Claude,
+        pane_id: None,
+        started_at_ms: None,
     }];
     let found = tokio::time::timeout(WAIT, async {
         loop {

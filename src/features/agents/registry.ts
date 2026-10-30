@@ -94,22 +94,28 @@ export function parseTermKey(termKey: string | null | undefined): AgentOrigin {
 /**
  * The live terminal tab hosting a session, if this app has one open for it.
  *
- * The join is the session's own identity — its `term_key` and the provider that
- * owns it — because that pair is what addresses a pane: every launch site opens
- * its PTY under the plain `term_key` (`TerminalSpec.refId`) and names the
- * provider beside it, exactly as `terminal_sessions` keys the row. Both halves
- * are required. Matching the key alone would report a Claude session as live
- * because a Codex pane happens to be open on the same surface; a session whose
- * provider santree cannot name matches nothing at all, so it reads as not-live
- * rather than as someone else's.
+ * The join is the session's own identity — its project, its `term_key` and the
+ * provider that owns it — because that is what addresses a pane: every launch
+ * site opens its PTY under the plain `term_key` (`TerminalSpec.refId`) and names
+ * the project and provider beside it (`TerminalSpec.agent`), exactly as
+ * `terminal_sessions` keys the row. All three are required. A `term_key` is
+ * unique only within a project — a ticket's `triage:<ticket>` or a PR's
+ * `ai-review:<pr>` can be open in two — so the key alone could hand one
+ * project's pane to another's session (and the Conversation view's composer
+ * would type into it); the provider keeps a Codex pane on the same surface from
+ * passing for a Claude session. A session santree cannot attribute matches
+ * nothing at all, so it reads as not-live rather than as someone else's.
  */
 export function liveTabFor(
+  repo: string | null,
   termKey: string | null,
   agentKind: AgentKind | null,
   terminals: TerminalTab[],
 ): TerminalTab | undefined {
-  if (!termKey || !agentKind) return undefined;
-  return terminals.find((t) => t.refId === termKey && t.agent?.kind === agentKind);
+  if (!repo || !termKey || !agentKind) return undefined;
+  return terminals.find(
+    (t) => t.refId === termKey && t.agent?.kind === agentKind && t.agent.repo === repo,
+  );
 }
 
 /**
@@ -333,7 +339,7 @@ export function buildAgentEntries(input: BuildInput): AgentEntry[] {
     if (s.repo && known.has(s.repo) && !byRepo.has(s.repo)) continue;
 
     const origin = parseTermKey(s.termKey);
-    const tab = liveTabFor(s.termKey, s.agentKind, terminals);
+    const tab = liveTabFor(s.repo, s.termKey, s.agentKind, terminals);
     const live = tab !== undefined;
     if (tab) announced.add(tab.key);
     const bucket = bucketOf(s.state, live);
@@ -577,7 +583,7 @@ export function countAttention(
 ): number {
   let n = 0;
   for (const s of sessions) {
-    const live = liveTabFor(s.termKey, s.agentKind, terminals) !== undefined;
+    const live = liveTabFor(s.repo, s.termKey, s.agentKind, terminals) !== undefined;
     if (bucketOf(s.state, live) !== "attention") continue;
     if (nowMs - (s.updatedAtMs ?? 0) > HOOK_STALE_AFTER_MS) continue;
     n++;

@@ -41,6 +41,7 @@ import {
   type LinearGroupBy,
   parseLinearGroupBy,
   useBaseWorktreesByRepo,
+  useOfferedRepos,
   usePendingWorktreeMoves,
   usePrCheckoutRemovals,
   useRepos,
@@ -666,7 +667,9 @@ export function useTicketAgents(): {
   agentsByTicket: Map<string, AgentNode[]>;
   markSeen: (entry: AgentEntry) => void;
 } {
-  const { data: repos } = useRepos();
+  // The projects santree offers: an investigation in a project Settings →
+  // Experimental hides is not a row to open, as its project isn't.
+  const { data: repos } = useOfferedRepos();
   const repoNames = useMemo(() => (repos ?? []).map((repo) => repo.name), [repos]);
   const entries = useAgentEntries(repoNames, repoNames);
   const { seen, markSeen } = useSeenAgents();

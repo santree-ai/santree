@@ -22,6 +22,12 @@ export const SANTREE_OFF = "santree is off for this Mac";
 
 export function linkNotice(link: DaedalusLink): LinkNotice {
   switch (link.kind) {
+    case "Off":
+      return {
+        tone: "warn",
+        title: "Daedalus is off",
+        detail: "Turn it on in Settings › Experimental.",
+      };
     case "Connected":
       return {
         tone: "ok",
@@ -73,7 +79,7 @@ export function linkNotice(link: DaedalusLink): LinkNotice {
 
 /** Whether santree can run anything on Daedalus right now. `undefined` (the
  *  first read in flight) counts as up, so nothing flashes grey at a link that
- *  is there. */
+ *  is there. `Off` (Settings › Experimental) is down like any other state. */
 export function linkUp(link: DaedalusLink | undefined): boolean {
   return link === undefined || link.kind === "Connected" || link.kind === "Connecting";
 }

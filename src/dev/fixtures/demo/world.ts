@@ -375,10 +375,16 @@ export function sessionStates(now: number): SessionState[] {
     agentKind: j.kind,
     sessionId: j.sessionId,
     state: jobState(j, now),
+    // Nothing reconciles a demo row: it is recorded as it reads.
+    recordedState: jobState(j, now),
+    interruptedAtMs: null,
     event: jobState(j, now) === "active" ? "PostToolUse" : "Stop",
     cwd: j.cwd,
     message: null,
     transcriptPath: null,
+    prompt: null,
+    permissionMode: null,
+    effortLevel: null,
     updatedAtMs: Math.min(
       now,
       j.startedAt + (Math.min(jobSecs(j, now), j.script.doneAt ?? 1e9) * 1000) / j.speed,

@@ -21,8 +21,15 @@
  *  model belong to the strip, which knows nothing about either host's model. */
 import { type ReactNode, useCallback } from "react";
 
-import type { AgentKind, TabKind } from "../../bindings";
-import { AgentIcon, GitHubLogo, PlayIcon, TerminalIcon, TrackerLogo } from "../../components/icons";
+import type { AgentKind, TabKind, WorktreeTab } from "../../bindings";
+import {
+  AgentIcon,
+  GitHubLogo,
+  MessageSquareIcon,
+  PlayIcon,
+  TerminalIcon,
+  TrackerLogo,
+} from "../../components/icons";
 import { MENU_ITEM } from "../../components/primitives";
 import { PanelToggle } from "../../components/SidePanel";
 import { SplitWorkspace } from "../../components/split/SplitWorkspace";
@@ -34,12 +41,18 @@ import {
   useTicketProvider,
 } from "../../lib/queries";
 import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
+import {
+  useAgentTabViews,
+  useConversationOffer,
+  ViewSwitch,
+  withViewRow,
+} from "../conversation/viewMode";
 import { useWebOff } from "../web/availability";
 import { usePageLabels } from "../web/pageState";
 import { useStripWebHost, WebMenuRow, webStripTab } from "../web/strip";
 import { BASE_ID, extraTab, type MainTab, type NewTabOpts, useTrees } from "./model";
 import { useTabAccounts } from "./useTabAccounts";
-import { useTabSessions } from "./useTabSessions";
+import { tabRefId, useTabSessions } from "./useTabSessions";
 
 export function MainTabBar({
   renderTab,
@@ -59,6 +72,8 @@ export function MainTabBar({
     closeFileTab,
     openCheckLog,
     closeCheckLog,
+    openConversation,
+    closeConversation,
     prViewOpen,
     closePrView,
     issueViewOpen,
@@ -76,8 +91,13 @@ export function MainTabBar({
   const provider = useTicketProvider(repo);
   const { closeWithSession } = useTabSessions(activeId, tabs, closeTab);
   const { menuFor, detailFor } = useTabAccounts(repo, activeId, tabs);
+  const viewOf = useAgentTabViews();
   const isBase = activeId === BASE_ID;
   const pageLabel = usePageLabels();
+  // A Claude tab's Terminal/Conversation switch: in its menu and on its strip.
+  const offer = useConversationOffer(repo);
+  const conversationKey = (row: WorktreeTab) =>
+    offer.row(row) ? tabRefId(activeId, row.id) : null;
 
   // This worktree's terminal links and its pages' popups open Web tabs here.
   const { select } = split;
@@ -111,7 +131,7 @@ export function MainTabBar({
               ),
             onClose: () => closeWithSession(t),
             onRename: (title: string) => renameTab(t.id, title),
-            menu: menuFor(t),
+            menu: withViewRow(conversationKey(t), viewOf(tabRefId(activeId, t.id)), menuFor(t)),
             detail: detailFor(t),
           },
     ),
@@ -157,6 +177,17 @@ export function MainTabBar({
           },
         ]
       : []),
+    ...(openConversation
+      ? [
+          {
+            tab: "conversation" as const,
+            label: openConversation.title,
+            icon: <MessageSquareIcon size={11} className="text-muted-3" />,
+            onClose: closeConversation,
+            detail: "A past session, read-only",
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -171,6 +202,11 @@ export function MainTabBar({
       )}
       newTabMenuClassName="w-40 overflow-hidden"
       newTabDisabled={reach.runOff}
+      groupTrailing={(tab) => {
+        const row = tabs.find((t) => extraTab(t.id) === tab);
+        const key = row ? conversationKey(row) : null;
+        return key ? <ViewSwitch termKey={key} /> : null;
+      }}
       trailing={
         <>
           {!isBase && active && (

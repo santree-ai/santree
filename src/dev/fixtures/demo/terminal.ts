@@ -8,6 +8,7 @@ import type { Channel } from "@tauri-apps/api/core";
 
 import type {
   AgentKind,
+  AgentProcess,
   TerminalAttached,
   TerminalOpenOpts,
   TerminalSession,
@@ -160,16 +161,16 @@ export function fakeSessions(): TerminalSession[] {
   }));
 }
 
-export function fakeAgentProcesses(): {
-  termKey: string;
-  paneAgentKind: AgentKind | null;
-  agentKind: AgentKind;
-}[] {
+export function fakeAgentProcesses(): AgentProcess[] {
   return [...ptys.values()]
     .filter((p) => p.agentKind !== null)
     .map((p) => ({
       termKey: p.label,
       paneAgentKind: p.agentKind,
       agentKind: p.agentKind as AgentKind,
+      paneId: p.id,
+      // A fixture agent has been running since before anything it recorded,
+      // so the composer reads its idle rows as current.
+      startedAtMs: 0,
     }));
 }

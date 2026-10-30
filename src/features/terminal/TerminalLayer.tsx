@@ -202,7 +202,8 @@ function useResume() {
 }
 
 export function TerminalLayer() {
-  const { tabs, close, embeds, embed, detachEmbeds, registerPane, holdRow } = useTerminals();
+  const { tabs, close, embeds, embed, detachEmbeds, registerPane, holdRow, reportLink } =
+    useTerminals();
   const adopted = useAdoptedSessions();
   const claims = useAdoptClaims(adopted);
   const onLink = useReclaimLost(tabs, claims);
@@ -258,7 +259,11 @@ export function TerminalLayer() {
             // A Daedalus pane's session lives on the box, not in the local server.
             resumeBlocked={remote ? undefined : serverView?.blocksResume}
             unansweredHint={remote ? "Check the link in Settings → Daedalus." : localHint}
-            onLink={(link) => onLink(t.key, link)}
+            onLink={(link) => {
+              onLink(t.key, link);
+              // For a view that types into this pane while not showing it.
+              reportLink(t.key, link);
+            }}
             // A link opens in a Web tab of the surface the terminal is on.
             openLink={(url, event) => void openTerminalLink(t.refId, url, event)}
             onReady={(handle) => registerPane(t.key, handle)}
@@ -380,12 +385,15 @@ function LayerPane({
     // Geometry is owned by the layout effect above, never by this style object —
     // React must not have an opinion it would rewrite on an unrelated re-render.
     // Every pane stays laid out at full size (not display:none) so xterm never
-    // reflows from a zero-size state when it is shown again.
+    // reflows from a zero-size state when it is shown again. Hidden, it is also
+    // inert: nothing in it can take the keyboard (the view blurs its terminal
+    // too — see `TerminalView`).
     <div
       ref={setPane}
       data-terminal-pane={t.key}
       className={`fixed overflow-hidden bg-panel p-2 ${shown ? "" : "invisible pointer-events-none"}`}
       style={{ zIndex: shown ? 30 : -1 }}
+      inert={!shown}
       onPointerDownCapture={embed?.onActivate}
     >
       <TerminalView

@@ -103,6 +103,8 @@ vi.mock("../../lib/queries", async () => {
   };
   return {
     useRepos: () => ({ data: [{ name: A }] }),
+    useOfferedRepos: () => ({ data: [{ name: A }], isFetched: true, hidden: () => false }),
+    useExperimental: () => true,
     useRepoReach: () => ({ remote: false, readable: true, gitOff: undefined, runOff: undefined }),
     useWorktrees: () => {
       subscribe();

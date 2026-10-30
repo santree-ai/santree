@@ -846,6 +846,8 @@ const FINISHED: SessionState = {
   agentKind: "Claude",
   sessionId: "e4d5c6b7-119a",
   state: "exited",
+  recordedState: "exited",
+  interruptedAtMs: null,
   event: "SessionEnd",
   cwd: worktreePath(QUACK, "QK-119"),
   message: null,
@@ -853,6 +855,9 @@ const FINISHED: SessionState = {
   updatedAtMs: null,
   repo: QUACK,
   termKey: "tree:QK-119:tab:t-119a",
+  prompt: null,
+  permissionMode: null,
+  effortLevel: null,
 };
 
 export const sessionStates = (now: number): SessionState[] => [
@@ -860,6 +865,9 @@ export const sessionStates = (now: number): SessionState[] => [
     agentKind: a.kind,
     sessionId: a.sessionId,
     state: a.state,
+    // Nothing reconciles a fixture row: it is recorded as it reads.
+    recordedState: a.state,
+    interruptedAtMs: null,
     event: a.state === "permission" ? "PermissionRequest" : "PostToolUse",
     cwd: a.cwd,
     message: a.message,
@@ -867,6 +875,9 @@ export const sessionStates = (now: number): SessionState[] => [
     updatedAtMs: now - a.agoMs,
     repo: a.repo,
     termKey: a.termKey,
+    prompt: null,
+    permissionMode: null,
+    effortLevel: null,
   })),
   { ...FINISHED, updatedAtMs: now - 25 * MIN },
 ];

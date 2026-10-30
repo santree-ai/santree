@@ -21,7 +21,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{Local, NaiveDate};
-use santree_core::domain::{AnalysisScope, EnglishAnalysis, EnglishDay, EnglishEntry, EnglishLog};
+use santree_core::domain::{
+    AnalysisScope, EnglishAnalysis, EnglishDay, EnglishEntry, EnglishLog, ExperimentalFeature,
+};
 
 use crate::db::{now_ms, Db};
 use crate::{agent, prompts, settings};
@@ -259,12 +261,16 @@ fn render_days(days: &[EnglishDay]) -> String {
     out
 }
 
-/// Whether the tutor is enabled (app scope).
+/// Whether the tutor rides along: its own switch ("Correct my English") and
+/// Settings → Experimental's, both on. Either one off is off, whatever the
+/// other says — and [`instruction`], which every launch's `--settings` file is
+/// built from, is `None`.
 pub async fn enabled(db: &Db) -> bool {
-    matches!(
-        settings::get(db, "app", ENABLED_KEY).await,
-        Ok(Some(v)) if v == "true"
-    )
+    settings::experimental(db, ExperimentalFeature::EnglishTutor).await
+        && matches!(
+            settings::get(db, "app", ENABLED_KEY).await,
+            Ok(Some(v)) if v == "true"
+        )
 }
 
 /// The instruction text to inject as a `UserPromptSubmit` hook, or `None` when the
@@ -554,6 +560,32 @@ mod tests {
         assert_eq!(again.len(), days.len());
         assert_eq!(again[0].entries[0].reason, days[0].entries[0].reason);
         assert_eq!(again[1].entries[0].original, days[1].entries[0].original);
+    }
+
+    /// Settings → Experimental gates the tutor at its source: with that switch
+    /// off, "Correct my English" on renders no instruction, so no launch's
+    /// `--settings` file carries the tutor's hook or its grant.
+    #[tokio::test]
+    async fn the_tutor_needs_its_experimental_switch_on_as_well() {
+        let dir = std::env::temp_dir().join(format!("santree-tutor-{}", uuid::Uuid::new_v4()));
+        let db = crate::db::init(dir.join("test.db")).await.unwrap();
+        settings::set(&db, "app", ENABLED_KEY, Some("true".into()))
+            .await
+            .unwrap();
+
+        assert!(!enabled(&db).await);
+        assert_eq!(instruction(&db).await.unwrap(), None);
+
+        settings::set_experimental(&db, ExperimentalFeature::EnglishTutor, true)
+            .await
+            .unwrap();
+        assert!(enabled(&db).await);
+        // Its own switch still has the last word.
+        settings::set(&db, "app", ENABLED_KEY, Some("false".into()))
+            .await
+            .unwrap();
+        assert!(!enabled(&db).await);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

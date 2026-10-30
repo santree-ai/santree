@@ -133,31 +133,46 @@ describe("liveTabFor", () => {
       pane("ai-review:acme/web#7", "Claude", "review"),
       pane("tree:AK-1", "Claude"),
     ];
-    expect(liveTabFor("triage:AK-9", "Codex", terminals)?.refId).toBe("triage:AK-9");
-    expect(liveTabFor("ai-review:acme/web#7", "Claude", terminals)?.refId).toBe(
+    expect(liveTabFor("canary", "triage:AK-9", "Codex", terminals)?.refId).toBe("triage:AK-9");
+    expect(liveTabFor("canary", "ai-review:acme/web#7", "Claude", terminals)?.refId).toBe(
       "ai-review:acme/web#7",
     );
-    expect(liveTabFor("tree:AK-1", "Claude", terminals)?.refId).toBe("tree:AK-1");
+    expect(liveTabFor("canary", "tree:AK-1", "Claude", terminals)?.refId).toBe("tree:AK-1");
   });
 
-  /** The other half of the pair. One surface can host a pane per provider, so
+  /** The rest of the row's key. One surface can host a pane per provider, so
    *  the key alone would report the Claude session as running because the Codex
-   *  pane beside it is. */
-  it("keeps two providers on one surface apart", () => {
+   *  pane beside it is. And a `term_key` is unique only within its project: the
+   *  same PR reviewed in two projects used to find whichever pane came first —
+   *  the pane a Conversation view's composer then typed into. */
+  it("keeps two providers on one surface, and two projects on one key, apart", () => {
+    const elsewhere = pane("ai-review:acme/web#7", "Claude", "review", "other-project");
     const terminals = [
+      {
+        ...elsewhere,
+        agent: { kind: "Claude" as const, repo: "other", termKey: "ai-review:acme/web#7" },
+      },
       pane("ai-review:acme/web#7", "Claude", "review"),
       pane("ai-review:acme/web#7", "Codex", "review"),
     ];
-    expect(liveTabFor("ai-review:acme/web#7", "Claude", terminals)?.agent?.kind).toBe("Claude");
-    expect(liveTabFor("ai-review:acme/web#7", "Codex", terminals)?.agent?.kind).toBe("Codex");
-    expect(liveTabFor("triage:AK-9", "Codex", terminals)).toBeUndefined();
+    const claude = liveTabFor("canary", "ai-review:acme/web#7", "Claude", terminals);
+    expect(claude?.agent).toMatchObject({ kind: "Claude", repo: "canary" });
+    expect(liveTabFor("other", "ai-review:acme/web#7", "Claude", terminals)?.key).toBe(
+      "other-project",
+    );
+    expect(liveTabFor("canary", "ai-review:acme/web#7", "Codex", terminals)?.agent?.kind).toBe(
+      "Codex",
+    );
+    expect(liveTabFor("other", "ai-review:acme/web#7", "Codex", terminals)).toBeUndefined();
+    expect(liveTabFor("canary", "triage:AK-9", "Codex", terminals)).toBeUndefined();
   });
 
   it("matches nothing for a session santree cannot attribute", () => {
     const terminals = [pane("triage:AK-9", "Codex", "triage")];
-    expect(liveTabFor(null, "Codex", terminals)).toBeUndefined();
-    expect(liveTabFor("triage:AK-9", null, terminals)).toBeUndefined();
-    expect(liveTabFor("triage:AK-9", "Claude", terminals)).toBeUndefined();
+    expect(liveTabFor("canary", null, "Codex", terminals)).toBeUndefined();
+    expect(liveTabFor(null, "triage:AK-9", "Codex", terminals)).toBeUndefined();
+    expect(liveTabFor("canary", "triage:AK-9", null, terminals)).toBeUndefined();
+    expect(liveTabFor("canary", "triage:AK-9", "Claude", terminals)).toBeUndefined();
   });
 });
 

@@ -96,6 +96,11 @@ export interface ProviderCapabilities {
    *  `null`            — the provider has no hook mechanism; its sessions are
    *                      only as visible as the PTY it runs in. */
   hookInjection: "settings-file" | "config-flags" | null;
+  /** Whether this provider's agent tabs can switch to the Conversation view
+   *  (`features/conversation`), which rebuilds the session from the record the
+   *  CLI writes. Claude's transcript only, for now: Codex comes later through a
+   *  path of its own. */
+  conversationView: boolean;
 }
 
 interface AgentProviderContract {
@@ -107,13 +112,20 @@ interface AgentProviderContract {
   launch: AgentLaunchSpec | null;
 }
 
-export function shellQuote(value: string): string {
-  const sanitized = Array.from(value.replace(/\n/g, " "))
+/** `value` without the characters a terminal acts on instead of printing — C0,
+ *  DEL and C1 — except those in `keep`. */
+export function withoutControls(value: string, keep = ""): string {
+  return Array.from(value)
     .filter((character) => {
+      if (keep.includes(character)) return true;
       const code = character.codePointAt(0) ?? 0;
       return !(code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f));
     })
     .join("");
+}
+
+export function shellQuote(value: string): string {
+  const sanitized = withoutControls(value.replace(/\n/g, " "));
   return `'${sanitized.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -137,6 +149,7 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       terminalSettings: "claude",
       settingsPanel: "cli",
       hookInjection: "settings-file",
+      conversationView: true,
     },
     launch: {
       common: (_session, config) => [
@@ -173,6 +186,7 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       terminalSettings: null,
       settingsPanel: "codex",
       hookInjection: "config-flags",
+      conversationView: false,
     },
     launch: {
       // The plain CLI, not an App Server attachment. `resume --remote <socket>`
@@ -233,6 +247,7 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       terminalSettings: null,
       settingsPanel: "unsupported",
       hookInjection: null,
+      conversationView: false,
     },
     launch: null,
   },
@@ -248,6 +263,7 @@ const providers: Record<AgentKind, AgentProviderContract> = {
       terminalSettings: null,
       settingsPanel: "unsupported",
       hookInjection: null,
+      conversationView: false,
     },
     launch: null,
   },

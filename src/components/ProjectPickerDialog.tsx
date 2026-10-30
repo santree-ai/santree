@@ -24,7 +24,7 @@ import { type KeyboardEvent, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { agentOff } from "../lib/daedalusLink";
-import { useDaedalusStatus, useRepos } from "../lib/queries";
+import { useDaedalusStatus, useOfferedRepos } from "../lib/queries";
 import { shortRepoName } from "../lib/repoName";
 import { accentActiveStyle } from "../theme/colors";
 import { RepoAvatar } from "./chrome/RepoAvatar";
@@ -54,7 +54,7 @@ export function ProjectPickerDialog({
   /** The project the ticket runs on today, marked and focused first. */
   current: string | null;
   /** Offer only these registered projects (a ticket several carry offers just
-   *  those). Absent, the whole registry. */
+   *  those). Absent, every project santree offers. */
   repos?: string[];
   /** The "make this the default" switch's words — whose default it becomes,
    *  and what that means. */
@@ -62,7 +62,8 @@ export function ProjectPickerDialog({
   onPick: (repo: string, asDefault: boolean) => void;
   onCancel: () => void;
 }) {
-  const { data: registered = [] } = useRepos();
+  // Never a project Settings → Experimental hides: nothing can start there.
+  const { data: registered = [] } = useOfferedRepos();
   const repos = only ? registered.filter((r) => only.includes(r.name)) : registered;
   // Every asker starts an agent in the project it gets (on a worktree, or on
   // its checkout), which a Daedalus project can't while the link is down:

@@ -16,7 +16,9 @@
  *     its tab. We can't fire `onExited` the moment the tab is missing, because
  *     on the very first render the tab hasn't registered yet. So we wait until
  *     we've *seen* our key present in `tabs` (latch true), and only then treat
- *     its disappearance as a real exit.
+ *     its disappearance as a real exit. The latch is the session's: showing or
+ *     hiding the pane (`attach`) keeps it, so a host can flip that without
+ *     remounting.
  *
  * The caller owns what happens on exit (close the ephemeral investigate tab,
  * close the login panel, …) and may force an early teardown via `close()`.
@@ -62,6 +64,8 @@ export function useEmbeddedTerminal(opts: {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const keyRef = useRef<string | null>(null);
   const seenRef = useRef(false);
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
 
   // Latest exit callback without forcing the embed effect to re-run.
   const onExitedRef = useRef(onExited);
@@ -71,6 +75,9 @@ export function useEmbeddedTerminal(opts: {
   const pane = useSplitPane();
   const activateRef = useRef(pane?.activate);
   activateRef.current = pane?.activate;
+  // Whether the user is working where this host is: the keyboard goes only to a
+  // claim made there (`TerminalTabs.embed`).
+  const focused = pane?.focused ?? true;
   const onResumeRef = useRef(onResume);
   onResumeRef.current = onResume;
   const resumable = onResume !== undefined;
@@ -84,16 +91,33 @@ export function useEmbeddedTerminal(opts: {
   // only a real change of provider/repo/surface should re-run the embed.
   const agentKey = agent && `${agent.kind} ${agent.repo} ${agent.termKey}`;
 
+  // The session. The latch starts over only for another session: were it
+  // lowered on a re-run for the same one, nothing would raise it again —
+  // `tabs` hasn't changed — and the next exit would go unseen. A session
+  // already in the registry has been seen; one `ensure` just opened is, once it
+  // lands.
   // biome-ignore lint/correctness/useExhaustiveDependencies: argsKey/agentKey stand in for args/agent.
   useLayoutEffect(() => {
     const key = ensure({ title, cwd, command, args, seed, source, refId, agent });
+    if (key === keyRef.current) return;
     keyRef.current = key;
-    seenRef.current = false;
+    seenRef.current = tabsRef.current.some((t) => t.key === key);
+  }, [title, cwd, command, seed, source, refId, argsKey, agentKey, ensure]);
+
+  // The slot, claimed while the pane is shown. Showing or hiding the pane
+  // (`attach`), or its group gaining or losing focus, claims again — and only
+  // that: an `ensure` there would reopen a session that has since exited. It
+  // re-runs with the session effect above, which it follows, for the key that
+  // one settled.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the spec fields re-key the claim to the session the effect above settled.
+  useLayoutEffect(() => {
+    const key = keyRef.current;
     const host = hostRef.current;
-    if (!attach || !host) return;
+    if (!attach || !host || !key) return;
     return attachEmbed({
       host,
       key,
+      focused,
       onActivate: () => activateRef.current?.(),
       onResume: resumable ? () => onResumeRef.current?.() : undefined,
     });
@@ -107,8 +131,8 @@ export function useEmbeddedTerminal(opts: {
     argsKey,
     agentKey,
     attach,
+    focused,
     resumable,
-    ensure,
     attachEmbed,
   ]);
 

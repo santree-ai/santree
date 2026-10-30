@@ -279,11 +279,12 @@ describe("useTerminalTabs", () => {
    *  explicitly — and said while the handle is still registered. Getting this
    *  wrong leaks a shell on every closed tab. */
   describe("closing a tab ends its session", () => {
-    const handle = () => {
+    const handle = (id = 1) => {
       const calls = { ended: 0 };
       return {
         calls,
         pane: {
+          id,
           end: () => {
             calls.ended += 1;
           },
@@ -322,11 +323,14 @@ describe("useTerminalTabs", () => {
     });
 
     /** A remounting pane registers its next handle before the previous one's
-     *  cleanup runs, so an unregister must only drop its own. */
+     *  cleanup runs, so an unregister must only drop its own — and the pane id
+     *  the tab answers with is the newest pane's: the composer's gate matches
+     *  the process table's answer by it, and an earlier pane's answer (its
+     *  process, its start) must not pass for this one's. */
     it("an unregister only drops its own handle", () => {
       const { result } = renderHook(() => useTerminalTabs());
-      const first = handle();
-      const second = handle();
+      const first = handle(7);
+      const second = handle(8);
       let key = "";
       let releaseFirst = () => {};
       act(() => {
@@ -338,6 +342,7 @@ describe("useTerminalTabs", () => {
       });
 
       act(() => releaseFirst());
+      expect(result.current.paneIdOf(key)).toBe(8);
       act(() => result.current.close(key));
 
       expect(second.calls.ended).toBe(1);

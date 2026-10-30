@@ -42,11 +42,12 @@ import {
   type RepoReach,
   useAddWorktreeTab,
   useBaseWorktree,
+  useExperimental,
+  useOfferedRepos,
   usePendingWorktreeMoves,
   useRemoveWorktreeTab,
   useRenameWorktreeTab,
   useRepoReach,
-  useRepos,
   useTasks,
   useTriageDetail,
   useWorktreePrs,
@@ -249,9 +250,24 @@ export function prDiffModeFor(opts: { inPr: boolean; unpushed: number }): PrDiff
  *  panel's PR and Issue panes expanded into the main area, remembered per
  *  worktree but never a row: they need no process, and they only exist while the
  *  worktree has the thing they show. "file"/"setup"/"checkLog" are the transient
- *  views that appear with the thing they show. All of them close, and closing
- *  the last one leaves the workspace showing nothing. */
-export type MainTab = "file" | "setup" | "checkLog" | "prView" | "issueView" | `tab:${string}`;
+ *  views that appear with the thing they show, and so is "conversation", a past
+ *  session opened read-only from Session history. All of them close, and
+ *  closing the last one leaves the workspace showing nothing. */
+export type MainTab =
+  | "file"
+  | "setup"
+  | "checkLog"
+  | "prView"
+  | "issueView"
+  | "conversation"
+  | `tab:${string}`;
+
+/** A past session of the worktree's, open read-only in the main area. */
+export interface OpenConversation {
+  sessionId: string;
+  /** What the tab is called: the session's title, as Session history lists it. */
+  title: string;
+}
 
 /** A CI check whose raw job log is open in the **main** area.
  *
@@ -329,6 +345,7 @@ export function openMainTabs(opts: {
   hasFile: boolean;
   hasSetup: boolean;
   hasCheckLog: boolean;
+  hasConversation?: boolean;
 }): MainTab[] {
   const tabs: MainTab[] = opts.tabIds.map(extraTab);
   if (opts.hasPrView) tabs.push("prView");
@@ -336,6 +353,7 @@ export function openMainTabs(opts: {
   if (opts.hasFile) tabs.push("file");
   if (opts.hasSetup) tabs.push("setup");
   if (opts.hasCheckLog) tabs.push("checkLog");
+  if (opts.hasConversation) tabs.push("conversation");
   return tabs;
 }
 
@@ -467,6 +485,8 @@ interface TreesModel {
   split: SplitController<MainTab>;
   /** The check whose raw job log is open in the main area, or null. */
   openCheckLog: OpenCheckLog | null;
+  /** The past session open read-only in the main area, or null. */
+  openConversation: OpenConversation | null;
   /** Whether the worktree's pull request, and its ticket, are open as main-area
    *  tabs ("GitHub PR", "Linear"). Already gated: false when there is no PR or no
    *  ticket to show, whatever was remembered. */
@@ -496,6 +516,10 @@ interface TreesModel {
   showCheckLog: (log: OpenCheckLog) => void;
   /** Close the check-log tab (the selection falls to whatever is still open). */
   closeCheckLog: () => void;
+  /** Open one of the worktree's past sessions, read-only, in a tab of its own
+   *  (Session history's "Open conversation"), replacing whichever was open. */
+  showConversation: (conversation: OpenConversation) => void;
+  closeConversation: () => void;
   /** Open the PR / the ticket as a main-area tab and show it — the right panel's
    *  "Open in a tab". Close drops the tab; the selection falls to whatever is
    *  still open. Remembered per worktree, across reloads. */
@@ -582,10 +606,12 @@ const TreesContext = createContext<TreesModel | null>(null);
 export function TreesProvider({ children }: { children: ReactNode }) {
   const { project, tree } = useSearch({ from: "/trees" });
   const navigate = useNavigate();
-  const { data: repos } = useRepos();
+  const { data: repos } = useOfferedRepos();
   // The route names the project; the registry says whether it is one. An unknown
   // `?project=` is not a scope — it must land on the welcome surface rather than
   // fire every `enabled: !!repo` query at a repo the backend cannot answer for.
+  // So does a project Settings → Experimental hides (a Daedalus one, with that
+  // switch off), which a Back past the switch can still name.
   // Until the registry has loaded there is nothing to check it against, so the
   // url is trusted for those frames (the same "still loading, don't clear a
   // valid repo" rule the old active-repo validation followed).
@@ -725,6 +751,9 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // for a PR that has since moved on. With no log in the slot the "checkLog" tab
   // is simply not open, exactly like a "setup" tab whose run has ended.
   const [checkLogByWt, setCheckLogByWt] = useState<Record<string, OpenCheckLog>>({});
+  // Transient like the log: a reading opened from Session history, gone with the
+  // app rather than reopened on a session that may have been pruned since.
+  const [conversationByWt, setConversationByWt] = useState<Record<string, OpenConversation>>({});
   // Per-worktree split layout (which tab is in which group, and which is showing
   // in each) + open file, so switching worktrees restores whatever each one was
   // last showing instead of snapping every one back to its first tab.
@@ -998,6 +1027,10 @@ export function TreesProvider({ children }: { children: ReactNode }) {
   // The Setup tab only exists while THIS worktree's script is running.
   const setupFor = settingUpActive ? activeId : null;
   const openCheckLog = checkLogByWt[activeId] ?? null;
+  // Kept while Settings → Experimental → Conversation view is off, but not open:
+  // the view doesn't exist then.
+  const conversationOn = useExperimental("Conversation");
+  const openConversation = conversationOn ? (conversationByWt[activeId] ?? null) : null;
   const activePr = primaryPr(prsByWorktree.get(activeId) ?? []) ?? null;
   const hasActivePr = activePr !== null;
   const paneInputs = useMemo<FileTabInputs>(
@@ -1017,6 +1050,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     hasFile: selectedFile !== null,
     hasSetup: setupFor !== null,
     hasCheckLog: openCheckLog !== null,
+    hasConversation: openConversation !== null,
   });
   // Only once every input to `openTabs` has answered: a tab missing because its
   // read is still in flight is not a closed tab, and the layout must not forget
@@ -1053,6 +1087,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
       activeTab,
       split,
       openCheckLog,
+      openConversation,
       prViewOpen,
       issueViewOpen,
       splitOpen: !!splitByWt[activeId],
@@ -1090,6 +1125,11 @@ export function TreesProvider({ children }: { children: ReactNode }) {
         setTabFor(activeId, "checkLog");
       },
       closeCheckLog: () => setCheckLogByWt((current) => omit(current, activeId)),
+      showConversation: (conversation) => {
+        setConversationByWt((current) => ({ ...current, [activeId]: conversation }));
+        setTabFor(activeId, "conversation");
+      },
+      closeConversation: () => setConversationByWt((current) => omit(current, activeId)),
       openPrView: () => {
         setPrViewByWt((current) => ({ ...current, [activeId]: true }));
         setTabFor(activeId, "prView");
@@ -1189,6 +1229,7 @@ export function TreesProvider({ children }: { children: ReactNode }) {
     selectedFile,
     setupFor,
     openCheckLog,
+    openConversation,
     activePr,
     prViewOpen,
     issueViewOpen,

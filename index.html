@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- A link in model-written text must not resolve its host before a click:
+         a subdomain can carry data out through DNS alone. -->
+    <meta http-equiv="x-dns-prefetch-control" content="off" />
     <title>santree</title>
   </head>
   <body>

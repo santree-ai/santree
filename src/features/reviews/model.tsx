@@ -31,10 +31,10 @@ import {
 } from "react";
 
 import type { ReviewInbox, ReviewPr, TicketRef } from "../../bindings";
-import { usePrTickets, useRepos, useReviews } from "../../lib/queries";
+import { useOfferedRepos, usePrTickets, useReviews } from "../../lib/queries";
 import { targetOwnsKey } from "../../lib/useKeyboardShortcuts";
 import { useAppUi } from "../../state/AppContext";
-import { inboxOfProject } from "./grouping";
+import { inboxOfProject, inboxWhere } from "./grouping";
 import { ticketIdFor } from "./ticket";
 
 /** Which file (and optionally line) the diff should scroll to and expand. */
@@ -91,7 +91,7 @@ const ReviewsContext = createContext<ReviewsModel | null>(null);
 
 export function ReviewsProvider({ children }: { children: ReactNode }) {
   const { reviewFocus, consumeReviewFocus } = useAppUi();
-  const { data: repos } = useRepos();
+  const { data: repos, hidden } = useOfferedRepos();
   // `strict: false` because this provider is also rendered in tests, where there
   // is no matched route to read a typed search off.
   const {
@@ -104,7 +104,10 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
     queue?: true;
   };
   const navigate = useNavigate();
-  const scope = project ?? null;
+  // A project Settings → Experimental hides (a Daedalus one, with that switch
+  // off) is no scope, and none of its pull requests opens: a Back past the
+  // switch lands on nothing selected, not in a checkout santree isn't reaching.
+  const scope = project && !hidden(project) ? project : null;
   // The scoped project is a registry name, so it is a valid `repo` for every
   // repo-scoped read below. Unscoped — the inbox spanning every project, which
   // is what a PR belonging to none of them needs — the reads still have to key
@@ -114,10 +117,11 @@ export function ReviewsProvider({ children }: { children: ReactNode }) {
   // next.
   const repo = scope ?? repos?.[0]?.name ?? "";
   const { data: allProjects, isLoading } = useReviews();
-  const inbox = useMemo(
-    () => (scope && allProjects ? inboxOfProject(allProjects, scope) : allProjects),
-    [allProjects, scope],
-  );
+  const inbox = useMemo(() => {
+    if (!allProjects) return allProjects;
+    const offered = inboxWhere(allProjects, (pr) => !hidden(pr.project));
+    return scope ? inboxOfProject(offered, scope) : offered;
+  }, [allProjects, scope, hidden]);
   const [infoCollapsed, setInfoCollapsed] = useState(false);
   const [infoWidth, setInfoWidth] = useState(400);
 

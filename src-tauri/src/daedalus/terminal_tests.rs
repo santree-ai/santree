@@ -405,7 +405,15 @@ async fn nothing_runs_locally_while_the_link_is_down() {
         .unwrap();
     assert!(link.terminals().holds(id));
     assert_eq!(screen.links(), [PaneLink::Reconnecting]);
-    type_line(&link, id, "echo lost-$((1+1))");
+    // Typing is refused, not taken and dropped: a caller told its keys
+    // arrived would count them as typed.
+    assert!(link
+        .terminals()
+        .write(
+            id,
+            crate::terminal::Keystrokes::typed("echo lost-$((1+1))\n")
+        )
+        .is_err());
     assert!(manager.sessions().is_empty(), "no shell opened on this Mac");
     assert!(daemon.pty().sessions().is_empty(), "nor on the box");
 

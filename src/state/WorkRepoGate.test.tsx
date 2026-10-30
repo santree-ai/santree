@@ -11,18 +11,19 @@ const state = vi.hoisted(() => ({
   repo: null as string | null,
   setRepo: vi.fn(),
   link: { kind: "Connected" } as { kind: string; reason?: string },
+  repos: [
+    { name: "acme/app", path: "/src/app" },
+    { name: "acme/infra", path: "/src/infra" },
+    { name: "acme/web", path: "/src/web" },
+    { name: "acme/box", path: "/srv/projects/box", location: "Daedalus" },
+  ],
 }));
 vi.mock("../lib/queries", () => ({
   // RepoAvatar asks for a Daedalus project's icon; none here.
   useDaedalusIcon: () => ({ data: null, status: "success" }),
-  useRepos: () => ({
-    data: [
-      { name: "acme/app", path: "/src/app" },
-      { name: "acme/infra", path: "/src/infra" },
-      { name: "acme/web", path: "/src/web" },
-      { name: "acme/box", path: "/srv/projects/box", location: "Daedalus" },
-    ],
-  }),
+  useRepos: () => ({ data: state.repos }),
+  // Settings → Experimental → Daedalus on: every project is offered.
+  useOfferedRepos: () => ({ data: state.repos, isFetched: true, hidden: () => false }),
   useDaedalusStatus: () => ({ data: state.link }),
   useWorkDefaultRepo: () => ({ repo: state.repo, loading: false, setRepo: state.setRepo }),
 }));

@@ -49,7 +49,7 @@ function countLive(
   const announced = new Set<string>();
   let n = 0;
   for (const s of sessions) {
-    const tab = liveTabFor(s.termKey, s.agentKind, terminals);
+    const tab = liveTabFor(s.repo, s.termKey, s.agentKind, terminals);
     if (!tab) continue;
     announced.add(tab.key);
     if (bucketOf(s.state, true) !== "done") n++;

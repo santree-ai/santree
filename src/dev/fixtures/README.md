@@ -38,6 +38,12 @@ the keychain-backed statuses. The chrome around the invented work is the app's
 own. The one seam in app code is `features/terminal/fixtureSeam.ts`, which lets
 the installer open a pane per fake agent so the sidebar counts them as live.
 
+Settings → Experimental is the exception among the settings: every switch reads
+on (`SETTING_OVERRIDES`), so a capture shows Daedalus and the English tutor in
+Settings and the Conversation view's switch on a Claude tab whatever this
+machine has turned on, and `set_experimental` is answered without touching the
+real row.
+
 ## The live demo world (`demo/`)
 
 A second, stateful world for recording the product demo: Parcelwise, a
@@ -65,6 +71,10 @@ VITE_SANTREE_FIXTURES=demo pnpm dev:alt
 - **Daedalus is real.** Commands for a demo repo, PR or checkout are answered
   here; everything else (Daedalus projects and terminals, settings, the agent
   catalog) reaches the real backend. Local repos are hidden; Daedalus ones show.
+  Every Settings → Experimental switch reads on, and since the backend links
+  to Daedalus only while its switch is on, the boot turns that one on for real
+  (`install.ts`): the one real setting the demo writes, which dev:alt keeps.
+  The page's switches write nothing while the demo runs.
 - **Pace:** setup ≈3s, hero agent ≈23s, AI commit message ≈0.6s, AI PR
   description ≈0.85s (neither follows the speed), PR comments and CI ≈38s, AI review ≈13s, queue run
   ≈21s, green CI after the push ≈31s.

@@ -913,6 +913,16 @@ export function TelescopeIcon(props: IconProps) {
   );
 }
 
+/** A conical flask — Settings → Experimental, the features still being built. */
+export function FlaskIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M10 2v6.3L4.5 18.4A2.4 2.4 0 0 0 6.6 22h10.8a2.4 2.4 0 0 0 2.1-3.6L14 8.3V2" />
+      <path d="M8.5 2h7M7 15h10" />
+    </Stroke>
+  );
+}
+
 /** Light theme — sun. */
 export function SunIcon(props: IconProps) {
   return (
@@ -1127,6 +1137,15 @@ export function StopIcon({ size = 13, className }: IconProps) {
   return (
     <Stroke size={size} className={className}>
       <rect x="6" y="6" width="12" height="12" rx="1.5" />
+    </Stroke>
+  );
+}
+
+/** An arrow pointing up — send what you wrote. */
+export function ArrowUpIcon({ size = 13, className }: IconProps) {
+  return (
+    <Stroke size={size} className={className}>
+      <path d="M12 19V5M5 12l7-7 7 7" />
     </Stroke>
   );
 }

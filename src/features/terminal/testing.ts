@@ -13,15 +13,18 @@
 import { vi } from "vitest";
 
 import type { AdoptedSession, ServerStatus } from "../../bindings";
-import type { SessionId, TerminalRenderer } from "./types";
+import type { SessionId, TerminalKey, TerminalRenderer } from "./types";
 
 /** A renderer that draws nothing. Every one built is in {@link FakeXtermRenderer.built},
  *  in mount order; `input` is set once its pane's session is open, which is the
  *  signal that the open/attach round-trip finished. */
 export class FakeXtermRenderer implements TerminalRenderer {
   static built: FakeXtermRenderer[] = [];
-  input?: (data: string) => void;
+  input?: (data: string) => Promise<boolean>;
   untrusted: boolean;
+  /** How many times its pane gave it the keyboard, and took it back. */
+  focuses = 0;
+  blurs = 0;
   constructor(opts: { untrusted?: boolean } = {}) {
     this.untrusted = !!opts.untrusted;
     FakeXtermRenderer.built.push(this);
@@ -29,15 +32,34 @@ export class FakeXtermRenderer implements TerminalRenderer {
   mount() {}
   write() {}
   reset() {}
-  onInput(cb: (data: string) => void) {
+  onInput(cb: (data: string) => Promise<boolean>) {
     this.input = cb;
+  }
+  /** As xterm does with bracketed paste off: the text, through the input path. */
+  paste(text: string) {
+    return this.input?.(text) ?? Promise.resolve(false);
+  }
+  press(key: TerminalKey) {
+    const named: Record<string, string> = {
+      enter: "\r",
+      escape: "\x1b",
+      clear: "\x0b".repeat(16) + "\x15".repeat(16),
+      tab: "\t",
+      up: "\x1b[A",
+    };
+    return this.input?.(named[key] ?? key) ?? Promise.resolve(false);
   }
   onTitle() {}
   resize() {}
   fit() {
     return { cols: 80, rows: 24 };
   }
-  focus() {}
+  focus() {
+    this.focuses += 1;
+  }
+  blur() {
+    this.blurs += 1;
+  }
   dispose() {}
 }
 
@@ -52,7 +74,7 @@ export function fakeTauriBackend(
     open: vi.fn(async () => openedId),
     attach: vi.fn(async () => ({ epoch: "e", seq: 0, mode: "tail" as const })),
     detach: vi.fn(),
-    write: vi.fn(),
+    write: vi.fn(async () => true),
     seed: vi.fn(),
     resize: vi.fn(),
     close: vi.fn(),

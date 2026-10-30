@@ -15,6 +15,7 @@
  */
 import {
   keepPreviousData,
+  notifyManager,
   type QueryClient,
   type QueryKey,
   type UseQueryOptions,
@@ -35,10 +36,12 @@ import type {
   AnalysisScope,
   ChangedFile,
   ClaudeGlobalCapture,
+  ConversationTarget,
   DaedalusLink,
   DaedalusMachine,
   DaedalusSettingKey,
   DaedalusWorkspaceList,
+  ExperimentalFeature,
   KeepAwakeStatus,
   MoveChanges,
   NewInlineComment,
@@ -76,6 +79,7 @@ import type {
 } from "../bindings";
 import { commands, events } from "../bindings";
 import { type ToastOptions, toast } from "../state/toast";
+import { applyRead, type ConversationJournal } from "./conversationJournal";
 import { agentOff, gitOff, runOff } from "./daedalusLink";
 import { splitRepoSlug } from "./repo";
 import {
@@ -303,6 +307,8 @@ export const queryKeys = {
   claudeGlobalCapture: ["claude-global-capture"] as const,
   resourceUsage: ["resource-usage"] as const,
   sessionUsageLive: ["session-usage-live"] as const,
+  /** The reply a session is drawing right now (MessageDisplay). */
+  sessionLiveText: (sessionId: string) => ["session-live-text", sessionId] as const,
   /** Prefix for every repo's task graph — invalidate this (not `tasks(repo)`)
    *  when a change (e.g. a fresh Linear connection) should refetch all repos'
    *  graphs at once. */
@@ -347,6 +353,19 @@ export const queryKeys = {
   startedInvestigations: (repo: string) => ["started-investigations", repo] as const,
   sessionProviders: (repo: string, termKey: string) =>
     ["session-providers", repo, termKey] as const,
+  /** One conversation as the Conversation view holds it — a tab's live session
+   *  or a listed one, and within it the main thread or one subagent. */
+  conversation: (target: ConversationTarget, agentId: string | null) =>
+    target.kind === "tab"
+      ? (["conversation", "tab", target.repo, target.termKey, agentId] as const)
+      : ([
+          "conversation",
+          "session",
+          target.repo,
+          target.issueId,
+          target.sessionId,
+          agentId,
+        ] as const),
   worktreeTabs: (repo: string) => ["worktree-tabs", repo] as const,
   browserSupported: ["browser-supported"] as const,
   cookieSources: ["cookie-sources"] as const,
@@ -806,6 +825,16 @@ export const CLAUDE_STATUS_LINE_KEY = "claude_status_line";
  *  `opts.chrome` at every Claude launch site. */
 export const CLAUDE_START_WITH_CHROME_KEY = "claude_start_with_chrome";
 
+/** Which face a Claude tab opens on: `"terminal"` or `"conversation"`. App-scoped,
+ *  defaults to terminal (unset, or anything but `"conversation"`). A frontend-only
+ *  display preference: it changes which face a tab draws, never the session, and
+ *  applies at once to every Claude tab without a choice of its own, tabs opened
+ *  before the change included. A tab switched by hand keeps its choice (see
+ *  `useDefaultAgentTabView` in `features/conversation/viewMode`). Set on
+ *  Settings → Experimental, under the Conversation view's switch, and honoured
+ *  only while that is on. */
+export const CLAUDE_TAB_FACE_KEY = "claude_tab_face";
+
 /** Let model-generated commands in a Codex work / address-review session reach the
  *  network. App-scoped, defaults to OFF (`data === "true"` = on). Read by Rust
  *  (`codex_config.rs` / `provider.rs`), which turns it into
@@ -820,13 +849,27 @@ export const CODEX_NETWORK_ACCESS_KEY = "codex_sandbox_network_access";
 export const SYNC_VIEWED_KEY = "reviews_sync_viewed";
 
 /** Inject the English-tutor correction hook into every Claude session santree
- *  launches. App-scoped, defaults to OFF (`data === "true"` = on).
+ *  launches. App-scoped, defaults to OFF (`data === "true"` = on), and only
+ *  honoured while Settings → Experimental → English tutor is on too (the backend
+ *  reads both, `english_tutor::enabled`).
  *
  *  Unlike {@link CLAUDE_STATUS_LINE_KEY} this is *not* a runtime display toggle:
  *  it's baked into the `--settings` file the session launches with, so flipping it
  *  only affects sessions started afterwards — and `useSetSetting` invalidates the
  *  three cached-forever `--settings` paths when it changes. */
 export const ENGLISH_TUTOR_KEY = "english_tutor";
+
+/** Settings → Experimental: the app-scoped row each switch is kept in. Every one
+ *  ships off: no row, or anything but `"true"`. Read by Rust
+ *  (`settings::experimental_key`), so the two tables have to agree. Written only
+ *  through {@link useSetExperimental}: the backend refuses these keys on the
+ *  generic setting write, because the Daedalus switch starts and stops the link
+ *  as it is written. */
+export const EXPERIMENTAL_KEYS: Record<ExperimentalFeature, string> = {
+  Daedalus: "experimental_daedalus",
+  EnglishTutor: "experimental_english_tutor",
+  Conversation: "experimental_conversation",
+};
 
 /**
  * Trees (worktree) preference keys (string-valued settings):
@@ -1080,6 +1123,22 @@ export function patchSettingCache(
   };
 }
 
+/** The `--settings` files a Claude launch layers on, which are otherwise
+ *  cached forever. What some switches bake into them — the English tutor's
+ *  hook, and the Conversation view's live reply (MessageDisplay, registered
+ *  only while Settings → Experimental → Conversation view is on) — is read
+ *  when a file is built, so moving one of those switches refetches them, and
+ *  the next launch's file is rewritten from where they stand. Sessions already
+ *  running keep what they launched with. */
+const LAUNCH_SETTINGS_FILES: readonly QueryKey[] = [
+  queryKeys.claudeHookSettings,
+  queryKeys.claudeHookSettingsNoGit,
+  // A review tab's settings file is written by the same builder, so its
+  // resolved launch is cached forever too — invalidate the whole prefix (the key
+  // is per tab) so the next resume rewrites the file.
+  queryKeys.worktreeTabLaunchPrefix,
+];
+
 /** Write (value) or clear (null) a setting; refreshes both reads and resolves. */
 export const useSetSetting = () =>
   useOptimisticMutation({
@@ -1093,19 +1152,10 @@ export const useSetSetting = () =>
     invalidate: (a) => [
       queryKeys.setting(a.scope, a.key),
       queryKeys.resolvedSettingPrefix,
-      // The English tutor is the one setting baked into the `--settings` files,
-      // which are otherwise cached forever. Refetch them here rather than at the
-      // toggle's call site, so any future writer of this key gets it too.
-      ...(a.key === ENGLISH_TUTOR_KEY
-        ? [
-            queryKeys.claudeHookSettings,
-            queryKeys.claudeHookSettingsNoGit,
-            // A review tab's settings file is written by the same builder, so its
-            // resolved launch is cached forever too — invalidate the whole prefix
-            // (the key is per tab) so the next resume rewrites the file.
-            queryKeys.worktreeTabLaunchPrefix,
-          ]
-        : []),
+      // The English tutor is the one setting baked into the `--settings` files.
+      // Refetch them here rather than at the toggle's call site, so any future
+      // writer of this key gets it too.
+      ...(a.key === ENGLISH_TUTOR_KEY ? LAUNCH_SETTINGS_FILES : []),
       // Read-only mode is folded into what the backend reports as writable, so
       // the status has to be re-read for the write controls to gray out at once
       // — the whole point of the switch is that it applies without reconnecting.
@@ -1119,6 +1169,58 @@ export const useSetSetting = () =>
       ...(a.key === JIRA_TRIAGE_JQL_KEY ? [queryKeys.triageTicketsPrefix] : []),
       // A TickTick repo's tickets are its lists' tasks.
       ...(a.key === TICKTICK_LISTS_KEY ? [queryKeys.tasksPrefix] : []),
+    ],
+  });
+
+/** Whether Settings → Experimental's `feature` is on: the one gate every
+ *  surface of an experimental feature reads. Off while the row loads too, so a
+ *  feature never shows on a guess. */
+export const useExperimental = (feature: ExperimentalFeature): boolean =>
+  isOptedIn(useSetting("app", EXPERIMENTAL_KEYS[feature]).data);
+
+/** Turn a Settings → Experimental switch on or off. Every surface that reads
+ *  {@link useExperimental} follows at once (the row is patched, and rolled back
+ *  if the write fails). The backend applies the Daedalus switch as it writes it
+ *  (the link starts, or ends), so the link's reads are reconciled on settle;
+ *  the tutor's refetches the `--settings` files it is baked into. */
+export const useSetExperimental = () =>
+  useOptimisticMutation({
+    mutationKey: ["set-experimental"],
+    mutationFn: ({ feature, on }: { feature: ExperimentalFeature; on: boolean }) =>
+      unwrap(commands.setExperimental(feature, on)),
+    optimistic: (qc, { feature, on }) => {
+      const undoSetting = patchSettingCache(qc, {
+        scope: "app",
+        key: EXPERIMENTAL_KEYS[feature],
+        value: on ? "true" : "false",
+      });
+      if (feature !== "Daedalus") return undoSetting;
+      // The link reads as what the backend is about to do, so a section that
+      // appears with the switch doesn't first say "off" for a round trip.
+      const prev = qc.getQueryData<DaedalusLink>(queryKeys.daedalusStatus);
+      const next: DaedalusLink = on ? { kind: "Connecting" } : { kind: "Off" };
+      qc.setQueryData<DaedalusLink>(queryKeys.daedalusStatus, next);
+      return () => {
+        if (prev === undefined) {
+          qc.removeQueries({ queryKey: queryKeys.daedalusStatus, exact: true });
+        } else {
+          qc.setQueryData(queryKeys.daedalusStatus, prev);
+        }
+        undoSetting();
+      };
+    },
+    invalidate: ({ feature }) => [
+      queryKeys.setting("app", EXPERIMENTAL_KEYS[feature]),
+      ...(feature === "EnglishTutor" || feature === "Conversation" ? LAUNCH_SETTINGS_FILES : []),
+      ...(feature === "Daedalus"
+        ? [
+            queryKeys.daedalusStatus,
+            queryKeys.daedalusHealth,
+            queryKeys.daedalusMachine,
+            queryKeys.daedalusWorkspaces,
+            queryKeys.daedalusAgentClis,
+          ]
+        : []),
     ],
   });
 
@@ -1315,6 +1417,39 @@ export const useRepos = () =>
   useUnwrappedQuery(queryKeys.repos, () => commands.listRepos(), {
     staleTime: SETTING_STALE_TIME,
   });
+
+export interface OfferedRepos {
+  /** The offered projects, in registration order; `undefined` until both the
+   *  registry and the switch have answered, so "still loading" never reads as
+   *  "none". */
+  data: Repo[] | undefined;
+  isFetched: boolean;
+  /** Whether `name` is a registered project a switch hides right now. Off
+   *  until the switch has answered, as every experimental feature is. */
+  hidden: (name: string | null | undefined) => boolean;
+}
+
+/**
+ * The registered projects santree offers: every one, less the Daedalus ones
+ * while Settings → Experimental → Daedalus is off. What every list, picker and
+ * fallback that opens a project, or starts something in one, reads.
+ *
+ * Where a project lives is still the whole registry's answer ({@link useRepos}):
+ * a pane's trust and the hooks a launch carries never depend on a switch.
+ */
+export function useOfferedRepos(): OfferedRepos {
+  const { data: repos, isFetched: reposKnown } = useRepos();
+  const { data: daedalus, isFetched: switchKnown } = useSetting("app", EXPERIMENTAL_KEYS.Daedalus);
+  const on = isOptedIn(daedalus);
+  return useMemo(() => {
+    const shown = (r: Repo) => on || r.location !== "Daedalus";
+    return {
+      data: repos === undefined || !switchKnown ? undefined : repos.filter(shown),
+      isFetched: reposKnown && switchKnown,
+      hidden: (name) => !!name && !!repos?.some((r) => r.name === name && !shown(r)),
+    };
+  }, [repos, reposKnown, switchKnown, on]);
+}
 
 /** Register a repository from a local folder (validated as a git repo in Rust). */
 export const useAddRepo = () =>
@@ -1606,8 +1741,10 @@ export const useCodexLogout = () => {
  * can't be resolved). A file path — not inline JSON — because the config is too
  * large to inline into the PTY seed command without breaking its shell quoting.
  *
- * Cached until {@link ENGLISH_TUTOR_KEY} flips (the one setting baked into the
- * file — `useSetSetting` invalidates this key when it changes). The statusLine is
+ * Cached until one of the English tutor's two switches flips (the one setting
+ * baked into the file — {@link ENGLISH_TUTOR_KEY} through `useSetSetting`, and
+ * Settings → Experimental's through `useSetExperimental`, each invalidate this
+ * key). The statusLine is
  * *always* injected so usage is always captured; whether the app renders the
  * inline usage bar is gated separately at the render site via
  * {@link CLAUDE_STATUS_LINE_KEY} — a runtime decision, so it works for
@@ -2465,6 +2602,14 @@ export const useAgentProcesses = (panes: number) =>
     meta: { silent: true },
   });
 
+/** The session rows and the panes' agent processes as the backend has them
+ *  this moment: two direct reads, never the cache, nor a refetch already in
+ *  flight (which began before whatever has changed since). For the
+ *  Conversation view's send, which checks them right before its first key and
+ *  again right before its Enter. */
+export const readSessionNow = () =>
+  Promise.all([unwrap(commands.sessionStates()), unwrap(commands.agentProcesses())]);
+
 /**
  * Keep `useSessionStates` fresh in realtime. The `santree-hook` binary bumps a
  * tick file after each write; the Rust watcher (started at app setup) emits
@@ -2537,8 +2682,13 @@ export const useTabSessionAccounts = (
   tabs: readonly { termKey: string; agent: AgentKind }[],
 ): ReadonlyMap<string, TabSessionAccount> => {
   const qc = useQueryClient();
+  // Told after the cache event, never inside it, as TanStack's own hooks are: a
+  // component that renders a query for the first time — or only observes one —
+  // raises cache events during its own render, and a store answering those
+  // synchronously re-rendered the strip in the middle of it (React's "Cannot
+  // update a component while rendering a different component").
   const subscribe = useCallback(
-    (onChange: () => void) => qc.getQueryCache().subscribe(onChange),
+    (onChange: () => void) => qc.getQueryCache().subscribe(notifyManager.batchCalls(onChange)),
     [qc],
   );
   // A string, so an unrelated cache event that changes nothing here is equal by
@@ -2567,6 +2717,147 @@ export const useSessionProviders = (repo: string, termKey: string) =>
     () => commands.sessionProviders(repo, termKey),
     { enabled: !!repo && !!termKey, staleTime: 30_000 },
   );
+
+// ── Conversations ────────────────────────────────────────────────────────────
+// The Conversation view's read: a session as the agent's own record tells it,
+// folded read by read into a journal (`lib/conversationJournal.ts`).
+// Display-only (COMPLIANCE.md, "Transcript reads"): nothing read here is ever
+// typed into a terminal.
+
+/** How often a working agent's conversation is re-read without a change event:
+ *  a backstop for a missed one, not how the view stays live. */
+const CONVERSATION_POLL_MS = 4_000;
+/** How often an open conversation is re-read however quiet it is. The backend
+ *  watches a record only while a view reads it, and forgets a session nobody
+ *  has read for three minutes (`conversation/watch.rs`); every read renews it.
+ *  Without this, a view left open on an idle agent stopped hearing of changes,
+ *  and the next quick turn never showed until the view was opened again. */
+const CONVERSATION_RENEW_MS = 60_000;
+
+/** One read from where `prev` left off, folded into it. */
+async function readConversation(
+  target: ConversationTarget,
+  agentId: string | null,
+  prev: ConversationJournal | undefined,
+): Promise<ConversationJournal> {
+  const read = await unwrap(commands.conversationRead(target, agentId, prev?.cursor ?? null));
+  // A tab rebound to another session (Claude's `/clear`) names another record,
+  // and a delta against the old one's cursor means nothing there: start over.
+  if (prev?.sessionId && read.sessionId && read.sessionId !== prev.sessionId && !read.reset) {
+    return applyRead(undefined, await unwrap(commands.conversationRead(target, agentId, null)));
+  }
+  return applyRead(prev, read);
+}
+
+/**
+ * A conversation, kept current: the first read takes all of it, each later one
+ * only what changed after the cursor the last returned.
+ *
+ * Re-read when the backend says the record changed (`conversationChanged`, for
+ * the session read), when `followSession` — the session the tab's hooks say it
+ * is on — moves away from the one held, every few seconds while `working`, and
+ * once a minute regardless, which is what keeps the backend watching it.
+ * Several change events during one read cost one more read, not one each, and
+ * never cancel the read in flight (a long first read would otherwise never
+ * finish under a busy agent's stream of events).
+ *
+ * `enabled: false` is how a hidden view stops reading. A failed read is an
+ * `error`, not an empty conversation: the view says so, so it is `silent` here.
+ */
+export function useConversation(
+  target: ConversationTarget | null,
+  agentId: string | null = null,
+  opts: { enabled?: boolean; working?: boolean; followSession?: string | null } = {},
+) {
+  const qc = useQueryClient();
+  const enabled = target !== null && (opts.enabled ?? true);
+  const key = target ? queryKeys.conversation(target, agentId) : ["conversation", "none"];
+  // An event that arrived after the read in flight began.
+  const dirty = useRef(false);
+  const query = useQuery<ConversationJournal>({
+    queryKey: key,
+    queryFn: () => {
+      dirty.current = false;
+      return readConversation(
+        target as ConversationTarget,
+        agentId,
+        qc.getQueryData<ConversationJournal>(key),
+      );
+    },
+    enabled,
+    // Every mount reads again (cheaply, from the cursor): nothing listened
+    // while the view was gone.
+    staleTime: 0,
+    // Identity is kept by `applyRead` itself; a deep compare of thousands of
+    // items per read would only cost.
+    structuralSharing: false,
+    refetchInterval: enabled
+      ? opts.working
+        ? CONVERSATION_POLL_MS
+        : CONVERSATION_RENEW_MS
+      : false,
+    meta: { silent: true },
+  });
+  const { refetch, isFetching } = query;
+  const sessionId = query.data?.sessionId ?? null;
+
+  const reread = useCallback(() => {
+    dirty.current = true;
+    void refetch({ cancelRefetch: false });
+  }, [refetch]);
+
+  useEffect(() => {
+    if (!enabled || !sessionId) return;
+    const unlisten = events.conversationChanged.listen(({ payload }) => {
+      if (payload.sessionId === sessionId) reread();
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [enabled, sessionId, reread]);
+
+  // The read that was in flight when an event landed has settled: read once more.
+  useEffect(() => {
+    if (enabled && !isFetching && dirty.current) reread();
+  }, [enabled, isFetching, reread]);
+
+  const follow = opts.followSession ?? null;
+  useEffect(() => {
+    if (enabled && follow && sessionId && follow !== sessionId) reread();
+  }, [enabled, follow, sessionId, reread]);
+
+  return { data: query.data, error: query.error, isFetching, refetch: reread };
+}
+
+/**
+ * The reply a Claude session is drawing right now, line by line, from its
+ * `MessageDisplay` hook: registered only on launches made while Settings →
+ * Experimental → Conversation view was on, so `null` for any other (and while
+ * nothing streams). Display only. Read while `enabled`, and again whenever the
+ * backend says this session's — or, naming none, any session's — changed.
+ */
+export function useSessionLiveText(sessionId: string | null, enabled: boolean) {
+  const qc = useQueryClient();
+  const on = enabled && sessionId !== null;
+  const key = queryKeys.sessionLiveText(sessionId ?? "");
+  const query = useUnwrappedQuery(key, () => commands.sessionLiveText(sessionId as string), {
+    enabled: on,
+    staleTime: 0,
+    meta: { silent: true },
+  });
+  useEffect(() => {
+    if (!on || sessionId === null) return;
+    const unlisten = events.sessionLiveTextChanged.listen(({ payload }) => {
+      if (payload.sessionId === null || payload.sessionId === sessionId) {
+        void qc.invalidateQueries({ queryKey: queryKeys.sessionLiveText(sessionId) });
+      }
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [on, sessionId, qc]);
+  return on ? (query.data ?? null) : null;
+}
 
 // ── Budget, usage and live processes ─────────────────────────────────────────
 // What the running work is costing: token/context usage, each provider's remaining
@@ -4989,7 +5280,9 @@ export const useLinearTeams = (repo: string) =>
 
 /** The registered repo a stored name points at, or `null` when it names none —
  *  a project removed from the registry must read as "nothing attached", not as
- *  a name every launch would then fail on. */
+ *  a name every launch would then fail on. Callers pass the offered projects
+ *  ({@link useOfferedRepos}), so a project a switch hides reads the same way
+ *  while it is hidden, and its stored name is honoured again once it isn't. */
 function registeredRepo(name: string | null | undefined, repos: Repo[] | undefined): string | null {
   return name && repos?.some((r) => r.name === name) ? name : null;
 }
@@ -5001,7 +5294,7 @@ export function useWorkDefaultRepo(): {
   loading: boolean;
   setRepo: (repo: string | null) => void;
 } {
-  const { data: repos, isFetched: reposKnown } = useRepos();
+  const { data: repos, isFetched: reposKnown } = useOfferedRepos();
   const { data: value, isFetched: valueKnown } = useSetting("app", WORK_DEFAULT_REPO_KEY);
   const { mutate } = useSetSetting();
   const setRepo = useCallback(
@@ -5035,7 +5328,7 @@ export function useTriageRepo(ticketId: string | null): {
   loading: boolean;
   setRepo: (repo: string | null, opts?: { asDefault?: boolean }) => void;
 } {
-  const { data: repos, isFetched: reposKnown } = useRepos();
+  const { data: repos, isFetched: reposKnown } = useOfferedRepos();
   const { data: fallback, isFetched: fallbackKnown } = useSetting("app", TRIAGE_DEFAULT_REPO_KEY);
   // The key is minted from the ticket, so there is nothing to read without one.
   const { data: own, isFetched: ownKnown } = useSetting(
@@ -5078,7 +5371,7 @@ export function useTriageRepo(ticketId: string | null): {
  * {@link TRIAGE_DEFAULT_REPO_KEY} is how you pick a different one.
  */
 export function useTriageOrgRepo(): string {
-  const { data: repos } = useRepos();
+  const { data: repos } = useOfferedRepos();
   const { data: fallback } = useSetting("app", TRIAGE_DEFAULT_REPO_KEY);
   return registeredRepo(fallback, repos) ?? repos?.[0]?.name ?? "";
 }
@@ -5096,11 +5389,18 @@ export function useTriageOrgRepo(): string {
  */
 export function useOrgSiblings(repo: string): string[] {
   const { data: repos } = useRepos();
+  // Never a project a switch hides: nothing starts there while it is hidden.
+  const { hidden } = useOfferedRepos();
   return useMemo(() => {
     const connection = repos?.find((r) => r.name === repo)?.connection;
-    if (!repos || !connection) return repo ? [repo] : [];
-    return repos.filter((r) => r.connection === connection).map((r) => r.name);
-  }, [repos, repo]);
+    const siblings =
+      !repos || !connection
+        ? repo
+          ? [repo]
+          : []
+        : repos.filter((r) => r.connection === connection).map((r) => r.name);
+    return siblings.filter((name) => !hidden(name));
+  }, [repos, repo, hidden]);
 }
 
 /**
@@ -5112,7 +5412,7 @@ export function useOrgSiblings(repo: string): string[] {
  * two different answers.
  */
 export function useWorkScopeRepo(): string {
-  const { data: repos } = useRepos();
+  const { data: repos } = useOfferedRepos();
   const { data: preferred } = useSetting("app", WORK_DEFAULT_REPO_KEY);
   return registeredRepo(preferred, repos) ?? repos?.[0]?.name ?? "";
 }
@@ -5495,9 +5795,10 @@ export function reviewGroupsByProject(inbox: ReviewInbox | undefined): Map<strin
  *  row. Distinct by (connection, id), which is the whole difference from asking
  *  one project: several registered projects routinely share a connection, so a
  *  per-project count counts the same ticket once per project. The rail row is not scoped to a project, so its number
- *  must not be either. Shares {@link useTasksByRepo}'s cache with the page. */
+ *  must not be either. Shares {@link useTasksByRepo}'s cache with the page, and
+ *  counts the projects the page lists ({@link useOfferedRepos}). */
 export const useTicketCount = (): number => {
-  const { data: repos } = useRepos();
+  const { data: repos } = useOfferedRepos();
   const names = useMemo(() => (repos ?? []).map((r) => r.name), [repos]);
   const tasksByRepo = useTasksByRepo(names);
   return useMemo(() => {

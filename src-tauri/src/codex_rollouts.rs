@@ -892,7 +892,7 @@ fn latest_rate_limits_in(
 const ACTIVITY_TAIL: u64 = 64 * 1024;
 
 /// Epoch ms of the newest activity in a Codex rollout — the direct analogue of
-/// `hooks.rs`'s `main_activity_ms` for a Claude transcript, and the reason a
+/// `hooks.rs`'s `main_activity` for a Claude transcript, and the reason a
 /// Codex session used to get no liveness reconciliation at all.
 ///
 /// The two file formats have nothing in common: a Claude transcript's records are
@@ -910,9 +910,10 @@ const ACTIVITY_TAIL: u64 = 64 * 1024;
 /// The record's own `timestamp` is used, never the file's mtime — a rollout is
 /// appended to by Codex alone, but mtime also moves for reasons that are not a
 /// turn (a copy, a backup tool), and the in-file timestamp cannot lie about that.
-pub(crate) fn last_activity_ms(path: &Path) -> Option<i64> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
+///
+/// The rollout comes opened: its path is a hook payload's, so the caller opens it
+/// as a record (`record_file::open`) and hands over the handle and its length.
+pub(crate) fn last_activity_ms(file: &mut std::fs::File, len: u64) -> Option<i64> {
     file.seek(std::io::SeekFrom::Start(len.saturating_sub(ACTIVITY_TAIL)))
         .ok()?;
     let mut tail = Vec::new();

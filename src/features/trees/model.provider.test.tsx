@@ -88,6 +88,12 @@ vi.mock("../../lib/queries", async () => {
   const { useEffect, useReducer } = await import("react");
   return {
     useRepos: () => ({ data: [{ name: "acme/app", tracker: "Linear · Acme" }] }),
+    useOfferedRepos: () => ({
+      data: [{ name: "acme/app", tracker: "Linear · Acme" }],
+      isFetched: true,
+      hidden: () => false,
+    }),
+    useExperimental: () => true,
     useRepoReach: () => ({ remote: false, readable: true, gitOff: undefined, runOff: undefined }),
     useResolvedBoolSetting: () => ({ value: false, isFetched: true }),
     TREES_RUN_SETUP_KEY: "trees_run_setup",

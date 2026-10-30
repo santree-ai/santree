@@ -166,6 +166,9 @@ describe("a lost triage tab", () => {
     const onResume = vi.fn();
     const closeTab = vi.fn();
     const { getByTestId, findByRole, again } = await mountLostRow(onResume, closeTab);
+    // The registry says so too, for a view that types into the pane without
+    // showing it — the Conversation view, whose composer must not send to it.
+    expect(registry.linkOf(registry.tabs[0].key)).toBe("lost");
     fireEvent.click(await findByRole("button", { name: "Resume this session" }));
     await waitFor(() => expect(getByTestId("tabs")).toHaveTextContent("0"));
     await waitFor(() => expect(onResume).toHaveBeenCalledTimes(1));

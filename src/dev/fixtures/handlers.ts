@@ -89,11 +89,19 @@ const str = (args: Args, key: string): string => String(args[key] ?? "");
 const num = (args: Args, key: string): number => Number(args[key] ?? 0);
 
 /** Settings that name a repo: the real rows point at the user's projects, and
- *  the fixture world has its own. Everything else is answered by the real
- *  settings store, which is what keeps the chrome honest. */
+ *  the fixture world has its own. Plus Settings → Experimental with every
+ *  switch on, so the captures keep Daedalus and the English tutor in Settings
+ *  and the Conversation view's switch on a Claude tab, whatever this machine
+ *  has turned on. Those keys are `EXPERIMENTAL_KEYS` in `lib/queries`, spelled
+ *  out: this module sits under the `invoke` alias, and `lib/queries` imports the
+ *  bindings that alias serves. Everything else is answered by the real settings
+ *  store, which is what keeps the chrome honest. */
 const SETTING_OVERRIDES: Record<string, string> = {
   triage_default_repo: QUACK,
   work_default_repo: QUACK,
+  experimental_daedalus: "true",
+  experimental_english_tutor: "true",
+  experimental_conversation: "true",
 };
 
 const tabs: WorktreeTab[] = [...TABS];
@@ -146,6 +154,9 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
       const override = settingOverride(str(a, "key"));
       return override === undefined ? real("resolve_setting", a) : override;
     },
+    // The switches above are answered on: turning one here would write this
+    // machine's row (and start or stop its Daedalus link) for nothing.
+    set_experimental: () => null,
 
     // ── Jira ──────────────────────────────────────────────────────────────
     // The fixture company is a Linear shop; answering here keeps a real
@@ -376,6 +387,8 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
         model: "claude-opus-5",
         costUsd: 1.87,
         updatedAtMs: now() - 40_000,
+        outputStyle: null,
+        vimMode: null,
       },
       {
         agentKind: "Claude",
@@ -386,6 +399,8 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
         model: "claude-opus-5",
         costUsd: 3.4,
         updatedAtMs: now() - 3 * MIN,
+        outputStyle: null,
+        vimMode: null,
       },
       {
         agentKind: "Claude",
@@ -396,6 +411,8 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
         model: "claude-opus-5",
         costUsd: 0.58,
         updatedAtMs: now() - 70_000,
+        outputStyle: null,
+        vimMode: null,
       },
       {
         agentKind: "Codex",
@@ -406,6 +423,8 @@ export function buildHandlers(real: Invoke): Record<string, Handler> {
         model: "gpt-5.6-sol",
         costUsd: null,
         updatedAtMs: now() - 2 * MIN,
+        outputStyle: null,
+        vimMode: null,
       },
     ],
     // A second Claude login beside the CLI's own, so the status bar and

@@ -36,7 +36,6 @@ use crate::proc_table::{parse_ps, ProcTree};
 use crate::provider::SessionRequest;
 use crate::session::{self, CodexSessionOpts, RecordPresence};
 use crate::settings::agent_binary;
-use crate::terminal::LiveTerminal;
 
 /// The providers santree launches on the box — the ones with a launch spec.
 const LAUNCHABLE: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
@@ -126,11 +125,18 @@ impl BoxAgents {
         let Some(tree) = self.table(&client, &hello.projects_root).await else {
             return Vec::new();
         };
-        let roots: Vec<(LiveTerminal, u32)> = panes
+        let roots: Vec<crate::agent_procs::PaneRoot> = panes
             .into_iter()
-            .filter_map(|(pane, remote)| Some((pane, *pids.get(&remote)?)))
+            .filter_map(|(pane, remote)| {
+                Some(crate::agent_procs::PaneRoot {
+                    pane,
+                    pid: *pids.get(&remote)?,
+                    id: None,
+                })
+            })
             .collect();
-        crate::agent_procs::attribute(&tree, &roots)
+        // The box's pids name nothing on this Mac: no start time for them.
+        crate::agent_procs::attribute(&tree, &roots, |_| None)
     }
 
     /// The box's process table, at most [`PROCS_TTL`] old.
@@ -237,8 +243,10 @@ pub fn santree_dir(root: &Checkout) -> Result<PathBuf> {
 
 /// Write santree's hook settings for `repo` on the box and say how a launch
 /// there carries them: the Claude settings files' paths and Codex's flags,
-/// every command `<hookBin> hook <args>`. No English tutor: its instruction
-/// and practice log are this Mac's files.
+/// every command `<hookBin> hook <args>`. The same events as a local launch
+/// (`hooks::hook_settings`), `StopFailure`, `PostToolBatch` and the elicitation
+/// pair included.
+/// No English tutor: its instruction and practice log are this Mac's files.
 pub async fn hooks(
     db: &crate::db::Db,
     daedalus: &DaedalusHost,
@@ -262,7 +270,10 @@ pub async fn hooks(
             Ok(path.to_string_lossy().into_owned())
         };
         Ok(DaedalusAgentHooks {
-            claude_settings: write(CLAUDE_SETTINGS_FILE, hooks::hook_settings(&prefix))?,
+            // No `MessageDisplay` on the box, whatever the Conversation switch
+            // says: the view does not read a Daedalus session live, and the
+            // relay refuses the event.
+            claude_settings: write(CLAUDE_SETTINGS_FILE, hooks::hook_settings(&prefix, false))?,
             claude_settings_no_git: write(
                 CLAUDE_SETTINGS_NO_GIT_FILE,
                 hooks::hook_settings_no_git(&prefix),

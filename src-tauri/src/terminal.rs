@@ -198,19 +198,19 @@ pub struct AdoptedSession {
 /// A live read of `Terminals::local_sessions`, asked a different question than
 /// `Terminals::liveness`. A session the platform reported no pid for is omitted
 /// rather than guessed at, which is the same rule the resource accounting uses.
-pub fn pane_roots(sessions: &[santree_pty::SessionInfo]) -> Vec<(LiveTerminal, u32)> {
+pub fn pane_roots(sessions: &[santree_pty::SessionInfo]) -> Vec<crate::agent_procs::PaneRoot> {
     sessions
         .iter()
         .filter(|s| s.alive)
         .filter_map(|s| {
-            let pid = s.pid?;
-            Some((
-                LiveTerminal {
+            Some(crate::agent_procs::PaneRoot {
+                pane: LiveTerminal {
                     term_key: s.label.clone(),
                     agent_kind: s.agent_kind,
                 },
-                pid,
-            ))
+                pid: s.pid?,
+                id: Some(s.id),
+            })
         })
         .collect()
 }
@@ -1493,14 +1493,29 @@ mod tests {
     /// reading the pty and holds the foreground. No vendor binary is involved:
     /// recognition is on `argv[0]`'s basename, which is exactly what the
     /// symlink's name controls.
+    ///
+    /// The answer names the pane by its session id and says when the agent's
+    /// process started, on the wall clock hooks stamp their rows with — the
+    /// floor the conversation composer holds a session's evidence to. Off by a
+    /// unit or a clock, it would take a previous process's "idle" for the
+    /// current one's, or never accept the current one's.
     #[tokio::test]
     async fn a_pane_running_an_agent_is_detected_from_its_root_pid() {
         let dir = scratch("detect");
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let fake_agent = dir.join("codex");
         std::os::unix::fs::symlink("/bin/cat", &fake_agent).expect("symlink");
+        let wall_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as f64
+        };
 
         let manager = PtyManager::new();
+        // The kernel keeps a start time to the microsecond; the floor is that
+        // truncated to the millisecond, so it can sit up to 1 ms before `before`.
+        let before = wall_ms() - 1.0;
         let id = manager
             .open(
                 OpenOpts {
@@ -1515,12 +1530,13 @@ mod tests {
                 |_| {},
             )
             .expect("open session");
+        let after = wall_ms();
 
         let roots = pane_roots(&manager.sessions());
         assert_eq!(
             roots
                 .iter()
-                .map(|(pane, _)| pane.clone())
+                .map(|root| root.pane.clone())
                 .collect::<Vec<_>>(),
             vec![LiveTerminal {
                 term_key: "tree:AK-1".into(),
@@ -1542,12 +1558,19 @@ mod tests {
         manager.close(id).expect("close session");
         let _ = std::fs::remove_dir_all(&dir);
 
+        let started = found.first().and_then(|p| p.started_at_ms);
+        assert!(
+            started.is_some_and(|ms| (before..=after).contains(&ms)),
+            "started {started:?}, spawned between {before} and {after}"
+        );
         assert_eq!(
             found,
             vec![santree_core::domain::AgentProcess {
                 term_key: "tree:AK-1".into(),
                 pane_agent_kind: Some(AgentKind::Codex),
                 agent_kind: AgentKind::Codex,
+                pane_id: Some(id),
+                started_at_ms: started,
             }],
             "a pty-hosted `codex` must be seen in its pane's foreground"
         );

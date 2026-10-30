@@ -57,7 +57,7 @@ const MAX_SESSIONS: usize = 50;
 /// `CLAUDE_CONFIG_DIR` override (comma-separated) wins outright; otherwise both
 /// `$XDG_CONFIG_HOME/claude` (or `~/.config/claude`) and `~/.claude` are scanned.
 /// Only existing dirs are returned, deduped.
-fn projects_roots() -> Vec<PathBuf> {
+pub(crate) fn projects_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(cfg) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         for part in cfg.to_string_lossy().split(',') {
@@ -1551,7 +1551,7 @@ fn subagents_dir(main: &Path) -> Option<PathBuf> {
 /// * **Each entry.** `DirEntry::file_type` does not follow links, so a symlinked
 ///   `agent-x.jsonl` is not a file and never lists; and each survivor is
 ///   canonicalized and required to still sit *directly* in that directory.
-fn subagent_files(main: &Path) -> Vec<PathBuf> {
+pub(crate) fn subagent_files(main: &Path) -> Vec<PathBuf> {
     let Some(project) = main.parent().and_then(|p| p.canonicalize().ok()) else {
         return Vec::new();
     };
@@ -1604,7 +1604,7 @@ pub(crate) fn worktree_summaries(
 /// and a candidate whose *head* names a foreign `cwd` is dropped before any full
 /// parse. Belonging is still confirmed from the parse — a head with no `cwd`
 /// survives to be decided there.
-fn candidate_transcripts(
+pub(crate) fn candidate_transcripts(
     roots: &[PathBuf],
     worktree: &Path,
     known: &[(String, String)],
@@ -1616,9 +1616,9 @@ fn candidate_transcripts(
     let mut registered: HashSet<PathBuf> = HashSet::new();
     for root in roots {
         for (cwd, session_id) in known {
-            let p = root
-                .join(crate::session::project_slug(cwd))
-                .join(format!("{session_id}.jsonl"));
+            let Some(p) = crate::session::transcript_file(root, cwd, session_id) else {
+                continue;
+            };
             if p.is_file() && registered.insert(p.clone()) {
                 paths.push(p);
             }
@@ -2889,14 +2889,15 @@ mod tests {
         for d in [&main_dir, &sub_dir, &sibling_dir] {
             std::fs::create_dir_all(d).unwrap();
         }
+        let reg = "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f";
         std::fs::write(
-            main_dir.join("reg.jsonl"),
+            main_dir.join(format!("{reg}.jsonl")),
             line(&wt_str, "registered") + "\n",
         )
         .unwrap();
         // Claude's real layout: one `agent-<id>.jsonl` transcript beside the
         // sidecar and directory that must not be counted with it.
-        let subagents = main_dir.join("reg").join("subagents");
+        let subagents = main_dir.join(reg).join("subagents");
         std::fs::create_dir_all(subagents.join("workflows")).unwrap();
         std::fs::write(subagents.join("agent-a.jsonl"), "{}\n").unwrap();
         std::fs::write(subagents.join("agent-a.meta.json"), "{}\n").unwrap();
@@ -2912,18 +2913,18 @@ mod tests {
         )
         .unwrap();
 
-        let got = summaries_in(&[projects], &wt, &[(wt_str.clone(), "reg".into())], &tbl());
+        let got = summaries_in(&[projects], &wt, &[(wt_str.clone(), reg.into())], &tbl());
 
         let mut ids: Vec<&str> = got.keys().map(String::as_str).collect();
         ids.sort_unstable();
         assert_eq!(
             ids,
-            ["hand", "reg"],
+            [reg, "hand"],
             "the sibling checkout's session is not ours"
         );
-        assert_eq!(got["reg"].title.as_deref(), Some("registered"));
+        assert_eq!(got[reg].title.as_deref(), Some("registered"));
         assert_eq!(
-            got["reg"].subagent_count, 1,
+            got[reg].subagent_count, 1,
             "only the agent-*.jsonl transcript counts — not its .meta.json \
              sidecar, the workflows/ dir, or a directory named x.jsonl"
         );

@@ -4361,6 +4361,7 @@ dependencies = [
 name = "santree-core"
 version = "0.1.19-beta.8"
 dependencies = [
+ "chrono",
  "santree-agent-kind",
  "serde",
  "serde_json",
@@ -4374,6 +4375,7 @@ dependencies = [
  "santree-core",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
 ]

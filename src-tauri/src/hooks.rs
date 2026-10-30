@@ -18,14 +18,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use santree_core::domain::{
-    AgentKind, AgentState, ClaudeAccountRateLimits, ClaudeRateLimitWindow, SessionState,
-    SessionUsageLive,
+    AgentKind, AgentState, ClaudeAccountRateLimits, ClaudeRateLimitWindow, DialogKind, DialogMarks,
+    LiveText, PendingPrompt, SessionState, SessionUsageLive,
 };
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
+use santree_core::conversation::claude::is_subagent_id;
+
 use crate::db::Db;
+use crate::record_file;
 use crate::sessions::Liveness;
 
 /// The session-state events we inject. The CLI (`santree-hook`) owns the
@@ -56,6 +59,17 @@ use crate::sessions::Liveness;
 /// `async: true` (below) so our hook can NEVER approve/deny — Claude still shows
 /// its own prompt; we only observe it.
 ///
+/// Three more, each a transition and each captured on CLI 2.1.312 before it was
+/// added: `StopFailure` (a turn that ended on an API error fires no `Stop`, and
+/// read as working for the whole quiet window), `Elicitation` (an MCP server's
+/// form or URL is on screen — needs you at once, not at its Notification ~6 s
+/// later) and `ElicitationResult` (the user answered it).
+///
+/// And `PostToolBatch`, which sets no state: it lists every call of a batch
+/// once they have all finished, and is the one hook a rejection with feedback
+/// fires, so it is how a permission dialog's own call reads finished
+/// (`crates/hook` `finished_calls`).
+///
 /// Every name here is verified against the CLI's own embedded hook-event table
 /// (`claude.exe`, the "### Hook Events" doc block), not guessed.
 const EVENTS: &[&str] = &[
@@ -63,11 +77,22 @@ const EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "PostToolUse",
     "PostToolUseFailure",
+    "PostToolBatch",
     "Notification",
     "PermissionRequest",
+    "Elicitation",
+    "ElicitationResult",
     "Stop",
+    "StopFailure",
     "SessionEnd",
 ];
+
+/// The events a launch registers only while Settings → Experimental →
+/// Conversation view is on, and never on Daedalus: `MessageDisplay`, the reply
+/// line by line as Claude draws it. It fires once per line batch, so it costs a
+/// hook run per batch for a view that may not be open; `async`, so it never
+/// holds a batch back (a synchronous one could rewrite what Claude displays).
+const LIVE_TEXT_EVENTS: &[&str] = &["MessageDisplay"];
 
 /// The sqlite db path — recomputed from `app_data_dir` (the setup path isn't
 /// retained), matching `lib.rs`'s `db::init(data_dir.join("santree.db"))`.
@@ -111,11 +136,12 @@ pub fn db_path(app: &AppHandle) -> Option<PathBuf> {
 /// `None` when the hook binary/db don't resolve (a dev build before the hook is
 /// compiled), in which case there's nothing to inject.
 ///
-/// `tutor` is the rendered English-tutor instruction, or `None` when the tutor is
-/// off — see [`tutor_entry`]. It's passed in rather than read here because it's an
-/// editable prompt with a db-backed override, and this builder is sync.
-fn base_settings_map(app: &AppHandle, tutor: Option<&str>) -> Option<Map<String, Value>> {
-    let mut root = hook_settings(&local_prefix(app)?);
+/// `extras` are the launch-time switches ([`LaunchExtras`]). They're passed in
+/// rather than read here because they live in the db (the tutor's instruction is
+/// an editable prompt with a db-backed override), and this builder is sync.
+fn base_settings_map(app: &AppHandle, extras: &LaunchExtras) -> Option<Map<String, Value>> {
+    let mut root = hook_settings(&local_prefix(app)?, extras.live_text);
+    let tutor = extras.tutor.as_deref();
 
     // The English tutor rides along as a *second* `UserPromptSubmit` entry, next to
     // the state hook (Claude runs every entry for an event). Two things about it
@@ -172,12 +198,27 @@ pub(crate) fn box_prefix(hook_bin: &str) -> String {
     format!("{} hook", sh_quote(hook_bin))
 }
 
+/// What a launch's `--settings` file depends on besides the hook binary: the
+/// switches read when it is built. Each changes what the session runs, so it is
+/// a launch-time decision: flipping one takes a fresh file (the frontend caches
+/// the path until a switch moves) and applies to sessions started afterwards.
+#[derive(Debug, Clone, Default)]
+pub struct LaunchExtras {
+    /// The English tutor's rendered instruction; `None` when the tutor is off.
+    pub tutor: Option<String>,
+    /// Settings → Experimental → Conversation view is on: register
+    /// [`LIVE_TEXT_EVENTS`].
+    pub live_text: bool,
+}
+
 /// The hooks + statusLine map every santree `claude` launch layers over the
 /// user's settings, with each command starting `prefix` ([`local_prefix`] here,
-/// [`box_prefix`] on Daedalus).
-pub(crate) fn hook_settings(prefix: &str) -> Map<String, Value> {
+/// [`box_prefix`] on Daedalus). `live_text` adds [`LIVE_TEXT_EVENTS`]; a box's
+/// launch never asks for them.
+pub(crate) fn hook_settings(prefix: &str, live_text: bool) -> Map<String, Value> {
+    let live: &[&str] = if live_text { LIVE_TEXT_EVENTS } else { &[] };
     let mut hooks = Map::new();
-    for &event in EVENTS {
+    for &event in EVENTS.iter().chain(live) {
         // SessionEnd runs synchronously (short timeout) so "exited" reliably lands
         // before session teardown; the rest are async so they never add latency to
         // a turn — and, crucially, so this hook can never gate a Claude decision.
@@ -215,7 +256,7 @@ pub(crate) fn hook_settings(prefix: &str) -> Map<String, Value> {
 /// A hooks map plus the Fix-CI deny list — [`claude_settings_no_git`]'s rules,
 /// for a launch that builds its settings elsewhere (Daedalus).
 pub(crate) fn hook_settings_no_git(prefix: &str) -> Map<String, Value> {
-    let mut root = hook_settings(prefix);
+    let mut root = hook_settings(prefix, false);
     merge_permissions(&mut root, &NO_GIT_RULES, &[]);
     root
 }
@@ -271,7 +312,7 @@ fn statusline_command_for(prefix: &str, then: Option<&str>) -> String {
 /// can render. Five are state transitions; `PostToolUse` is the mid-turn
 /// **heartbeat**, exactly as it is for Claude — Codex has the same long-turn
 /// decay problem, and had it worse, since nothing reconciled a rollout at all
-/// (see `transcript_activity_ms`). Codex has no `PostToolUseFailure`.
+/// (see `evidence`). Codex has no `PostToolUseFailure`.
 ///
 /// The other five (`PreToolUse`, `SubagentStart`, `SubagentStop`, `PreCompact`,
 /// `PostCompact`) would fire the hook binary for no state change, so they are
@@ -421,8 +462,8 @@ fn write_settings(app: &AppHandle, file: &str, root: Map<String, Value>) -> Opti
     Some(out.to_str()?.to_string())
 }
 
-pub fn claude_settings(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
-    write_settings(app, "claude-hooks.json", base_settings_map(app, tutor)?)
+pub fn claude_settings(app: &AppHandle, extras: &LaunchExtras) -> Option<String> {
+    write_settings(app, "claude-hooks.json", base_settings_map(app, extras)?)
 }
 
 /// Like [`claude_settings`] but with a `permissions.deny` block that forbids git
@@ -447,8 +488,8 @@ pub fn claude_settings(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
 /// `*` closes the first; the `*git * commit*` form closes the second. `*` matches the
 /// empty string, so these subsume the plain prefix rules; those are kept anyway,
 /// since their semantics are the ones the CLI's own `/permissions` UI writes.
-pub fn claude_settings_no_git(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
-    restricted_settings(app, NO_GIT_SETTINGS_FILE, &NO_GIT_RULES, &[], tutor)
+pub fn claude_settings_no_git(app: &AppHandle, extras: &LaunchExtras) -> Option<String> {
+    restricted_settings(app, NO_GIT_SETTINGS_FILE, &NO_GIT_RULES, &[], extras)
 }
 
 /// The two restricted profiles' file names. Named because which one a session gets
@@ -515,14 +556,14 @@ pub const MCP_SERVER_NAME: &str = "santree-review";
 /// later doesn't strand a review mid-flow on a permission prompt. It reaches only
 /// the server santree launched, and that server can write nothing but this PR's
 /// drafts and brief.
-pub fn claude_settings_ai_review(app: &AppHandle, tutor: Option<&str>) -> Option<String> {
+pub fn claude_settings_ai_review(app: &AppHandle, extras: &LaunchExtras) -> Option<String> {
     let allow = format!("mcp__{MCP_SERVER_NAME}");
     restricted_settings(
         app,
         AI_REVIEW_SETTINGS_FILE,
         &review_deny_rules(),
         &[&allow],
-        tutor,
+        extras,
     )
 }
 
@@ -538,9 +579,9 @@ fn restricted_settings(
     file: &str,
     deny: &[&str],
     allow: &[&str],
-    tutor: Option<&str>,
+    extras: &LaunchExtras,
 ) -> Option<String> {
-    let mut root = base_settings_map(app, tutor)?;
+    let mut root = base_settings_map(app, extras)?;
     merge_permissions(&mut root, deny, allow)?;
     write_settings(app, file, root)
 }
@@ -731,13 +772,20 @@ async fn prune_stale_sessions(db: &Db, now_ms: i64) -> Result<()> {
             .execute(db)
             .await?;
     }
+    // A turn's live text goes when the turn ends; this only catches a session
+    // whose end no hook reported.
+    sqlx::query("DELETE FROM session_live_text WHERE fired_ms < ?")
+        .bind(cutoff)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
 /// Every session's live usage row (from the status-line capture), newest first.
 pub async fn session_usage_live(db: &Db) -> Result<Vec<SessionUsageLive>> {
-    let rows = sqlx::query_as::<_, (String, f64, i64, i64, String, f64, i64)>(
-        "SELECT session_id, used_pct, input_tokens, context_size, model, cost_usd, updated_at_ms \
+    let rows = sqlx::query_as::<_, UsageRow>(
+        "SELECT session_id, used_pct, input_tokens, context_size, model, cost_usd, updated_at_ms, \
+                output_style, vim_mode \
          FROM session_usage_live ORDER BY updated_at_ms DESC LIMIT ?",
     )
     .bind(MAX_SESSION_ROWS)
@@ -745,21 +793,104 @@ pub async fn session_usage_live(db: &Db) -> Result<Vec<SessionUsageLive>> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(
-            |(session_id, used_pct, input_tokens, context_size, model, cost_usd, updated_at_ms)| {
-                SessionUsageLive {
-                    agent_kind: santree_core::domain::AgentKind::Claude,
-                    session_id,
-                    used_pct,
-                    input_tokens: input_tokens as f64,
-                    context_size: context_size as f64,
-                    model,
-                    cost_usd,
-                    updated_at_ms: updated_at_ms as f64,
-                }
-            },
-        )
+        .map(|row| SessionUsageLive {
+            agent_kind: santree_core::domain::AgentKind::Claude,
+            session_id: row.session_id,
+            used_pct: row.used_pct,
+            input_tokens: row.input_tokens as f64,
+            context_size: row.context_size as f64,
+            model: row.model,
+            cost_usd: row.cost_usd,
+            updated_at_ms: row.updated_at_ms as f64,
+            output_style: row.output_style,
+            vim_mode: row.vim_mode,
+        })
         .collect())
+}
+
+/// A `session_usage_live` row as stored.
+#[derive(sqlx::FromRow)]
+struct UsageRow {
+    session_id: String,
+    used_pct: f64,
+    input_tokens: i64,
+    context_size: i64,
+    model: String,
+    cost_usd: f64,
+    updated_at_ms: i64,
+    output_style: Option<String>,
+    vim_mode: Option<String>,
+}
+
+/// The reply `session_id` is drawing right now, from its `MessageDisplay`
+/// batches ([`LiveText`]): the newest message's — by when its batch fired, and
+/// for two that fired in the same millisecond, the one stored last. `None` when
+/// nothing is streaming, the session's
+/// launch didn't register the event (Settings → Experimental → Conversation
+/// view was off), or the message's first batch hasn't landed yet. The id is
+/// the caller's to have validated.
+pub async fn session_live_text(db: &Db, session_id: &str) -> Result<Option<LiveText>> {
+    let rows = sqlx::query_as::<_, LiveRow>(
+        "SELECT message_id, idx, turn_id, prompt_id, delta, final, cut, fired_ms \
+         FROM session_live_text \
+         WHERE session_id = ?1 AND message_id = ( \
+           SELECT message_id FROM session_live_text WHERE session_id = ?1 \
+           ORDER BY fired_ms DESC, rowid DESC LIMIT 1) \
+         ORDER BY idx",
+    )
+    .bind(session_id)
+    .fetch_all(db)
+    .await?;
+    Ok(live_text_of(session_id, &rows))
+}
+
+/// One stored `MessageDisplay` batch.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct LiveRow {
+    message_id: String,
+    idx: i64,
+    turn_id: Option<String>,
+    prompt_id: Option<String>,
+    delta: String,
+    #[sqlx(rename = "final")]
+    is_final: bool,
+    cut: bool,
+    fired_ms: i64,
+}
+
+/// One message's batches, in `idx` order, joined into its text so far: from
+/// its first batch up to the first one still in flight (the hooks are async,
+/// so a later batch can land first). A first batch that isn't the message's
+/// start is one only when the cap dropped what came before it (`cut`);
+/// otherwise the start is in flight, and there is nothing to show yet.
+fn live_text_of(session_id: &str, rows: &[LiveRow]) -> Option<LiveText> {
+    let first = rows.first()?;
+    if first.idx > 0 && !first.cut {
+        return None;
+    }
+    let mut text = String::new();
+    let mut last = first;
+    let mut updated_at_ms = first.fired_ms;
+    for (row, expected) in rows.iter().zip(first.idx..) {
+        if row.idx != expected {
+            break;
+        }
+        text.push_str(&row.delta);
+        updated_at_ms = updated_at_ms.max(row.fired_ms);
+        last = row;
+    }
+    Some(LiveText {
+        session_id: session_id.to_string(),
+        prompt_id: last.prompt_id.clone(),
+        turn_id: last.turn_id.clone(),
+        message_id: first.message_id.clone(),
+        text,
+        index: last.idx as f64,
+        complete: last.is_final,
+        truncated: first.cut,
+        started_at_ms: first.fired_ms as f64,
+        updated_at_ms: updated_at_ms as f64,
+    })
 }
 
 /// Every Claude account's rate-limit windows: the Default account first, then
@@ -868,7 +999,13 @@ pub async fn session_states(db: &Db, terminals: Liveness) -> Result<Vec<SessionS
     // proof-of-life for the rows the terminal join can't reach.
     let rows = sqlx::query_as::<_, StateRow>(
         "SELECT s.session_id, s.state, s.event, s.cwd, s.message, s.transcript_path, \
-                s.updated_at_ms, t.repo, t.term_key, t.agent_kind, u.updated_at_ms \
+                s.updated_at_ms, s.asker, s.permission_mode, s.effort_level, \
+                s.pending_kind, s.pending_tool, s.pending_input, s.pending_suggestions, \
+                s.pending_mcp_server, s.pending_agent_id, s.pending_agent_type, s.pending_mode, \
+                s.pending_prompt_id, s.pending_truncated, s.pending_at_ms, s.pending_stacked, \
+                s.pending_rendered_at_ms, s.pending_resolved_at_ms, t.repo, t.term_key, \
+                t.agent_kind, \
+                t.cwd AS launch_cwd, u.updated_at_ms AS heartbeat_ms \
          FROM session_state s \
          LEFT JOIN terminal_sessions t ON t.session_id = s.session_id \
          LEFT JOIN session_usage_live u ON u.session_id = s.session_id \
@@ -883,7 +1020,15 @@ pub async fn session_states(db: &Db, terminals: Liveness) -> Result<Vec<SessionS
     // `metadata` call per entry — and this runs on a ~10s poll. One batch hop off
     // the async runtime, not one task per row.
     Ok(tokio::task::spawn_blocking(move || {
-        one_per_session(reconcile_rows(rows, now_ms, &terminals))
+        let roots = RecordRoots::here();
+        let mut settled = SETTLED_IDLE.lock().unwrap_or_else(|e| e.into_inner());
+        one_per_session(reconcile_rows(
+            rows,
+            now_ms,
+            &terminals,
+            &roots,
+            &mut settled,
+        ))
     })
     .await?)
 }
@@ -917,101 +1062,300 @@ fn one_per_session(states: Vec<SessionState>) -> Vec<SessionState> {
     out
 }
 
-/// A `session_state` row as stored (`state` is the TEXT column, still unparsed),
-/// with the owning logical terminal joined on and the status line's last render:
-/// `(session_id, state, event, cwd, message, transcript_path, updated_at_ms,
-/// repo, term_key, agent_kind, heartbeat_ms)`.
-type StateRow = (
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-);
+/// A `session_state` row as stored (`state` is the TEXT column, still
+/// unparsed), with the owning logical terminal joined on and the status line's
+/// last render.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct StateRow {
+    session_id: String,
+    state: String,
+    event: String,
+    /// The hook payload's `cwd`: where the session was when it last fired.
+    cwd: String,
+    message: Option<String>,
+    /// Where the hook payload said the transcript is. Its presence says the
+    /// session keeps a record on this Mac (a relayed Daedalus hook's is
+    /// dropped); the record read is the one derived from the row
+    /// ([`claude_evidence`], [`codex_evidence`]).
+    transcript_path: Option<String>,
+    updated_at_ms: i64,
+    /// Who asked, for a pending row (migration 0042; [`Asker`]).
+    asker: Option<String>,
+    /// The latest mode and effort a payload carried (migration 0043).
+    permission_mode: Option<String>,
+    effort_level: Option<String>,
+    /// The dialog on record with the row (migration 0043; [`pending_prompt`]).
+    pending_kind: Option<String>,
+    pending_tool: Option<String>,
+    pending_input: Option<String>,
+    pending_suggestions: Option<String>,
+    pending_mcp_server: Option<String>,
+    pending_agent_id: Option<String>,
+    pending_agent_type: Option<String>,
+    pending_mode: Option<String>,
+    pending_prompt_id: Option<String>,
+    pending_truncated: Option<bool>,
+    pending_at_ms: Option<i64>,
+    pending_stacked: Option<bool>,
+    /// What has been seen of the dialog since ([`dialog_marks`]).
+    pending_rendered_at_ms: Option<i64>,
+    pending_resolved_at_ms: Option<i64>,
+    repo: Option<String>,
+    term_key: Option<String>,
+    agent_kind: Option<String>,
+    /// The directory santree launched the session in (`terminal_sessions`),
+    /// which names its transcript's project directory.
+    launch_cwd: Option<String>,
+    heartbeat_ms: Option<i64>,
+}
 
 /// Parse + reconcile a batch of stored rows. Blocking (transcript fs reads) —
-/// always call from `spawn_blocking`.
-fn reconcile_rows(rows: Vec<StateRow>, now_ms: i64, terminals: &Liveness) -> Vec<SessionState> {
+/// always call from `spawn_blocking`. `settled` is [`SETTLED_IDLE`]'s map,
+/// kept to the sessions of this batch.
+fn reconcile_rows(
+    rows: Vec<StateRow>,
+    now_ms: i64,
+    terminals: &Liveness,
+    roots: &RecordRoots,
+    settled: &mut HashMap<String, RecordStamp>,
+) -> Vec<SessionState> {
+    let batch: std::collections::HashSet<String> =
+        rows.iter().map(|row| row.session_id.clone()).collect();
+    settled.retain(|session, _| batch.contains(session));
     rows.into_iter()
-        .filter_map(
-            |(
-                session_id,
-                stored,
-                event,
-                cwd,
-                mut message,
-                transcript_path,
-                updated_at_ms,
-                repo,
-                term_key,
-                agent_kind,
-                heartbeat_ms,
-            )| {
-                let Some(mut state) = AgentState::parse(&stored) else {
-                    // The hook binary is built separately, so a stale copy on disk
-                    // can write a state this build doesn't know. Drop the row rather
-                    // than guess — a wrong badge is worse than a missing one.
-                    log::warn!("session {session_id}: unknown state {stored:?}, skipping");
-                    return None;
-                };
-                let kind = agent_kind.as_deref().and_then(|k| k.parse().ok());
-                // The hook events set a state but can't reliably clear it (a manual
-                // accept/reject and a turn that ends without a `Stop` both fire
-                // nothing). So we reconcile the live state against the transcript —
-                // the ground truth — and drop the now-irrelevant prompt text when the
-                // state is no longer a "needs-you" one.
-                if let Some(live) = reconcile_live_state(
-                    state,
-                    transcript_path.as_deref(),
-                    kind,
-                    updated_at_ms,
+        .filter_map(|row| {
+            let Some(recorded_state) = AgentState::parse(&row.state) else {
+                // The hook binary is built separately, so a stale copy on disk
+                // can write a state this build doesn't know. Drop the row rather
+                // than guess — a wrong badge is worse than a missing one.
+                log::warn!(
+                    "session {}: unknown state {:?}, skipping",
+                    row.session_id,
+                    row.state
+                );
+                return None;
+            };
+            let mut state = recorded_state;
+            let mut message = row.message.clone();
+            let kind = row.agent_kind.as_deref().and_then(|k| k.parse().ok());
+            let alive = terminal_liveness(
+                row.term_key.as_deref(),
+                kind,
+                row.heartbeat_ms,
+                now_ms,
+                terminals,
+            );
+            let prompt = pending_prompt(&row, recorded_state);
+            let closed_ms = prompt
+                .as_ref()
+                .and_then(|p| dialog_marks(&row, p.kind).closed_at());
+            // The hook events set a state but can't reliably clear it (a manual
+            // accept/reject and a turn that ends without a `Stop` both fire
+            // nothing). So we reconcile the live state against the transcript —
+            // the ground truth — and the dialog's own signs of closing, and drop
+            // the now-irrelevant prompt text when the state is no longer a
+            // "needs-you" one.
+            let reconciled = if is_unsettled(recorded_state) && row.transcript_path.is_some() {
+                reconcile_live_state(
+                    recorded_state,
+                    &Asker::parse(row.asker.as_deref()),
+                    &evidence(&row, kind, roots),
+                    row.updated_at_ms,
                     now_ms,
-                ) {
-                    if !live.is_blocked_on_user() {
-                        message = None;
-                    }
-                    state = live;
+                    closed_ms,
+                )
+            } else if closed_ms.is_some() {
+                // No record here to read (a Daedalus session's is on the box):
+                // the dialog closed, and the turn it was part of reads as an
+                // active row without a record does — running, until its next
+                // hook.
+                Reconciled {
+                    state: Some(AgentState::Active),
+                    interrupted_ms: None,
                 }
-                // …and whatever the events and the transcript agree on, a session
-                // whose terminal is gone is not running. This is the last word
-                // because it is the only one derived from live state rather than a
-                // record: see [`session_states`].
-                if state != AgentState::Exited
-                    && terminal_liveness(term_key.as_deref(), kind, heartbeat_ms, now_ms, terminals)
-                        == Some(false)
-                {
-                    state = AgentState::Exited;
+            } else if recorded_state == AgentState::Idle && alive == Some(true) {
+                // A message Claude queued while it worked starts its own turn
+                // right after the `Stop` stored here, and no hook says so (CLI
+                // 2.1.312): the transcript is the one witness. Read like a
+                // running turn from its delivery on.
+                queued_delivery(&row, kind, roots, settled)
+                    .map(|(queued_ms, evidence)| Reconciled {
+                        state: reconcile_activity(
+                            false,
+                            &Asker::Unknown,
+                            &evidence,
+                            queued_ms,
+                            now_ms,
+                            None,
+                        ),
+                        interrupted_ms: None,
+                    })
+                    .unwrap_or_default()
+            } else {
+                Reconciled::default()
+            };
+            if let Some(live) = reconciled.state {
+                if !live.is_blocked_on_user() {
                     message = None;
                 }
-                Some(SessionState {
-                    // The provider the owning terminal was registered under, not
-                    // an assumption — and `None` rather than a default when the
-                    // join isn't there. `terminal_sessions` holds one row per
-                    // logical surface, so a terminal that mints a *second*
-                    // session (a Codex `/new`, a Claude `/clear`) takes the join
-                    // with it and leaves the first row unattributed. Defaulting
-                    // that to Claude is how a Codex session came to render with
-                    // the Claude mark; the frontend shows no mark instead.
-                    agent_kind: kind,
-                    session_id,
-                    state,
-                    event,
-                    cwd,
-                    message,
-                    transcript_path,
-                    updated_at_ms: updated_at_ms as f64,
-                    repo,
-                    term_key,
-                })
-            },
-        )
+                state = live;
+            }
+            // …and whatever the events and the transcript agree on, a session
+            // whose terminal is gone is not running. This is the last word
+            // because it is the only one derived from live state rather than a
+            // record: see [`session_states`].
+            if state != AgentState::Exited && alive == Some(false) {
+                state = AgentState::Exited;
+                message = None;
+            }
+            // A dialog can't be on the screen of a pane that is gone.
+            let prompt = prompt.filter(|_| state != AgentState::Exited);
+            Some(SessionState {
+                // The provider the owning terminal was registered under, not
+                // an assumption — and `None` rather than a default when the
+                // join isn't there. `terminal_sessions` holds one row per
+                // logical surface, so a terminal that mints a *second*
+                // session (a Codex `/new`, a Claude `/clear`) takes the join
+                // with it and leaves the first row unattributed. Defaulting
+                // that to Claude is how a Codex session came to render with
+                // the Claude mark; the frontend shows no mark instead.
+                agent_kind: kind,
+                session_id: row.session_id,
+                state,
+                recorded_state,
+                interrupted_at_ms: reconciled.interrupted_ms.map(|ms| ms as f64),
+                event: row.event,
+                cwd: row.cwd,
+                message,
+                transcript_path: row.transcript_path,
+                updated_at_ms: row.updated_at_ms as f64,
+                repo: row.repo,
+                term_key: row.term_key,
+                prompt,
+                permission_mode: row.permission_mode,
+                effort_level: row.effort_level,
+            })
+        })
         .collect()
+}
+
+/// The dialog stored with the row, while it is still the row's: written by the
+/// write that holds the row now (`pending_at_ms` is that write's
+/// `updated_at_ms` — an older hook binary's later write leaves the columns
+/// behind but moves the clock) and for the state that write stored.
+fn pending_prompt(row: &StateRow, recorded: AgentState) -> Option<PendingPrompt> {
+    let kind = DialogKind::parse(row.pending_kind.as_deref()?)?;
+    if kind.state() != recorded || row.pending_at_ms != Some(row.updated_at_ms) {
+        return None;
+    }
+    let marks = dialog_marks(row, kind);
+    Some(PendingPrompt {
+        kind,
+        tool_name: row.pending_tool.clone(),
+        tool_input: row
+            .pending_input
+            .clone()
+            .unwrap_or_else(|| "null".to_string()),
+        suggestions: row.pending_suggestions.clone(),
+        mcp_server: row.pending_mcp_server.clone(),
+        agent_id: row.pending_agent_id.clone(),
+        agent_type: row.pending_agent_type.clone(),
+        permission_mode: row.pending_mode.clone(),
+        prompt_id: row.pending_prompt_id.clone(),
+        recorded_at_ms: row.updated_at_ms as f64,
+        truncated: row.pending_truncated.unwrap_or(false),
+        stacked: marks.stacked,
+        closed_at_ms: marks.closed_at().map(|ms| ms as f64),
+        call_ended_at_ms: marks.call_ended_at().map(|ms| ms as f64),
+    })
+}
+
+/// What has been seen of the row's dialog since it was recorded, as the hook
+/// stored it: the one reading of whether it closed ([`DialogMarks::closed_at`]),
+/// for the card's `closed` and the reconciler alike. Without it an approved
+/// tool read "needs you" until it ended — an approval leaves nothing in the
+/// transcript before then.
+fn dialog_marks(row: &StateRow, kind: DialogKind) -> DialogMarks {
+    DialogMarks {
+        kind,
+        stacked: row.pending_stacked.unwrap_or(false),
+        rendered_at_ms: row.pending_rendered_at_ms,
+        resolved_at_ms: row.pending_resolved_at_ms,
+    }
+}
+
+/// A record file's length and modification time (epoch ms): while both are
+/// unchanged, so is what it says.
+type RecordStamp = (u64, i64);
+
+/// Idle sessions whose transcript, at the stamp noted, showed no message
+/// delivered from Claude's queue, so the next read of an unchanged transcript
+/// is a stat rather than a tail read: an idle session sits on every poll, and
+/// its transcript's trailer is written in the same milliseconds as the `Stop`
+/// it idles on, so its time alone can't tell a delivery from the trailer.
+static SETTLED_IDLE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, RecordStamp>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// How far apart a queued message's delivery and the stored idle can be and
+/// still be the `Stop` it followed: Claude writes the delivery within
+/// milliseconds of that `Stop`, before or after the hook's own write lands.
+const QUEUED_SLACK_MS: i64 = 2_000;
+
+/// When an idle Claude row's session is running a turn Claude started from
+/// its queue, when that turn began (the delivered prompt's record) and the
+/// session's records; `None` otherwise, or when nothing was written since the
+/// stored idle. Reads the transcript's tail only when its stamp moved since
+/// the last read found nothing ([`SETTLED_IDLE`]).
+fn queued_delivery(
+    row: &StateRow,
+    kind: Option<AgentKind>,
+    roots: &RecordRoots,
+    settled: &mut HashMap<String, RecordStamp>,
+) -> Option<(i64, Evidence)> {
+    let reported = row.transcript_path.as_deref()?;
+    if is_codex_record(kind, reported) {
+        return None;
+    }
+    let cwds = [row.launch_cwd.as_deref(), Some(row.cwd.as_str())];
+    let mut record = open_claude_record(&row.session_id, &cwds, reported, &roots.claude)?;
+    let len = record.meta.len();
+    let modified = record
+        .meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    if modified < row.updated_at_ms - QUEUED_SLACK_MS
+        || settled.get(&row.session_id) == Some(&(len, modified))
+    {
+        return None;
+    }
+    let main = main_activity(&read_tail(&mut record.file, len, CLAUDE_TAIL)?);
+    // A stored idle well after the delivery is that turn's own `Stop`, even
+    // from a CLI that writes no turn-end record.
+    let Some(queued_ms) = main
+        .queued_ms
+        .filter(|ms| ms + QUEUED_SLACK_MS > row.updated_at_ms)
+    else {
+        settled.insert(row.session_id.clone(), (len, modified));
+        return None;
+    };
+    Some((
+        queued_ms,
+        Evidence {
+            main,
+            subagents: subagent_writes(&record.path),
+        },
+    ))
+}
+
+/// Whether a stored state is one the transcript can overrule: running, or a
+/// prompt. Idle and exited are settled (see [`reconcile_live_state`]); an idle
+/// row is read only for a turn Claude started from its queue
+/// ([`queued_delivery`]).
+fn is_unsettled(state: AgentState) -> bool {
+    state == AgentState::Active || state.is_blocked_on_user()
 }
 
 fn now_ms() -> i64 {
@@ -1122,8 +1466,12 @@ pub async fn retire_terminal(
     cwd: Option<&str>,
 ) -> Result<u64> {
     let agent_kind = agent_kind.map(AgentKind::as_str);
+    // The dialog goes with the pane (the reader would no longer offer it
+    // anyway: the row is not the write that stored it).
     let rows = sqlx::query(
-        "UPDATE session_state SET state = ?, event = ?, message = NULL, updated_at_ms = ? \
+        "UPDATE session_state SET state = ?, event = ?, message = NULL, asker = NULL, \
+                                  pending_kind = NULL, pending_input = NULL, \
+                                  pending_suggestions = NULL, updated_at_ms = ? \
          WHERE state IN ('active', 'delegating', 'permission', 'waiting') \
            AND session_id IN ( \
                  SELECT session_id FROM terminal_sessions \
@@ -1150,24 +1498,19 @@ pub async fn retire_terminal(
 /// rendered as provenance.
 pub const PTY_EXIT_EVENT: &str = "PtyExit";
 
-/// Read the last `max_bytes` of a file as text (lossy). Used to scan a session
-/// transcript's tail cheaply — they grow to many MB over a long session, but the
-/// only thing that matters here is the most recent few conversation turns. A
-/// partial first line (from seeking mid-file) just fails to parse and is skipped.
-///
-/// The path is whatever a hook payload said, so only a regular file is read, and
-/// never more than `max_bytes` of it: a device reports length 0 and never ends
-/// (`/dev/zero` would fill memory), and opening a FIFO blocks until a writer comes.
-fn read_tail(path: &str, max_bytes: u64) -> Option<String> {
-    if !std::fs::metadata(path).ok()?.is_file() {
-        return None;
-    }
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(max_bytes)))
+/// How much of a Claude transcript's tail [`claude_evidence`] reads. They grow
+/// to many MB over a long session, but only the most recent few turns matter.
+const CLAUDE_TAIL: u64 = 128 * 1024;
+
+/// The last `max_bytes` of an opened record as text (lossy). A partial first
+/// line (from seeking mid-file) just fails to parse and is skipped. Never more
+/// than `max_bytes`, whatever the file claims: the handle is a regular file
+/// ([`record_file::open`]), but its length can still change under the read.
+fn read_tail(file: &mut std::fs::File, len: u64, max_bytes: u64) -> Option<String> {
+    file.seek(SeekFrom::Start(len.saturating_sub(max_bytes)))
         .ok()?;
     let mut buf = Vec::new();
-    f.take(max_bytes).read_to_end(&mut buf).ok()?;
+    file.take(max_bytes).read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -1184,98 +1527,293 @@ const RESOLVED_MARGIN_MS: i64 = 1_000;
 /// turn reads as idle promptly. Paired with the ~10s frontend poll.
 const IDLE_QUIET_MS: i64 = 30_000;
 
-/// The `subagents/` dir for a session, derived from its transcript path:
-/// `.../<sid>.jsonl` → `.../<sid>/subagents`. Claude writes each Task-tool
-/// subagent's transcript to its own `agent-*.jsonl` here.
-fn subagents_dir(transcript_path: &str) -> Option<PathBuf> {
-    let p = Path::new(transcript_path);
-    Some(p.parent()?.join(p.file_stem()?).join("subagents"))
+/// The directories agent records are read from, in canonical form, resolved
+/// once per batch: Claude's `projects` roots (an account folder links its
+/// `projects` to the Default home's, so its transcripts resolve into these)
+/// and Codex's `sessions` root.
+struct RecordRoots {
+    claude: Vec<PathBuf>,
+    codex: Vec<PathBuf>,
 }
 
-/// Newest mtime (epoch-ms) across the session's subagent transcript files, or
-/// `None` if there are none. While a subagent (Task tool) runs, the *main*
-/// transcript stays silent for its whole duration — only the spawn + the final
-/// result land there — so without this a subagent running longer than
-/// `IDLE_QUIET_MS` would make the parent look idle. Subagent files are pure agent
-/// conversation (no remote-control trailer), so their mtime is a clean "a
-/// subagent just did something" signal.
-fn newest_subagent_write_ms(transcript_path: &str) -> Option<i64> {
-    let dir = subagents_dir(transcript_path)?;
-    let mut newest: Option<i64> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        if entry.path().extension().and_then(|x| x.to_str()) != Some("jsonl") {
-            continue;
-        }
-        if let Some(ms) = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-        {
-            newest = Some(newest.map_or(ms, |cur| cur.max(ms)));
+impl RecordRoots {
+    /// This Mac's. Blocking (it resolves the directories).
+    fn here() -> Self {
+        Self {
+            claude: record_file::canonical(&crate::usage::projects_roots()),
+            codex: record_file::canonical(
+                &crate::codex_rollouts::sessions_root()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+            ),
         }
     }
-    newest
 }
 
-/// Epoch-ms of the newest activity in a session's transcript, whichever provider
-/// wrote it.
+/// What a session's records say: its main loop, and when each of its subagents
+/// last wrote.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Evidence {
+    main: MainLoop,
+    /// Each subagent transcript's newest write (mtime), by agent id. Subagent
+    /// files are pure agent conversation (no remote-control trailer), so their
+    /// mtime is a clean "a subagent just did something" signal.
+    subagents: Vec<(String, i64)>,
+}
+
+/// What a session's main loop did, by its transcript.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct MainLoop {
+    /// Epoch-ms of its newest activity; `None` if unreadable or there is none.
+    last_ms: Option<i64>,
+    /// Epoch-ms of the user's interrupt, when the newest main-chain record is
+    /// the one Claude writes for it ([`is_interrupt_marker`]).
+    interrupted_ms: Option<i64>,
+    /// Epoch-ms of a prompt Claude delivered from its queue
+    /// (`promptSource: "queued"`) when no turn end follows it in the record:
+    /// the turn it started is still running.
+    queued_ms: Option<i64>,
+}
+
+/// A row's records, read from where the row's session keeps them, whichever
+/// provider wrote them. Nothing readable is "no evidence" (the default).
 ///
 /// The two formats have nothing in common. A Claude transcript's conversation
 /// records are `type: "assistant" | "user"`; a Codex *rollout*'s are
 /// `session_meta` / `event_msg` / `response_item` / `turn_context`, and running
-/// the Claude parser over one matches nothing and returns `None` — which the
-/// reconciler reads as "no evidence", so a Codex session kept its last hook state
-/// forever and got no reconciliation at all.
+/// the Claude parser over one matches nothing — which the reconciler reads as
+/// "no evidence", so a Codex session kept its last hook state forever.
 ///
 /// `agent_kind` is the registry's answer and is used when it has one. When it
 /// doesn't (a session that lost its `terminal_sessions` join — a `/clear`, a
-/// `/new`), the file *name* decides: Codex names every rollout
-/// `rollout-<timestamp>-<thread-id>.jsonl`, so the prefix identifies the format
-/// without opening the file. Guessing wrong is not harmful — the wrong parser
-/// matches nothing and yields `None`, the same as an unreadable file — but
-/// guessing right is what keeps an unjoined Codex session reconciling.
-fn transcript_activity_ms(transcript_path: &str, agent_kind: Option<AgentKind>) -> Option<i64> {
-    let is_codex = match agent_kind {
+/// `/new`), the reported file *name* decides: Codex names every rollout
+/// `rollout-<timestamp>-<thread-id>.jsonl`. Guessing wrong reads nothing, the
+/// same as an unreadable file; guessing right keeps an unjoined Codex session
+/// reconciling.
+fn evidence(row: &StateRow, agent_kind: Option<AgentKind>, roots: &RecordRoots) -> Evidence {
+    let Some(reported) = row.transcript_path.as_deref() else {
+        return Evidence::default();
+    };
+    if is_codex_record(agent_kind, reported) {
+        return codex_evidence(&row.session_id, reported, &roots.codex);
+    }
+    let cwds = [row.launch_cwd.as_deref(), Some(row.cwd.as_str())];
+    claude_evidence(&row.session_id, &cwds, reported, &roots.claude)
+}
+
+/// Whether a row's record is a Codex rollout: the registry's provider when it
+/// has one, else the reported file's name (`rollout-<timestamp>-<thread>.jsonl`).
+fn is_codex_record(agent_kind: Option<AgentKind>, reported: &str) -> bool {
+    match agent_kind {
         Some(kind) => kind == AgentKind::Codex,
-        None => Path::new(transcript_path)
+        None => Path::new(reported)
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.starts_with("rollout-")),
-    };
-    if is_codex {
-        return crate::codex_rollouts::last_activity_ms(Path::new(transcript_path));
     }
-    main_activity_ms(transcript_path)
 }
 
-/// Epoch-ms of the newest `assistant`/`user` entry in a *Claude* transcript — how
-/// recently the main agent loop itself did anything. `None` if unreadable / no
-/// such entry. cmux/remote-control metadata lines (`mode`, `pr-link`, …) are
-/// ignored, so raw file mtime is deliberately not used here (that trailer churns
-/// without a real turn).
-fn main_activity_ms(transcript_path: &str) -> Option<i64> {
-    let text = read_tail(transcript_path, 128 * 1024)?;
-    let mut newest_ms: Option<i64> = None;
+/// A Claude session's transcript and its subagents'. The file is derived from
+/// the row — `<root>/<slug of the cwd>/<session id>.jsonl` under Claude's own
+/// roots, for the directory santree launched it in and the one its hook last
+/// reported — and the path the hook payload carried is taken only when it names
+/// that same file, `<session id>.jsonl`, which covers a session whose working
+/// directory moved since. Each is opened as a record inside Claude's roots
+/// ([`record_file::open`]), so a link, a FIFO or a path elsewhere reads nothing.
+fn claude_evidence(
+    session_id: &str,
+    cwds: &[Option<&str>],
+    reported: &str,
+    roots: &[PathBuf],
+) -> Evidence {
+    let Some(mut record) = open_claude_record(session_id, cwds, reported, roots) else {
+        return Evidence::default();
+    };
+    let main = read_tail(&mut record.file, record.meta.len(), CLAUDE_TAIL)
+        .map(|text| main_activity(&text))
+        .unwrap_or_default();
+    Evidence {
+        main,
+        subagents: subagent_writes(&record.path),
+    }
+}
+
+/// [`claude_evidence`]'s file, opened: the first of the derived paths and the
+/// reported one that opens as a record inside Claude's roots.
+fn open_claude_record(
+    session_id: &str,
+    cwds: &[Option<&str>],
+    reported: &str,
+    roots: &[PathBuf],
+) -> Option<record_file::Record> {
+    if !crate::session::is_session_id(session_id) {
+        return None;
+    }
+    let name = format!("{session_id}.jsonl");
+    let derived = roots.iter().flat_map(|root| {
+        cwds.iter()
+            .flatten()
+            .filter_map(|cwd| crate::session::transcript_file(root, cwd, session_id))
+    });
+    let reported = Some(PathBuf::from(reported))
+        .filter(|path| path.file_name().and_then(|n| n.to_str()) == Some(name.as_str()));
+    derived
+        .chain(reported)
+        .find_map(|path| record_file::open(&path, roots).ok())
+}
+
+/// When each of a session's subagents last wrote its transcript, by agent id:
+/// the contained listing of `<session>/subagents/agent-<id>.jsonl` next to the
+/// opened main transcript (`usage::subagent_files`), a link in an entry's place
+/// skipped.
+fn subagent_writes(main: &Path) -> Vec<(String, i64)> {
+    crate::usage::subagent_files(main)
+        .into_iter()
+        .filter_map(|path| {
+            let id = path
+                .file_name()?
+                .to_str()?
+                .strip_prefix("agent-")?
+                .strip_suffix(".jsonl")?
+                .to_string();
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            let ms = meta
+                .is_file()
+                .then(|| meta.modified().ok())
+                .flatten()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_millis() as i64;
+            Some((id, ms))
+        })
+        .collect()
+}
+
+/// A Codex session's rollout: the path the hook payload carried, taken only
+/// when it is a rollout of this very thread (`rollout-<timestamp>-<thread
+/// id>.jsonl`) and opens as a record inside Codex's `sessions` root.
+fn codex_evidence(thread_id: &str, reported: &str, roots: &[PathBuf]) -> Evidence {
+    let path = Path::new(reported);
+    let suffix = format!("-{thread_id}.jsonl");
+    let named = crate::session::is_session_id(thread_id)
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix));
+    if !named {
+        return Evidence::default();
+    }
+    let Ok(mut record) = record_file::open(path, roots) else {
+        return Evidence::default();
+    };
+    Evidence {
+        main: MainLoop {
+            last_ms: crate::codex_rollouts::last_activity_ms(&mut record.file, record.meta.len()),
+            ..MainLoop::default()
+        },
+        subagents: Vec::new(),
+    }
+}
+
+/// The text of the user record Claude writes when the user interrupts a turn
+/// (Esc): the CLI's own two constants, as real transcripts carry them.
+const INTERRUPT_MARKERS: [&str; 2] = [
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+];
+
+/// Whether a transcript record is Claude's interrupt marker: a `user` record
+/// whose content is one text block holding one of [`INTERRUPT_MARKERS`]. A
+/// prompt the user typed is a plain string (or carries its images beside the
+/// text), so typing the same words is not one.
+fn is_interrupt_marker(record: &Value) -> bool {
+    let content = record.get("message").and_then(|m| m.get("content"));
+    let Some([block]) = content.and_then(Value::as_array).map(Vec::as_slice) else {
+        return false;
+    };
+    record.get("type").and_then(Value::as_str) == Some("user")
+        && block.get("type").and_then(Value::as_str) == Some("text")
+        && block
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|t| INTERRUPT_MARKERS.contains(&t))
+}
+
+/// A *Claude* transcript's main loop, from the text of its tail: the newest
+/// `assistant`/`user` entry — how recently the main agent loop itself did
+/// anything — and whether the newest main-chain one is an interrupt marker.
+/// cmux/remote-control metadata lines (`mode`, `pr-link`, …) are ignored, so raw
+/// file mtime is deliberately not used here (that trailer churns without a real
+/// turn).
+fn main_activity(text: &str) -> MainLoop {
+    let mut main = MainLoop::default();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue; // partial/metadata line
         };
+        let main_chain = v.get("isSidechain").and_then(Value::as_bool) != Some(true);
         match v.get("type").and_then(Value::as_str) {
             Some("assistant") | Some("user") => {}
+            // A turn's end: a prompt delivered before it has had its turn.
+            Some("system")
+                if main_chain
+                    && matches!(
+                        v.get("subtype").and_then(Value::as_str),
+                        Some("turn_duration" | "stop_hook_summary")
+                    ) =>
+            {
+                main.queued_ms = None;
+                continue;
+            }
             _ => continue, // skip metadata entries
         }
-        if let Some(ms) = v
+        let ms = v
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-            .map(|dt| dt.timestamp_millis())
-        {
-            newest_ms = Some(newest_ms.map_or(ms, |cur| cur.max(ms)));
+            .map(|dt| dt.timestamp_millis());
+        if let Some(ms) = ms {
+            main.last_ms = Some(main.last_ms.map_or(ms, |cur| cur.max(ms)));
+        }
+        // Appended in order, so the last main-chain record read is the newest.
+        if main_chain {
+            let interrupted = is_interrupt_marker(&v);
+            main.interrupted_ms = ms.filter(|_| interrupted);
+            if interrupted {
+                main.queued_ms = None;
+            } else if v.get("promptSource").and_then(Value::as_str) == Some("queued") {
+                // Two prompts delivered together start one turn: its start is
+                // the first.
+                main.queued_ms = main.queued_ms.or(ms);
+            }
         }
     }
-    newest_ms
+    main
+}
+
+/// Which thread put a pending prompt on screen, from `session_state.asker`
+/// (santree-hook writes it, migration 0042).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Asker {
+    /// The session's own thread: its `PermissionRequest`.
+    Main,
+    /// A subagent, by the agent id Claude names its transcript after.
+    Subagent(String),
+    /// Nobody said: a Notification, or a row older than the column.
+    Unknown,
+}
+
+impl Asker {
+    fn parse(stored: Option<&str>) -> Self {
+        match stored {
+            Some("main") => Self::Main,
+            Some(other) => other
+                .strip_prefix("agent:")
+                .filter(|id| is_subagent_id(id))
+                .map_or(Self::Unknown, |id| Self::Subagent(id.to_string())),
+            None => Self::Unknown,
+        }
+    }
 }
 
 /// Reconcile a stored session state against the transcript — the ground truth for
@@ -1288,37 +1826,106 @@ fn main_activity_ms(transcript_path: &str) -> Option<i64> {
 /// main loop and its subagents. We deliberately don't parse the transcript's
 /// structure (`stop_reason`, tool_use vs result) — under remote control the last
 /// line is often a bare tool_result or metadata, so structure is unreliable; a
-/// plain "has it gone quiet" is not.
+/// plain "has it gone quiet" is not. The one record read for what it says is the
+/// marker Claude writes when the user interrupts a turn, which fires no `Stop`.
 ///
-/// Returns an override state, or `None` to keep the stored one.
-/// - `permission`/`waiting`: while genuinely pending the transcript is *frozen* at
-///   the pre-prompt turn (Claude withholds the blocked `tool_use` until you
-///   approve it). So it's still pending until the transcript advances past when we
-///   recorded the prompt; once it has, the prompt is resolved and it falls through
-///   to the liveness check below.
+/// Returns an override state (`None` keeps the stored one), and the marker's
+/// time when it is what decided:
+/// - interrupted: when the newest main-chain record is that marker and it is
+///   newer than the recorded state, the turn is over — `idle`, whatever the
+///   stored state was (an Esc at a prompt answers the prompt too).
+/// - `permission`/`waiting`: pending until the thread that asked moves past
+///   when we recorded the prompt — the main transcript for the session's own
+///   prompt, the subagent's file for a subagent's; when nobody said who asked,
+///   any of them. Another thread's progress proves nothing: a background
+///   subagent writes away while the main thread's dialog is still up. Or until
+///   the dialog's own signs say it closed (`closed_ms`, when it did:
+///   [`DialogMarks::closed_at`]), which is also activity. Once resolved it
+///   falls through to the liveness check below.
 /// - resolved-prompt / `active`: `idle` once everything (main + subagents) has been
 ///   quiet for `IDLE_QUIET_MS`; else `delegating` if the freshest activity is a
 ///   subagent (the main loop is blocked on a Task subagent), else `active`.
-/// - `idle`/`exited`: settled — left untouched (`idle`→`active` only ever comes
-///   from a real `UserPromptSubmit`; liveness owns `exited`).
-///
-/// `agent_kind` picks the transcript reader: the two providers' files share
-/// nothing but the `.jsonl` extension (see [`transcript_activity_ms`]).
+/// - `idle`/`exited`: settled here (an idle row whose session runs a turn
+///   Claude started from its queue, which no hook reports, is read apart, by
+///   [`queued_delivery`]); otherwise `idle`→`active` only ever comes from
+///   a real `UserPromptSubmit`; liveness owns `exited`).
 fn reconcile_live_state(
     state: AgentState,
-    transcript_path: Option<&str>,
-    agent_kind: Option<AgentKind>,
+    asker: &Asker,
+    evidence: &Evidence,
     recorded_at_ms: i64,
     now_ms: i64,
-) -> Option<AgentState> {
-    let is_pending = state.is_blocked_on_user();
-    if !is_pending && state != AgentState::Active {
-        return None; // idle / exited: settled
+    closed_ms: Option<i64>,
+) -> Reconciled {
+    if !is_unsettled(state) {
+        return Reconciled::default();
     }
-    let path = transcript_path?;
+    // Without a `Stop` the row would read "working" until the quiet window ran
+    // out. A marker older than the recorded state ended an earlier turn: the one
+    // the user has since started is still running.
+    if let Some(ms) = evidence
+        .main
+        .interrupted_ms
+        .filter(|ms| *ms > recorded_at_ms)
+    {
+        return Reconciled {
+            state: Some(AgentState::Idle),
+            interrupted_ms: Some(ms),
+        };
+    }
+    Reconciled {
+        state: reconcile_activity(
+            state.is_blocked_on_user(),
+            asker,
+            evidence,
+            recorded_at_ms,
+            now_ms,
+            closed_ms,
+        ),
+        interrupted_ms: None,
+    }
+}
 
-    let main_ms = transcript_activity_ms(path, agent_kind);
-    let sub_ms = newest_subagent_write_ms(path);
+/// What reconciling a stored state against its transcript concluded.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Reconciled {
+    /// The state to show instead of the stored one; `None` keeps it.
+    state: Option<AgentState>,
+    /// The interrupt marker's time, when the marker ended the recorded turn.
+    interrupted_ms: Option<i64>,
+}
+
+/// The activity half of [`reconcile_live_state`]: a pending prompt resolved by
+/// the thread that asked moving past it, and a running turn gone quiet.
+fn reconcile_activity(
+    is_pending: bool,
+    asker: &Asker,
+    evidence: &Evidence,
+    recorded_at_ms: i64,
+    now_ms: i64,
+    closed_ms: Option<i64>,
+) -> Option<AgentState> {
+    let main_ms = evidence.main.last_ms;
+    let sub_ms = evidence.subagents.iter().map(|(_, ms)| *ms).max();
+
+    // A pending prompt whose thread hasn't advanced past when we recorded it is
+    // still genuinely waiting on the user — keep it, unless Claude's own signs
+    // say its dialog closed (`closed_ms`, [`DialogMarks::closed_at`]).
+    if is_pending && closed_ms.is_none() {
+        let asked_ms = match asker {
+            Asker::Main => main_ms,
+            Asker::Subagent(id) => evidence
+                .subagents
+                .iter()
+                .find(|(agent, _)| agent == id)
+                .map(|(_, ms)| *ms),
+            Asker::Unknown => main_ms.max(sub_ms),
+        };
+        if asked_ms.is_none_or(|ms| ms <= recorded_at_ms + RESOLVED_MARGIN_MS) {
+            return None;
+        }
+    }
+
     // The hook clock counts as activity in its own right, and has to: the tool
     // heartbeats (`PostToolUse`/`PostToolUseFailure`) exist precisely to prove a
     // turn is still moving when the transcript is not moving with it — a long
@@ -1327,17 +1934,13 @@ fn reconcile_live_state(
     // nothing, and the agent would still decay to "idle" mid-turn.
     //
     // Only while `active`. For a pending prompt `recorded_at_ms` is *when the
-    // prompt was recorded*, and the comparison just below is what notices the
-    // user answered — folding it in as activity would resolve every prompt
-    // against itself.
+    // prompt was recorded*, and the comparison above is what notices the user
+    // answered — folding it in as activity would resolve every prompt against
+    // itself.
+    // The sign that closed a dialog is the session moving too: an approved
+    // tool writes nothing to the transcript until it ends.
     let event_ms = (!is_pending).then_some(recorded_at_ms);
-    let last_ms = main_ms.max(sub_ms).max(event_ms)?; // None if nothing is readable
-
-    // A pending prompt whose transcript hasn't advanced past when we recorded it is
-    // still genuinely waiting on the user — keep it.
-    if is_pending && last_ms <= recorded_at_ms + RESOLVED_MARGIN_MS {
-        return None;
-    }
+    let last_ms = main_ms.max(sub_ms).max(event_ms).max(closed_ms)?; // None if nothing is readable
 
     if now_ms - last_ms >= IDLE_QUIET_MS {
         return Some(AgentState::Idle); // everything quiet → idle
@@ -1362,30 +1965,14 @@ fn reconcile_live_state(
 mod tests {
     use super::*;
 
-    /// A transcript path comes from a hook payload: only a regular file is read,
-    /// and only its tail. `/dev/zero` reports length 0 and never ends — read to
-    /// its end it would take the app's memory with it.
-    #[test]
-    fn read_tail_reads_only_the_tail_of_a_regular_file() {
-        let dir = std::env::temp_dir().join(format!("santree-read-tail-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("t.jsonl");
-        std::fs::write(&file, "0123456789").unwrap();
-
-        assert_eq!(
-            read_tail(file.to_str().unwrap(), 4).as_deref(),
-            Some("6789")
-        );
-        assert_eq!(
-            read_tail(file.to_str().unwrap(), 64).as_deref(),
-            Some("0123456789")
-        );
-        assert_eq!(read_tail("/dev/zero", 4), None);
-        assert_eq!(read_tail(dir.to_str().unwrap(), 4), None);
-        assert_eq!(read_tail(dir.join("missing").to_str().unwrap(), 4), None);
-        assert_eq!(main_activity_ms("/dev/zero"), None);
-
-        let _ = std::fs::remove_dir_all(&dir);
+    /// [`reconcile_rows`] with nothing settled from an earlier read.
+    fn reconcile(
+        rows: Vec<StateRow>,
+        now_ms: i64,
+        terminals: &Liveness,
+        roots: &RecordRoots,
+    ) -> Vec<SessionState> {
+        reconcile_rows(rows, now_ms, terminals, roots, &mut HashMap::new())
     }
 
     #[test]
@@ -1504,19 +2091,53 @@ mod tests {
         }
     }
 
-    // Write a throwaway transcript; the unique name per call avoids cross-test
-    // collisions (no tempfile dep in src-tauri — mirrors the hook crate's tests).
-    fn transcript(tag: &str, lines: &[String]) -> String {
-        let path = std::env::temp_dir().join(format!(
-            "santree-reconcile-{}-{tag}.jsonl",
-            std::process::id()
-        ));
-        std::fs::write(&path, lines.join("\n")).unwrap();
-        path.to_str().unwrap().to_string()
+    /// A stored row: session `s1`, recorded at [`T`], with no transcript and no
+    /// terminal joined — each test sets what it is about.
+    fn row(state: &str) -> StateRow {
+        StateRow {
+            session_id: "s1".into(),
+            state: state.into(),
+            event: "UserPromptSubmit".into(),
+            cwd: "/w".into(),
+            message: None,
+            transcript_path: None,
+            updated_at_ms: T,
+            asker: None,
+            permission_mode: None,
+            effort_level: None,
+            pending_kind: None,
+            pending_tool: None,
+            pending_input: None,
+            pending_suggestions: None,
+            pending_mcp_server: None,
+            pending_agent_id: None,
+            pending_agent_type: None,
+            pending_mode: None,
+            pending_prompt_id: None,
+            pending_truncated: None,
+            pending_at_ms: None,
+            pending_stacked: None,
+            pending_rendered_at_ms: None,
+            pending_resolved_at_ms: None,
+            repo: None,
+            term_key: None,
+            agent_kind: None,
+            launch_cwd: None,
+            heartbeat_ms: None,
+        }
     }
 
-    // A conversation entry stamped `ms` epoch-millis (only `type` + `timestamp`
-    // are read by the reconciler; content shape is irrelevant now).
+    /// No record roots: for the rows that read no transcript.
+    fn no_roots() -> RecordRoots {
+        RecordRoots {
+            claude: Vec::new(),
+            codex: Vec::new(),
+        }
+    }
+
+    // A conversation entry stamped `ms` epoch-millis. The reconciler reads its
+    // `type` + `timestamp`, and its content only to tell an interrupt marker,
+    // which an empty one never is.
     fn conv(role: &str, ms: i64) -> String {
         let ts = chrono::DateTime::from_timestamp_millis(ms)
             .unwrap()
@@ -1530,6 +2151,32 @@ mod tests {
     const META: &str = r#"{"type":"pr-link"}"#;
 
     const T: i64 = 1_700_000_000_000; // an arbitrary "prompt recorded at" instant
+
+    /// What a session's records say: its main loop's newest entry, and its
+    /// subagents' newest writes.
+    fn seen(main_ms: Option<i64>, subagents: &[(&str, i64)]) -> Evidence {
+        Evidence {
+            main: MainLoop {
+                last_ms: main_ms,
+                ..MainLoop::default()
+            },
+            subagents: subagents
+                .iter()
+                .map(|(id, ms)| (id.to_string(), *ms))
+                .collect(),
+        }
+    }
+
+    /// The reconciled state alone, for the tests that only check that.
+    fn live_state(
+        state: AgentState,
+        asker: &Asker,
+        evidence: &Evidence,
+        recorded_at_ms: i64,
+        now_ms: i64,
+    ) -> Option<AgentState> {
+        reconcile_live_state(state, asker, evidence, recorded_at_ms, now_ms, None).state
+    }
 
     #[test]
     fn shell_quoting_survives_hostile_paths() {
@@ -1554,34 +2201,20 @@ mod tests {
         // A stale santree-hook on disk writing a state this build doesn't know must
         // not surface as a wrong badge.
         let rows = vec![
-            (
-                "s1".into(),
-                "teleporting".into(),
-                "Notification".into(),
-                "/w".into(),
-                None,
-                None,
-                T,
-                None,
-                None,
-                None,
-                None,
-            ),
-            (
-                "s2".into(),
-                "idle".into(),
-                "Stop".into(),
-                "/w".into(),
-                None,
-                None,
-                T,
-                Some("canary".into()),
-                Some("tree:AK-1".into()),
-                Some("Claude".into()),
-                None,
-            ),
+            StateRow {
+                event: "Notification".into(),
+                ..row("teleporting")
+            },
+            StateRow {
+                session_id: "s2".into(),
+                event: "Stop".into(),
+                repo: Some("canary".into()),
+                term_key: Some("tree:AK-1".into()),
+                agent_kind: Some("Claude".into()),
+                ..row("idle")
+            },
         ];
-        let out = reconcile_rows(rows, T, &live([("tree:AK-1", CLAUDE)]));
+        let out = reconcile(rows, T, &live([("tree:AK-1", CLAUDE)]), &no_roots());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].session_id, "s2");
         assert_eq!(out[0].state, AgentState::Idle);
@@ -1597,42 +2230,36 @@ mod tests {
     /// showed as exited and a click resumed it a second time.
     #[test]
     fn a_session_bound_twice_reads_through_its_live_terminal() {
-        let bound = |term_key: &str| {
-            (
-                "s1".to_string(),
-                "active".to_string(),
-                "UserPromptSubmit".to_string(),
-                "/w".to_string(),
-                None,
-                None,
-                T,
-                Some("canary".to_string()),
-                Some(term_key.to_string()),
-                Some("Claude".to_string()),
-                None,
-            )
+        let bound = |term_key: &str| StateRow {
+            repo: Some("canary".into()),
+            term_key: Some(term_key.into()),
+            agent_kind: Some("Claude".into()),
+            ..row("active")
         };
         let live = live([("tree:AK-1:tab:live", CLAUDE)]);
         for rows in [
             vec![bound("tree:AK-1:tab:gone"), bound("tree:AK-1:tab:live")],
             vec![bound("tree:AK-1:tab:live"), bound("tree:AK-1:tab:gone")],
         ] {
-            let out = one_per_session(reconcile_rows(rows, T, &live));
+            let out = one_per_session(reconcile(rows, T, &live, &no_roots()));
             assert_eq!(out.len(), 1);
             assert_eq!(out[0].state, AgentState::Active);
             assert_eq!(out[0].term_key.as_deref(), Some("tree:AK-1:tab:live"));
         }
-        // Bound twice and running in neither: still one row, and exited.
-        let out = one_per_session(reconcile_rows(
+        // Bound twice and running in neither: still one row, and exited — while
+        // what the hook stored stays what it was.
+        let out = one_per_session(reconcile(
             vec![
                 bound("tree:AK-1:tab:gone"),
                 bound("tree:AK-1:tab:also-gone"),
             ],
             T,
             &live,
+            &no_roots(),
         ));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].state, AgentState::Exited);
+        assert_eq!(out[0].recorded_state, AgentState::Active);
     }
 
     /// The provider comes from the owning terminal's row, not from an assumption
@@ -1640,26 +2267,19 @@ mod tests {
     /// every row the moment a second provider registers one.
     #[test]
     fn the_agent_kind_comes_from_the_joined_terminal() {
-        let row = |kind: Option<&str>| {
-            (
-                "s1".to_string(),
-                "idle".to_string(),
-                "Stop".to_string(),
-                "/w".to_string(),
-                None,
-                None,
-                T,
-                Some("canary".to_string()),
-                Some("tree:AK-1".to_string()),
-                kind.map(str::to_string),
-                None,
-            )
+        let joined = |kind: Option<&str>| StateRow {
+            event: "Stop".into(),
+            repo: Some("canary".into()),
+            term_key: Some("tree:AK-1".into()),
+            agent_kind: kind.map(str::to_string),
+            ..row("idle")
         };
         assert_eq!(
-            reconcile_rows(
-                vec![row(Some("Codex"))],
+            reconcile(
+                vec![joined(Some("Codex"))],
                 T,
-                &live([("tree:AK-1", Some(AgentKind::Codex))])
+                &live([("tree:AK-1", Some(AgentKind::Codex))]),
+                &no_roots(),
             )[0]
             .agent_kind,
             Some(santree_core::domain::AgentKind::Codex)
@@ -1668,161 +2288,476 @@ mod tests {
         // logical surface, so minting a second session orphans the first, and a
         // Claude default would repaint that orphaned Codex session as Claude.
         assert_eq!(
-            reconcile_rows(vec![row(None)], T, &live([("tree:AK-1", CLAUDE)]))[0].agent_kind,
+            reconcile(
+                vec![joined(None)],
+                T,
+                &live([("tree:AK-1", CLAUDE)]),
+                &no_roots()
+            )[0]
+            .agent_kind,
             None
         );
         // A value this build doesn't know is unknown too — the row survives
         // (its state is still worth showing), it just claims no provider.
         assert_eq!(
-            reconcile_rows(vec![row(Some("Cowork"))], T, &live([("tree:AK-1", CLAUDE)]))[0]
-                .agent_kind,
+            reconcile(
+                vec![joined(Some("Cowork"))],
+                T,
+                &live([("tree:AK-1", CLAUDE)]),
+                &no_roots(),
+            )[0]
+            .agent_kind,
             None
         );
     }
 
-    /// A pending prompt (permission / waiting) resolves only when the transcript
-    /// moves past the instant it was recorded — never from its own hook clock,
-    /// which would resolve every prompt against itself and clear it instantly.
-    /// Once resolved it reads as running while the agent is busy and as idle once
-    /// quiet (even when the last line is a bare tool_result, as under remote
-    /// control). Settled states are never reconciled at all.
+    /// A pending prompt (permission / waiting) resolves only when the thread
+    /// that asked moves past the instant it was recorded — never from its own
+    /// hook clock, which would resolve every prompt against itself, and never
+    /// from another thread: a background subagent writes away while the main
+    /// thread's dialog is up, and the main thread's turn ends while a
+    /// subagent's dialog is up (CLI 2.1.312). With nobody on record as the
+    /// asker, any thread's progress resolves it, as it always did. Once
+    /// resolved it reads as running while the agent is busy and as idle once
+    /// quiet. Settled states are never reconciled at all.
     #[test]
-    fn a_pending_prompt_resolves_only_once_the_transcript_moves_past_it() {
-        // The real failing case: a permission is showing but its tool_use is
-        // withheld from the transcript — the newest entry predates the prompt, and
-        // a trailing metadata line must not be mistaken for progress.
-        let frozen = transcript(
-            "frozen",
-            &[
-                conv("assistant", T - 60_000),
-                conv("user", T - 40_000),
-                META.to_string(),
-            ],
-        );
-        for state in [AgentState::Permission, AgentState::Waiting] {
-            assert_eq!(
-                reconcile_live_state(state, Some(&frozen), None, T, T + 5_000),
-                None,
-                "{state:?}"
-            );
-        }
-
-        let answered = transcript(
-            "answered",
-            &[conv("assistant", T - 60_000), conv("user", T + 3_000)],
-        );
-        assert_eq!(
-            reconcile_live_state(AgentState::Permission, Some(&answered), None, T, T + 5_000),
-            Some(AgentState::Active),
-            "answered 2s ago: still busy"
-        );
-        assert_eq!(
-            reconcile_live_state(
-                AgentState::Permission,
-                Some(&answered),
-                None,
-                T,
-                T + 3_000 + IDLE_QUIET_MS + 1
+    fn a_pending_prompt_resolves_only_on_the_progress_of_the_thread_that_asked() {
+        use santree_core::domain::AgentState::{
+            Active, Delegating, Exited, Idle, Permission, Waiting,
+        };
+        let main = Asker::Main;
+        let sub = |id: &str| Asker::Subagent(id.to_string());
+        let unknown = Asker::Unknown;
+        // The real failing case: the newest entry predates the prompt.
+        let frozen = seen(Some(T - 40_000), &[]);
+        // The main thread moved 3 s after the prompt.
+        let answered = seen(Some(T + 3_000), &[]);
+        // Only a subagent moved; the main thread didn't.
+        let a1_moved = seen(Some(T - 40_000), &[("a1", T + 3_000)]);
+        let a2_moved = seen(Some(T - 40_000), &[("a1", T - 10_000), ("a2", T + 3_000)]);
+        let busy = T + 5_000;
+        let quiet = T + 3_000 + IDLE_QUIET_MS + 1;
+        for (why, state, asker, evidence, now, want) in [
+            ("frozen", Permission, &main, &frozen, busy, None),
+            ("frozen", Waiting, &unknown, &frozen, busy, None),
+            (
+                "main answered",
+                Permission,
+                &main,
+                &answered,
+                busy,
+                Some(Active),
             ),
-            Some(AgentState::Idle),
-            "answered, then quiet past the threshold"
-        );
-
-        for settled in [AgentState::Idle, AgentState::Exited] {
-            assert_eq!(
-                reconcile_live_state(settled, Some(&answered), None, T, T + 5_000),
+            (
+                "main answered, then quiet",
+                Permission,
+                &main,
+                &answered,
+                quiet,
+                Some(Idle),
+            ),
+            (
+                "a subagent moved, the main thread asked",
+                Permission,
+                &main,
+                &a1_moved,
+                busy,
                 None,
-                "{settled:?}"
-            );
+            ),
+            (
+                "the main thread moved, a subagent asked",
+                Permission,
+                &sub("a1"),
+                &answered,
+                busy,
+                None,
+            ),
+            (
+                "another subagent moved",
+                Permission,
+                &sub("a1"),
+                &a2_moved,
+                busy,
+                None,
+            ),
+            (
+                "the subagent that asked moved",
+                Permission,
+                &sub("a1"),
+                &a1_moved,
+                busy,
+                Some(Delegating),
+            ),
+            (
+                "nobody said who asked",
+                Permission,
+                &unknown,
+                &a1_moved,
+                busy,
+                Some(Delegating),
+            ),
+            ("settled", Idle, &unknown, &answered, busy, None),
+            ("settled", Exited, &unknown, &answered, busy, None),
+        ] {
+            assert_eq!(live_state(state, asker, evidence, T, now), want, "{why}");
+        }
+        // What santree-hook stores parses back to who asked; anything else is
+        // nobody.
+        assert_eq!(Asker::parse(Some("main")), main);
+        assert_eq!(Asker::parse(Some("agent:a1")), sub("a1"));
+        for stored in [None, Some("agent:"), Some("agent:../a1"), Some("someone")] {
+            assert_eq!(Asker::parse(stored), unknown, "{stored:?}");
         }
     }
 
     #[test]
     fn subagent_run_reads_as_delegating_not_running() {
-        // Real `now`, because we compare against a real file mtime below.
-        let now = now_ms();
-        // Main transcript last wrote 5 min ago — the agent handed off to a subagent
-        // and the main transcript then stayed silent for the whole subagent run.
-        let main = transcript("subagent", &[conv("assistant", now - 300_000)]);
-        // Without the subagent that silence reads as idle…
+        // The main transcript last wrote 5 min ago — the agent handed off to a
+        // subagent and the main transcript then stayed silent for its whole run.
+        let silent = seen(Some(T - 300_000), &[]);
         assert_eq!(
-            reconcile_live_state(AgentState::Active, Some(&main), None, now - 600_000, now),
-            Some(AgentState::Idle)
+            live_state(AgentState::Active, &Asker::Unknown, &silent, T - 600_000, T),
+            Some(AgentState::Idle),
+            "without the subagent that silence reads as idle"
         );
         // …but a subagent actively writing its own file means the main loop is
         // blocked on it → "delegating", distinct from the agent itself running.
-        let dir = subagents_dir(&main).unwrap();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("agent-x.jsonl"), "{}").unwrap(); // mtime ≈ now
+        let writing = seen(Some(T - 300_000), &[("a1", T)]);
         assert_eq!(
-            reconcile_live_state(AgentState::Active, Some(&main), None, now - 600_000, now),
+            live_state(
+                AgentState::Active,
+                &Asker::Unknown,
+                &writing,
+                T - 600_000,
+                T
+            ),
             Some(AgentState::Delegating)
         );
-        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
-    /// With no transcript to read, the *hook clock* is the only evidence left —
-    /// and it is real evidence, which is why the tool heartbeats exist. So an
-    /// unreadable transcript is not automatically "no opinion":
-    ///  - a pending prompt still abstains; only the transcript moving past the
-    ///    recorded time can show the user answered, and `recorded_at_ms` would
-    ///    otherwise resolve the prompt against itself;
-    ///  - an active session with a *fresh* hook stays active (a long build writes
-    ///    nothing to the transcript, and decaying it to idle is the reported bug);
-    ///  - an active session whose last hook is older than the quiet window decays
-    ///    to idle, transcript or no transcript.
+    /// The hook clock is evidence in its own right, which is why the tool
+    /// heartbeats exist: a long build or a long think writes nothing to the
+    /// transcript, and decaying that turn to idle is the reported bug. So:
+    ///  - a running turn with a fresh hook stays active, transcript or none;
+    ///  - one whose hook and transcript are both older than the quiet window
+    ///    decays to idle;
+    ///  - a pending prompt still abstains with nothing readable: only the
+    ///    asking thread moving past the recorded time can show the user
+    ///    answered, and `recorded_at_ms` would resolve it against itself.
     #[test]
-    fn an_unreadable_transcript_falls_back_to_the_hook_clock() {
-        assert_eq!(
-            reconcile_live_state(AgentState::Permission, None, None, T, T),
-            None,
-            "a pending prompt has nothing to resolve it but the transcript"
-        );
-        assert_eq!(
-            reconcile_live_state(AgentState::Active, Some("/no/such/file.jsonl"), None, T, T),
-            Some(AgentState::Active),
-            "the heartbeat just fired; a silent transcript doesn't mean idle"
-        );
-        assert_eq!(
-            reconcile_live_state(
+    fn the_hook_clock_keeps_a_running_turn_alive_but_resolves_no_prompt() {
+        let nothing = Evidence::default();
+        let long_silent = seen(Some(T - IDLE_QUIET_MS * 3), &[]);
+        for (why, state, evidence, recorded, now, want) in [
+            (
+                "a fresh heartbeat, no transcript",
                 AgentState::Active,
-                Some("/no/such/file.jsonl"),
-                None,
+                &nothing,
                 T,
-                T + IDLE_QUIET_MS
+                T,
+                Some(AgentState::Active),
             ),
-            Some(AgentState::Idle),
-            "no transcript and no heartbeat for the whole quiet window"
-        );
+            (
+                "no transcript, no heartbeat",
+                AgentState::Active,
+                &nothing,
+                T,
+                T + IDLE_QUIET_MS,
+                Some(AgentState::Idle),
+            ),
+            (
+                "a fresh heartbeat, a silent transcript",
+                AgentState::Active,
+                &long_silent,
+                T - 2_000,
+                T,
+                Some(AgentState::Active),
+            ),
+            (
+                "a stale heartbeat, a silent transcript",
+                AgentState::Active,
+                &long_silent,
+                T - IDLE_QUIET_MS * 2,
+                T,
+                Some(AgentState::Idle),
+            ),
+            (
+                "a prompt, no transcript",
+                AgentState::Permission,
+                &nothing,
+                T,
+                T,
+                None,
+            ),
+        ] {
+            assert_eq!(
+                live_state(state, &Asker::Unknown, evidence, recorded, now),
+                want,
+                "{why}"
+            );
+        }
     }
 
-    /// The reported bug, at the unit that caused it: a turn whose transcript has
-    /// gone quiet past `IDLE_QUIET_MS` is NOT idle if the hooks are still firing.
-    /// `PostToolUse` is the only thing that fires mid-turn, so its timestamp is
-    /// the evidence that a long build / long think is still a running turn.
+    /// A permission dialog reads closed, and the row as the turn it was part
+    /// of, by Claude's own signs ([`DialogMarks::closed_at`]): a render after
+    /// it, or its own call finishing when it wasn't stacked. Never a stacked
+    /// one by its call, never an elicitation. What closed it is the turn's
+    /// activity, not the status line's later renders (they come every 15 s
+    /// whatever the session does). With no record here to read (a Daedalus
+    /// session's is on the box) a closed dialog reads active until the next
+    /// hook. The row keeps the state the hook stored. Only the call finishing
+    /// ends the call (`call_ended_at_ms`): a render, which a late-starting
+    /// process can fake, never does.
     #[test]
-    fn a_tool_heartbeat_keeps_a_long_turn_from_decaying_to_idle() {
-        let now = now_ms();
-        // Transcript last moved well past the quiet window — a single slow tool.
-        let p = transcript("heartbeat", &[conv("assistant", now - IDLE_QUIET_MS * 3)]);
-
-        // The hook clock is stale too: genuinely finished, nothing running.
-        assert_eq!(
-            reconcile_live_state(
-                AgentState::Active,
-                Some(&p),
+    fn a_dialog_reads_closed_by_its_own_signs_only() {
+        use santree_core::domain::AgentState::{Active, Idle, Permission, Waiting};
+        let on_record = |kind: DialogKind,
+                         stacked: bool,
+                         rendered: Option<i64>,
+                         resolved: Option<i64>,
+                         record: bool| StateRow {
+            state: kind.state().as_str().into(),
+            transcript_path: record.then(|| "/w/s1.jsonl".into()),
+            pending_kind: Some(kind.as_str().into()),
+            pending_at_ms: Some(T),
+            pending_stacked: Some(stacked),
+            pending_rendered_at_ms: rendered,
+            pending_resolved_at_ms: resolved,
+            ..row("permission")
+        };
+        let (form, asks) = (DialogKind::Elicitation, DialogKind::Permission);
+        let (rendered, resolved) = (Some(T + 2_000), Some(T + 3_000));
+        let busy = T + 5_000;
+        let later = T + 2_000 + IDLE_QUIET_MS;
+        for (why, row, now, want, closed, ended) in [
+            (
+                "open",
+                on_record(asks, false, None, None, true),
+                busy,
+                Permission,
                 None,
-                now - IDLE_QUIET_MS * 2,
-                now
+                None,
             ),
-            Some(AgentState::Idle)
-        );
-        // Same silent transcript, but a heartbeat landed a moment ago → still working.
-        assert_eq!(
-            reconcile_live_state(AgentState::Active, Some(&p), None, now - 2_000, now),
-            Some(AgentState::Active),
-            "a fresh tool heartbeat is activity even when the transcript is silent"
-        );
+            (
+                "rendered",
+                on_record(asks, false, rendered, None, true),
+                busy,
+                Active,
+                rendered,
+                None,
+            ),
+            (
+                "rendered, stacked",
+                on_record(asks, true, rendered, None, true),
+                busy,
+                Active,
+                rendered,
+                None,
+            ),
+            (
+                "rendered, then quiet",
+                on_record(asks, true, rendered, None, true),
+                later,
+                Idle,
+                rendered,
+                None,
+            ),
+            (
+                "its call finished",
+                on_record(asks, false, None, resolved, true),
+                busy,
+                Active,
+                resolved,
+                resolved,
+            ),
+            (
+                "rendered, then its call finished",
+                on_record(asks, false, rendered, resolved, true),
+                busy,
+                Active,
+                resolved,
+                resolved,
+            ),
+            (
+                "finished, stacked",
+                on_record(asks, true, None, resolved, true),
+                busy,
+                Permission,
+                None,
+                None,
+            ),
+            (
+                "a form, rendered",
+                on_record(form, false, rendered, None, true),
+                busy,
+                Waiting,
+                None,
+                None,
+            ),
+            (
+                "no record",
+                on_record(asks, false, None, resolved, false),
+                later * 2,
+                Active,
+                resolved,
+                resolved,
+            ),
+            (
+                "no record, stacked",
+                on_record(asks, true, None, resolved, false),
+                busy,
+                Permission,
+                None,
+                None,
+            ),
+        ] {
+            let stored = AgentState::parse(&row.state);
+            let read = reconcile(vec![row], now, &live([]), &no_roots()).remove(0);
+            let ms = |at: Option<i64>| at.map(|ms| ms as f64);
+            assert_eq!(
+                (
+                    Some(read.recorded_state),
+                    read.state,
+                    read.prompt.map(|p| (p.closed_at_ms, p.call_ended_at_ms))
+                ),
+                (stored, want, Some((ms(closed), ms(ended)))),
+                "{why}"
+            );
+        }
+    }
+
+    /// The bug: Claude fires no `Stop` for a turn the user interrupts, so after an
+    /// Esc the row read "working" for the whole quiet window. The record Claude
+    /// writes for the interrupt ends the turn, and its time is what the
+    /// conversation composer takes as the turn's end (`interrupted_at_ms`).
+    #[test]
+    fn an_interrupted_turn_reads_idle_without_waiting_out_the_quiet_window() {
+        use santree_core::domain::AgentState::{Active, Idle, Permission};
+        // A main-chain record as real transcripts carry it (CLI 2.1.291–2.1.312):
+        // the keys are Claude's, the values made up.
+        let record = |ms: i64, fields: Value| {
+            let mut r = json!({
+                "parentUuid": "7d1e0c52-5b0a-4f3e-9c41-2a8f6b3d9e10",
+                "isSidechain": false,
+                "promptId": "c3a9f1e2-6d4b-4a7c-8e5f-1b2d3c4e5f60",
+                "type": "user",
+                "uuid": "e4b8d2a1-9c3f-4e6a-b5d7-0f1a2b3c4d5e",
+                "timestamp": chrono::DateTime::from_timestamp_millis(ms)
+                    .unwrap()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "userType": "external",
+                "entrypoint": "cli",
+                "cwd": "/Users/me/dev/app",
+                "sessionId": "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+                "session_id": "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+                "version": "2.1.309",
+                "gitBranch": "main",
+            });
+            if let (Value::Object(r), Value::Object(fields)) = (&mut r, fields) {
+                r.extend(fields);
+            }
+            r.to_string()
+        };
+        let marker = |text: &str, ms: i64| {
+            record(
+                ms,
+                json!({
+                    "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+                    "interruptedMessageId": "msg_01AbCdEfGhIjKlMnOpQrStUv",
+                }),
+            )
+        };
+        // An Esc at a permission prompt rejects the tool, then writes its marker.
+        let rejected = |ms: i64| {
+            record(
+                ms,
+                json!({
+                    "message": { "role": "user", "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_01AbCdEfGhIjKlMnOpQrStUv",
+                        "content": "(rejected)",
+                        "is_error": true,
+                    }] },
+                    "toolUseResult": "(rejected)",
+                    "toolDenialKind": "user-rejected",
+                    "sourceToolAssistantUUID": "2b6f4c1d-8e3a-4f5b-9c7d-6e1f0a2b3c4d",
+                }),
+            )
+        };
+
+        let answering = vec![
+            conv("user", T),
+            conv("assistant", T + 1_000),
+            marker("[Request interrupted by user]", T + 2_000),
+            META.to_string(),
+        ];
+        let at_prompt = vec![
+            conv("user", T - 5_000),
+            conv("assistant", T - 1_000),
+            rejected(T + 3_000),
+            marker("[Request interrupted by user for tool use]", T + 3_000),
+        ];
+        let next_turn = [
+            answering.clone(),
+            vec![conv("user", T + 5_000), conv("assistant", T + 6_000)],
+        ]
+        .concat();
+        // (transcript, stored state, recorded at T + _, read at T + _, read as, marker at T + _)
+        for (tag, lines, state, recorded, now, want, interrupted) in [
+            // Esc while Claude was answering: idle now, not 30 s from now.
+            ("answering", &answering, Active, 0, 4_000, Idle, Some(2_000)),
+            // Esc at a prompt answers it and ends the turn with it.
+            (
+                "at-prompt",
+                &at_prompt,
+                Permission,
+                0,
+                5_000,
+                Idle,
+                Some(3_000),
+            ),
+            // The next prompt's hook lands before its transcript line: the marker
+            // ended the turn before this one, which is running.
+            (
+                "resubmitted",
+                &answering,
+                Active,
+                10_000,
+                11_000,
+                Active,
+                None,
+            ),
+            // Once that line lands, the marker is not the newest record any more.
+            ("next-turn", &next_turn, Active, 5_000, 7_000, Active, None),
+        ] {
+            let evidence = Evidence {
+                main: main_activity(&lines.join("\n")),
+                subagents: Vec::new(),
+            };
+            assert_eq!(
+                reconcile_live_state(
+                    state,
+                    &Asker::Unknown,
+                    &evidence,
+                    T + recorded,
+                    T + now,
+                    None
+                ),
+                Reconciled {
+                    state: Some(want),
+                    interrupted_ms: interrupted.map(|ms| T + ms),
+                },
+                "{tag}"
+            );
+        }
+    }
+
+    /// A directory under the test's own scratch dir, emptied first.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("santree-hooks-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     /// A Codex rollout shares nothing with a Claude transcript but its extension,
@@ -1838,59 +2773,181 @@ mod tests {
                 .unwrap()
                 .to_rfc3339()
         };
-        let dir = std::env::temp_dir().join(format!("santree-rollout-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("rollout-2026-08-28T10-00-00-abc123.jsonl");
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n{}\n",
-                // `session_meta` is the thread's *opening* record and must never
-                // count as activity, or a thread idle since it opened reads fresh.
-                serde_json::json!({"timestamp": stamp(now - 600_000), "type": "session_meta",
-                                   "payload": {"id": "abc123", "cwd": "/w"}}),
-                serde_json::json!({"timestamp": stamp(now - 2_000), "type": "event_msg",
-                                   "payload": {"type": "agent_message", "message": "working"}}),
-            ),
-        )
-        .unwrap();
-        let p = path.to_str().unwrap();
+        let base = scratch("rollout");
+        let sessions = base.join("sessions");
+        let day = sessions.join("2026/08/28");
+        std::fs::create_dir_all(&day).unwrap();
+        let thread = "01998f6c-1d3f-7c11-9a2b-4e6f8a0b1c2d";
+        let path = day.join(format!("rollout-2026-08-28T10-00-00-{thread}.jsonl"));
+        let text = format!(
+            "{}\n{}\n",
+            // `session_meta` is the thread's *opening* record and must never
+            // count as activity, or a thread idle since it opened reads fresh.
+            json!({"timestamp": stamp(now - 600_000), "type": "session_meta",
+                   "payload": {"id": thread, "cwd": "/w"}}),
+            json!({"timestamp": stamp(now - 2_000), "type": "event_msg",
+                   "payload": {"type": "agent_message", "message": "working"}}),
+        );
+        std::fs::write(&path, &text).unwrap();
+        let roots = RecordRoots {
+            claude: Vec::new(),
+            codex: record_file::canonical(std::slice::from_ref(&sessions)),
+        };
+        let rollout = StateRow {
+            session_id: thread.into(),
+            transcript_path: Some(path.to_string_lossy().into_owned()),
+            ..row("active")
+        };
 
         // The Claude reader finds nothing in it — the old behaviour, now scoped.
-        assert_eq!(main_activity_ms(p), None);
-        // Routed by the registry's provider…
-        assert_eq!(
-            reconcile_live_state(AgentState::Active, Some(p), Some(AgentKind::Codex), T, now),
-            Some(AgentState::Active)
-        );
-        // …and by the file name alone when the terminal join is gone.
-        assert_eq!(
-            reconcile_live_state(AgentState::Active, Some(p), None, T, now),
-            Some(AgentState::Active)
-        );
+        assert_eq!(main_activity(&text), MainLoop::default());
+        // Routed by the registry's provider, and by the file name alone when
+        // the terminal join is gone.
+        for kind in [Some(AgentKind::Codex), None] {
+            let evidence = evidence(&rollout, kind, &roots);
+            assert_eq!(
+                live_state(AgentState::Active, &Asker::Unknown, &evidence, T, now),
+                Some(AgentState::Active),
+                "{kind:?}"
+            );
+        }
         // And it genuinely reads the record timestamps: rewind them past the quiet
         // window and the same file reports idle.
         std::fs::write(
             &path,
             format!(
                 "{}\n",
-                serde_json::json!({"timestamp": stamp(now - IDLE_QUIET_MS * 3), "type": "event_msg",
-                                   "payload": {"type": "agent_message", "message": "done"}}),
+                json!({"timestamp": stamp(now - IDLE_QUIET_MS * 3), "type": "event_msg",
+                       "payload": {"type": "agent_message", "message": "done"}}),
             ),
         )
         .unwrap();
+        let evidence = evidence(&rollout, Some(AgentKind::Codex), &roots);
         assert_eq!(
-            reconcile_live_state(
+            live_state(
                 AgentState::Active,
-                Some(p),
-                Some(AgentKind::Codex),
+                &Asker::Unknown,
+                &evidence,
                 now - IDLE_QUIET_MS * 2,
                 now
             ),
             Some(AgentState::Idle)
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The transcript path is whatever a hook payload said, and any process
+    /// running as the user can run the hook. So the record read is the one the
+    /// row names — `<root>/<slug of cwd>/<session id>.jsonl`, or the reported
+    /// path when it names that very file inside the roots — opened without
+    /// following a link, without blocking, and checked inside the roots by the
+    /// handle's own path. Each case plants something where a read would land;
+    /// only the session's own record (two of them, the second found through a
+    /// reported path after its cwd moved) may be read.
+    #[test]
+    fn a_reported_transcript_path_reads_only_that_sessions_own_record() {
+        let base = scratch("evidence");
+        let projects = base.join("projects");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let roots = RecordRoots {
+            claude: Vec::new(),
+            codex: Vec::new(),
+        };
+        let roots = RecordRoots {
+            claude: {
+                std::fs::create_dir_all(&projects).unwrap();
+                record_file::canonical(std::slice::from_ref(&projects))
+            },
+            ..roots
+        };
+        let records = format!("{}\n", conv("user", T));
+        let sid = |n: u8| format!("9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e{n:02x}");
+        let cwd = |n: u8| format!("/Users/me/dev/app{n}");
+        let at = |n: u8| {
+            projects
+                .join(crate::session::project_slug(&cwd(n)))
+                .join(format!("{}.jsonl", sid(n)))
+        };
+        let put = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+
+        // 1: the session's own record, where its cwd derives it.
+        put(&at(1), &records);
+        // 2: a FIFO where the record should be (opening one blocks for a writer).
+        std::fs::create_dir_all(at(2).parent().unwrap()).unwrap();
+        let fifo = std::ffi::CString::new(at(2).to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        // 3: a link to another session's record inside the roots.
+        std::fs::create_dir_all(at(3).parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(at(1), at(3)).unwrap();
+        // 4: the project directory itself a link to a directory outside.
+        let elsewhere = outside.join("project");
+        put(&elsewhere.join(format!("{}.jsonl", sid(4))), &records);
+        std::os::unix::fs::symlink(&elsewhere, at(4).parent().unwrap()).unwrap();
+        // 5: the right name, outside the roots.
+        let stray = outside.join(format!("{}.jsonl", sid(5)));
+        put(&stray, &records);
+        // 7: a session whose cwd moved: found through the reported path.
+        let moved = projects
+            .join("-Users-me-dev-app7-sub")
+            .join(format!("{}.jsonl", sid(7)));
+        put(&moved, &records);
+
+        let evidence_of = |n: u8, reported: &Path| {
+            let row = StateRow {
+                session_id: sid(n),
+                cwd: cwd(n),
+                launch_cwd: Some(cwd(n)),
+                transcript_path: Some(reported.to_string_lossy().into_owned()),
+                ..row("active")
+            };
+            evidence(&row, Some(AgentKind::Claude), &roots)
+        };
+        let read = Evidence {
+            main: MainLoop {
+                last_ms: Some(T),
+                ..MainLoop::default()
+            },
+            subagents: Vec::new(),
+        };
+        let nothing = Evidence::default();
+        for (n, reported, want, why) in [
+            (1, at(1), &read, "its own record"),
+            (2, at(2), &nothing, "a FIFO"),
+            (3, at(3), &nothing, "a link in the record's place"),
+            (4, at(4), &nothing, "a link above the record"),
+            (
+                5,
+                stray.clone(),
+                &nothing,
+                "a reported path outside the roots",
+            ),
+            (6, at(1), &nothing, "another session's record, reported"),
+            (
+                7,
+                moved.clone(),
+                &read,
+                "its own record, its cwd since moved",
+            ),
+        ] {
+            assert_eq!(&evidence_of(n, &reported), want, "{n}: {why}");
+        }
+        // A Codex row reads only a rollout of its own thread inside Codex's root.
+        let rollout = outside.join(format!("rollout-2026-08-28T10-00-00-{}.jsonl", sid(8)));
+        put(&rollout, &records);
+        let codex = StateRow {
+            session_id: sid(8),
+            transcript_path: Some(rollout.to_string_lossy().into_owned()),
+            ..row("active")
+        };
+        assert_eq!(evidence(&codex, Some(AgentKind::Codex), &roots), nothing);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A row with a live-looking state whose terminal is gone is not running,
@@ -1899,30 +2956,33 @@ mod tests {
     /// there is nothing for a straggling hook write to win against.
     #[test]
     fn a_session_whose_terminal_died_cannot_read_as_running() {
-        let row = |state: &str| {
-            (
-                "s1".to_string(),
-                state.to_string(),
-                "UserPromptSubmit".to_string(),
-                "/w".to_string(),
-                Some("run Bash".to_string()),
-                None,
-                now_ms(),
-                Some("canary".to_string()),
-                Some("tree:AK-1".to_string()),
-                Some("Claude".to_string()),
-                None,
-            )
+        let joined = |state: &str| StateRow {
+            message: Some("run Bash".into()),
+            updated_at_ms: now_ms(),
+            repo: Some("canary".into()),
+            term_key: Some("tree:AK-1".into()),
+            agent_kind: Some("Claude".into()),
+            ..row(state)
         };
 
         for state in ["active", "delegating", "permission", "waiting"] {
             // Terminal still open → the stored state stands.
-            let out = reconcile_rows(vec![row(state)], now_ms(), &live([("tree:AK-1", CLAUDE)]));
+            let out = reconcile(
+                vec![joined(state)],
+                now_ms(),
+                &live([("tree:AK-1", CLAUDE)]),
+                &no_roots(),
+            );
             assert_ne!(out[0].state, AgentState::Exited, "{state} with a live pty");
 
             // Terminal gone (closed, crashed, or the app restarted) → exited, and
             // the now-meaningless prompt text goes with it.
-            let out = reconcile_rows(vec![row(state)], now_ms(), &live([("tree:OTHER", CLAUDE)]));
+            let out = reconcile(
+                vec![joined(state)],
+                now_ms(),
+                &live([("tree:OTHER", CLAUDE)]),
+                &no_roots(),
+            );
             assert_eq!(out[0].state, AgentState::Exited, "{state} with a dead pty");
             assert_eq!(out[0].message, None, "{state} keeps no stale prompt text");
         }
@@ -1931,7 +2991,7 @@ mod tests {
         // correct answer rather than a missing one: that pty could not outlive
         // the process that opened it. (With a local server the answer is only
         // "none" when it is complete: see the test below.)
-        let out = reconcile_rows(vec![row("active")], now_ms(), &live([]));
+        let out = reconcile(vec![joined("active")], now_ms(), &live([]), &no_roots());
         assert_eq!(out[0].state, AgentState::Exited);
     }
 
@@ -1941,26 +3001,20 @@ mod tests {
     /// that *is* known live is still live.
     #[test]
     fn an_incomplete_liveness_answer_keeps_every_agent_as_it_was() {
-        let row = |term_key: &str, state: &str| {
-            (
-                format!("s-{term_key}"),
-                state.to_string(),
-                "UserPromptSubmit".to_string(),
-                "/w".to_string(),
-                Some("Allow Bash?".to_string()),
-                None,
-                now_ms(),
-                Some("repo".to_string()),
-                Some(term_key.to_string()),
-                Some("Claude".to_string()),
-                None,
-            )
+        let joined = |term_key: &str, state: &str| StateRow {
+            session_id: format!("s-{term_key}"),
+            message: Some("Allow Bash?".into()),
+            updated_at_ms: now_ms(),
+            repo: Some("repo".into()),
+            term_key: Some(term_key.into()),
+            agent_kind: Some("Claude".into()),
+            ..row(state)
         };
+        let read = |rows, liveness: &Liveness| reconcile(rows, now_ms(), liveness, &no_roots());
         for state in ["active", "delegating", "permission", "waiting"] {
             // Absent from an answer that couldn't see everything: unknown.
-            let out = reconcile_rows(
-                vec![row("tree:AK-1", state)],
-                now_ms(),
+            let out = read(
+                vec![joined("tree:AK-1", state)],
                 &unsure([("tree:OTHER", CLAUDE)]),
             );
             assert_ne!(
@@ -1969,22 +3023,21 @@ mod tests {
                 "{state} was declared exited on a partial answer"
             );
             // Nothing at all known (the server is down or not yet adopted).
-            let out = reconcile_rows(vec![row("tree:AK-1", state)], now_ms(), &unsure([]));
+            let out = read(vec![joined("tree:AK-1", state)], &unsure([]));
             assert_ne!(out[0].state, AgentState::Exited, "{state}, nothing known");
         }
         // The prompt a blocked agent shows survives: the row was left alone.
-        let out = reconcile_rows(vec![row("tree:AK-1", "permission")], now_ms(), &unsure([]));
+        let out = read(vec![joined("tree:AK-1", "permission")], &unsure([]));
         assert_eq!(out[0].state, AgentState::Permission);
         assert_eq!(out[0].message.as_deref(), Some("Allow Bash?"));
         // Positive evidence still counts, complete or not.
-        let out = reconcile_rows(
-            vec![row("tree:AK-1", "active")],
-            now_ms(),
+        let out = read(
+            vec![joined("tree:AK-1", "active")],
             &unsure([("tree:AK-1", CLAUDE)]),
         );
         assert_eq!(out[0].state, AgentState::Active);
         // And a complete answer is the join it always was.
-        let out = reconcile_rows(vec![row("tree:AK-1", "active")], now_ms(), &live([]));
+        let out = read(vec![joined("tree:AK-1", "active")], &live([]));
         assert_eq!(out[0].state, AgentState::Exited);
         assert_eq!(out[0].message, None);
     }
@@ -1998,20 +3051,14 @@ mod tests {
     /// only signal saying it needed a human.
     #[test]
     fn a_live_triage_or_review_pane_is_not_retired_by_the_join() {
-        let row = |term_key: &str, kind: &str, state: &str| {
-            (
-                "s1".to_string(),
-                state.to_string(),
-                "Notification".to_string(),
-                "/w".to_string(),
-                Some("Which environment?".to_string()),
-                None,
-                now_ms(),
-                Some("canary".to_string()),
-                Some(term_key.to_string()),
-                Some(kind.to_string()),
-                None,
-            )
+        let joined = |term_key: &str, kind: &str, state: &str| StateRow {
+            event: "Notification".into(),
+            message: Some("Which environment?".into()),
+            updated_at_ms: now_ms(),
+            repo: Some("canary".into()),
+            term_key: Some(term_key.into()),
+            agent_kind: Some(kind.into()),
+            ..row(state)
         };
         for (term_key, kind, agent) in [
             ("triage:AK-1", "Codex", Some(AgentKind::Codex)),
@@ -2019,7 +3066,12 @@ mod tests {
         ] {
             let live_now = live([(term_key, agent)]);
             for state in ["active", "delegating", "permission", "waiting"] {
-                let out = reconcile_rows(vec![row(term_key, kind, state)], now_ms(), &live_now);
+                let out = reconcile(
+                    vec![joined(term_key, kind, state)],
+                    now_ms(),
+                    &live_now,
+                    &no_roots(),
+                );
                 assert_ne!(
                     out[0].state,
                     AgentState::Exited,
@@ -2027,7 +3079,12 @@ mod tests {
                 );
             }
             // The prompt text a `waiting` row carries is what the retirement ate.
-            let out = reconcile_rows(vec![row(term_key, kind, "waiting")], now_ms(), &live_now);
+            let out = reconcile(
+                vec![joined(term_key, kind, "waiting")],
+                now_ms(),
+                &live_now,
+                &no_roots(),
+            );
             assert_eq!(out[0].message.as_deref(), Some("Which environment?"));
         }
     }
@@ -2039,35 +3096,34 @@ mod tests {
     #[test]
     fn two_providers_on_one_surface_are_joined_apart() {
         let surface = "ai-review:acme/web#53957";
-        let row = |kind: &str| {
-            (
-                format!("s-{kind}"),
-                "active".to_string(),
-                "UserPromptSubmit".to_string(),
-                "/w".to_string(),
-                None,
-                None,
-                now_ms(),
-                Some("canary".to_string()),
-                Some(surface.to_string()),
-                Some(kind.to_string()),
-                None,
-            )
+        let joined = |kind: &str| StateRow {
+            session_id: format!("s-{kind}"),
+            updated_at_ms: now_ms(),
+            repo: Some("canary".into()),
+            term_key: Some(surface.into()),
+            agent_kind: Some(kind.into()),
+            ..row("active")
         };
-        let rows = vec![row("Claude"), row("Codex")];
+        let rows = vec![joined("Claude"), joined("Codex")];
 
         // Both panes open: both rows stand.
-        let out = reconcile_rows(
+        let out = reconcile(
             rows.clone(),
             now_ms(),
             &live([(surface, CLAUDE), (surface, Some(AgentKind::Codex))]),
+            &no_roots(),
         );
         assert!(out.iter().all(|s| s.state != AgentState::Exited));
 
         // Only Codex's pane open: Claude's row retires, Codex's does not. Keyed by
         // the surface alone, the Codex pane would have kept the dead Claude
         // session looking alive.
-        let out = reconcile_rows(rows, now_ms(), &live([(surface, Some(AgentKind::Codex))]));
+        let out = reconcile(
+            rows,
+            now_ms(),
+            &live([(surface, Some(AgentKind::Codex))]),
+            &no_roots(),
+        );
         let state_of = |id: &str| {
             out.iter()
                 .find(|s| s.session_id == id)
@@ -2105,21 +3161,13 @@ mod tests {
         );
 
         // And a row with no evidence either way is left exactly as stored.
-        let row = (
-            "s1".to_string(),
-            "active".to_string(),
-            "UserPromptSubmit".to_string(),
-            "/w".to_string(),
-            None,
-            None,
-            now,
-            None,
-            None,
-            Some("Codex".to_string()),
-            None,
-        );
+        let unjoined = StateRow {
+            updated_at_ms: now,
+            agent_kind: Some("Codex".into()),
+            ..row("active")
+        };
         assert_eq!(
-            reconcile_rows(vec![row], now, &empty)[0].state,
+            reconcile(vec![unjoined], now, &empty, &no_roots())[0].state,
             AgentState::Active
         );
     }
@@ -2213,6 +3261,324 @@ mod tests {
             1
         );
         assert_eq!(state_of("s-beta").await.0, "exited");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A Claude event for session `sid`, through the hook's own code into
+    /// `db` — the writes the binary makes for it.
+    async fn hook(db: &crate::db::Db, event: &str, payload: Value) {
+        let mut conn = db.acquire().await.unwrap();
+        let applied = santree_hook::apply(
+            &mut conn,
+            &santree_hook::Invocation::Hook {
+                event: event.into(),
+                agent: AgentKind::Claude,
+            },
+            payload.to_string().as_bytes(),
+            &santree_hook::HookEnv::default(),
+        )
+        .await;
+        assert!(
+            applied.failures.is_empty(),
+            "{event}: {:?}",
+            applied.failures
+        );
+    }
+
+    /// The dialog a `PermissionRequest` put up reaches the frontend with the
+    /// row it was stored with, by the migrated schema and the hook's own
+    /// writes: through the Notification ~6 s later, and not past a write that
+    /// isn't the one that stored it (an older hook binary's, which leaves the
+    /// columns behind) or past the turn's end.
+    #[tokio::test]
+    async fn the_dialog_on_record_reaches_the_view_while_it_is_the_rows() {
+        let base = scratch("dialog-e2e");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let sid = "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e51";
+        let asks = json!({
+            "session_id": sid, "cwd": "/w", "prompt_id": "p-1",
+            "permission_mode": "default", "effort": { "level": "medium" },
+            "hook_event_name": "PermissionRequest", "tool_name": "Bash",
+            "tool_input": { "command": "touch probe-a", "description": "Create probe file" },
+            "permission_suggestions": [{ "type": "setMode", "mode": "acceptEdits", "destination": "session" }],
+        });
+        let read = || {
+            let db = db.clone();
+            async move {
+                let states = session_states(&db, live([])).await.unwrap();
+                states.into_iter().find(|s| s.session_id == sid).unwrap()
+            }
+        };
+
+        hook(&db, "PermissionRequest", asks.clone()).await;
+        let state = read().await;
+        let prompt = state.prompt.clone().expect("the dialog on record");
+        assert_eq!(
+            (
+                prompt.kind,
+                prompt.tool_name.as_deref(),
+                serde_json::from_str::<Value>(&prompt.tool_input).unwrap(),
+                prompt
+                    .suggestions
+                    .as_deref()
+                    .map(|s| serde_json::from_str::<Value>(s).unwrap()),
+                prompt.permission_mode.as_deref(),
+                prompt.prompt_id.as_deref(),
+                prompt.recorded_at_ms,
+                prompt.truncated,
+            ),
+            (
+                DialogKind::Permission,
+                Some("Bash"),
+                asks["tool_input"].clone(),
+                Some(asks["permission_suggestions"].clone()),
+                Some("default"),
+                Some("p-1"),
+                state.updated_at_ms,
+                false,
+            )
+        );
+        assert_eq!(
+            (
+                state.permission_mode.as_deref(),
+                state.effort_level.as_deref()
+            ),
+            (Some("default"), Some("medium"))
+        );
+
+        hook(
+            &db,
+            "Notification",
+            json!({ "session_id": sid, "cwd": "/w", "notification_type": "permission_prompt",
+                    "message": "Claude needs your permission" }),
+        )
+        .await;
+        assert_eq!(read().await.prompt, Some(prompt.clone()));
+
+        // A write that didn't store the dialog leaves its columns, not its claim.
+        sqlx::query("UPDATE session_state SET updated_at_ms = updated_at_ms + 1")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(read().await.prompt, None);
+
+        hook(&db, "PermissionRequest", asks.clone()).await;
+        assert!(read().await.prompt.is_some());
+        // Its own call finishing closes it, and the row reads as the turn
+        // going on, while it keeps what the hook stored.
+        let mut ran = asks;
+        ran["hook_event_name"] = "PostToolUse".into();
+        ran["tool_response"] = json!({ "stdout": "", "stderr": "", "interrupted": false });
+        ran["tool_use_id"] = "toolu_01AbCdEfGhIjKlMnOpQrStUv".into();
+        hook(&db, "PostToolUse", ran).await;
+        let state = read().await;
+        assert_eq!(
+            (
+                state.recorded_state,
+                state.state,
+                state.prompt.map(|p| (
+                    p.stacked,
+                    p.call_ended_at_ms.is_some_and(|at| at >= p.recorded_at_ms),
+                    p.closed_at_ms == p.call_ended_at_ms
+                ))
+            ),
+            (
+                AgentState::Permission,
+                AgentState::Active,
+                Some((false, true, true))
+            )
+        );
+        hook(
+            &db,
+            "Stop",
+            json!({ "session_id": sid, "cwd": "/w", "prompt_id": "p-1" }),
+        )
+        .await;
+        let state = read().await;
+        assert_eq!(
+            (state.recorded_state, state.prompt),
+            (AgentState::Idle, None)
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The reply as Claude draws it, from `MessageDisplay` payloads as CLI
+    /// 2.1.312 sends them, through the hook into the migrated schema and back:
+    /// batches that land out of order (captured) read in order, and only from
+    /// the message's start; the next message replaces it; the cap keeps the
+    /// tail; the turn's `Stop` ends it, and a batch landing after that `Stop`
+    /// (they fire in the same millisecond) does not bring it back.
+    #[tokio::test]
+    async fn a_streaming_reply_reads_in_order_and_ends_with_its_turn() {
+        let base = scratch("live-text");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let sid = "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e52";
+        let batch = |message: &str, index: u32, last: bool, delta: &str| {
+            json!({
+                "session_id": sid, "transcript_path": "/t.jsonl", "cwd": "/w",
+                "prompt_id": "p-1", "hook_event_name": "MessageDisplay",
+                "turn_id": "turn-1", "message_id": message, "index": index,
+                "final": last, "delta": delta,
+            })
+        };
+        let text = || {
+            let db = db.clone();
+            async move {
+                session_live_text(&db, sid)
+                    .await
+                    .unwrap()
+                    .map(|live| (live.text, live.complete, live.truncated))
+            }
+        };
+
+        hook(
+            &db,
+            "UserPromptSubmit",
+            json!({ "session_id": sid, "cwd": "/w", "prompt_id": "p-1", "prompt": "go" }),
+        )
+        .await;
+        hook(
+            &db,
+            "MessageDisplay",
+            batch("m-1", 1, true, "Alpha line three"),
+        )
+        .await;
+        assert_eq!(text().await, None, "the start hasn't landed yet");
+        hook(
+            &db,
+            "MessageDisplay",
+            batch("m-1", 0, false, "Alpha line one\nAlpha line two\n"),
+        )
+        .await;
+        assert_eq!(
+            text().await,
+            Some((
+                "Alpha line one\nAlpha line two\nAlpha line three".into(),
+                true,
+                false
+            ))
+        );
+
+        hook(&db, "MessageDisplay", batch("m-2", 0, false, "Beta one\n")).await;
+        assert_eq!(text().await, Some(("Beta one\n".into(), false, false)));
+        let long = "x".repeat(20 * 1024) + "\n";
+        hook(&db, "MessageDisplay", batch("m-2", 1, false, &long)).await;
+        hook(&db, "MessageDisplay", batch("m-2", 2, false, &long)).await;
+        let (kept, _, cut) = text().await.unwrap();
+        assert!(cut && kept == long, "the cap keeps the newest batches");
+
+        hook(
+            &db,
+            "Stop",
+            json!({ "session_id": sid, "cwd": "/w", "prompt_id": "p-1" }),
+        )
+        .await;
+        assert_eq!(text().await, None);
+        // A one-line reply is one batch (index 0, final) fired in the same
+        // millisecond as the turn's `Stop`, and it can land after it.
+        hook(&db, "MessageDisplay", batch("m-3", 0, true, "Gamma done")).await;
+        assert_eq!(text().await, None, "a batch of a turn that is over");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A message queued while Claude worked starts its own turn right after the
+    /// `Stop`, and no hook says so (CLI 2.1.312, captured): an idle row whose
+    /// transcript holds that delivery, with no turn end after it, is working.
+    /// Display only — the row keeps what the hook stored.
+    #[test]
+    fn a_queued_delivery_after_stop_reads_as_working() {
+        let base = scratch("queued");
+        let projects = base.join("projects");
+        let sid = "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e53";
+        let cwd = "/Users/me/dev/app";
+        let path = projects
+            .join(crate::session::project_slug(cwd))
+            .join(format!("{sid}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let roots = RecordRoots {
+            claude: record_file::canonical(std::slice::from_ref(&projects)),
+            codex: Vec::new(),
+        };
+        let now = now_ms();
+        let stopped = now - 2_000;
+        let at = |ms: i64| {
+            chrono::DateTime::from_timestamp_millis(ms)
+                .unwrap()
+                .to_rfc3339()
+        };
+        let user = |ms: i64, source: &str, text: &str| {
+            json!({"type": "user", "isSidechain": false, "promptSource": source,
+                   "timestamp": at(ms), "message": {"role": "user", "content": text}})
+            .to_string()
+        };
+        let end = |ms: i64| {
+            json!({"type": "system", "subtype": "turn_duration", "isSidechain": false,
+                   "timestamp": at(ms)})
+            .to_string()
+        };
+        let first_turn = [
+            user(stopped - 10_000, "typed", "first"),
+            conv("assistant", stopped - 5),
+            end(stopped),
+        ];
+        let read = |lines: &[String], stored: i64| {
+            std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+            let row = StateRow {
+                session_id: sid.into(),
+                event: "Stop".into(),
+                cwd: cwd.into(),
+                transcript_path: Some(path.to_string_lossy().into_owned()),
+                updated_at_ms: stored,
+                repo: Some("canary".into()),
+                term_key: Some("tree:AK-1".into()),
+                agent_kind: Some("Claude".into()),
+                launch_cwd: Some(cwd.into()),
+                ..row("idle")
+            };
+            let out = reconcile(vec![row], now, &live([("tree:AK-1", CLAUDE)]), &roots);
+            (out[0].state, out[0].recorded_state)
+        };
+        let delivered = [
+            first_turn.to_vec(),
+            vec![user(stopped + 5, "queued", "queued while it worked")],
+        ]
+        .concat();
+
+        assert_eq!(
+            read(&first_turn, stopped),
+            (AgentState::Idle, AgentState::Idle)
+        );
+        assert_eq!(
+            read(&delivered, stopped),
+            (AgentState::Active, AgentState::Idle)
+        );
+        // The delivered turn ended (its own `Stop` is on its way), or the user
+        // stopped it: idle again.
+        let interrupted =
+            json!({"type": "user", "isSidechain": false, "timestamp": at(stopped + 900),
+                                 "message": {"role": "user", "content": [
+                                     {"type": "text", "text": "[Request interrupted by user]"}]}})
+            .to_string();
+        for ended in [end(stopped + 900), interrupted] {
+            let lines = [delivered.clone(), vec![ended]].concat();
+            assert_eq!(read(&lines, stopped), (AgentState::Idle, AgentState::Idle));
+        }
+        // A row stored well after the delivery is that turn's own `Stop`,
+        // whatever records the CLI writes at a turn's end.
+        let second_stop = now - 500;
+        let answered = [
+            user(second_stop - 30_000, "typed", "first"),
+            end(second_stop - 20_005),
+            user(second_stop - 20_000, "queued", "queued while it worked"),
+            conv("assistant", second_stop - 100),
+        ];
+        assert_eq!(
+            read(&answered, second_stop),
+            (AgentState::Idle, AgentState::Idle)
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

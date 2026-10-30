@@ -32,8 +32,10 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use santree_core::domain::{AgentKind, AgentState};
+use santree_core::conversation::claude::is_subagent_id;
+use santree_core::domain::{AgentKind, AgentState, DialogKind, DialogMarks};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Connection};
 
@@ -56,10 +58,13 @@ mod review_tools;
 /// - `PermissionRequest` → `permission`: a tool is blocked on the user's
 ///   approval. OBSERVED ONLY — the hook is registered async so it can never
 ///   approve/deny; the CLI still shows its normal prompt.
-/// - `Notification` is refined by type: a plain `agent_completed` is `idle` (the
-///   turn finished — not "needs you"), whereas a permission/input prompt is the
-///   real "needs you" signal. Auth/elicitation-result notifications change
-///   nothing.
+/// - `Notification` is refined by type, by what Claude's hooks reference says
+///   each one means. Only a question on screen is "needs you": a permission
+///   prompt, an MCP server's form or URL prompt, a session waiting on input, or
+///   the Enter Claude waits for after a usage-limit reset. A finished turn is
+///   `idle` — `agent_completed`, and `idle_prompt`, which fires when Claude
+///   finished responding about a minute ago and nothing has been typed since.
+///   Auth/elicitation-result notifications change nothing.
 ///
 /// - `PostToolUse`/`PostToolUseFailure` → `active`, as a **heartbeat**: they are
 ///   the only thing that fires during a long turn, so without them a turn whose
@@ -71,32 +76,74 @@ mod review_tools;
 /// We only map events that *set* a state. Clearing a resolved `permission`/
 /// `waiting` back to running is NOT done here — the app reconciles that against
 /// the transcript on read (a manual accept/reject fires no reliable hook).
-fn resolve_state(event: &str, payload: &Value) -> Option<AgentState> {
-    // Codex runs the same hook command for its subagents, tagging those payloads
-    // with the child's `agent_id`. A subagent is not the surface's session: its
-    // state would overwrite the user's, and its `SessionStart` would repoint the
-    // terminal at a thread the user never opened. Ignore the whole payload.
-    //
+///
+/// `SessionStart` from a compaction sets nothing: auto-compaction fires it in
+/// the middle of a turn, which goes on afterwards (a manual `/compact` fires it
+/// at the prompt, but no `UserPromptSubmit` before it, so the row is already
+/// idle there).
+///
+/// - `StopFailure` ends a turn on an API error (Claude retries first: a 429 or
+///   a 401 runs ten attempts over about three minutes, with no hook at all
+///   until it gives up) and fires no `Stop`: `idle`, with the error as its
+///   message.
+/// - `Elicitation` is an MCP server's form or URL on screen: `waiting`, at once
+///   (its `elicitation_dialog` Notification comes ~6 s later and says less).
+///   `ElicitationResult` is the user's answer, after which the tool call goes
+///   on: `active`, as a transition — it has to clear the dialog it answers,
+///   and only that one (over a permission dialog it writes nothing:
+///   `write_state`).
+fn resolve_state(event: &str, agent: AgentKind, payload: &Value) -> Option<AgentState> {
     // A *present but null* `agent_id` is the root session, not a subagent — the
     // shape a serializer emits for an absent optional. Reading it as "subagent"
     // would silently ignore every event the user's own session ever fires.
     if payload.get("agent_id").is_some_and(|id| !id.is_null()) {
-        return None;
+        return match agent {
+            // Claude fires every hook of a subagent on the parent session
+            // (`session_id` is the parent's), tagged with the subagent's
+            // `agent_id`. Its turns are not the parent's state, but a question
+            // it puts to the user is on the parent's screen: its permission
+            // dialog is the parent session's "needs you" (CLI 2.1.312 runs
+            // subagents in the background, and the main thread's `Stop` comes
+            // while that dialog is still up).
+            AgentKind::Claude => resolve_main(event, payload).filter(|s| s.is_blocked_on_user()),
+            // Codex runs the same hook command for its subagents, tagging those
+            // payloads with the child's `agent_id`, and a child is a thread of
+            // its own: its state would overwrite the user's, and its
+            // `SessionStart` would repoint the terminal at a thread the user
+            // never opened. Ignore the whole payload.
+            _ => None,
+        };
     }
+    resolve_main(event, payload)
+}
+
+/// [`resolve_state`] for an event of the session's own thread.
+fn resolve_main(event: &str, payload: &Value) -> Option<AgentState> {
     match event {
         // A turn is running — the user's prompt started it.
         "UserPromptSubmit" => Some(AgentState::Active),
         // Still running, mid-turn. A heartbeat, not a transition (see `record`).
         "PostToolUse" | "PostToolUseFailure" => Some(AgentState::Active),
-        "SessionStart" | "Stop" => Some(AgentState::Idle),
+        "SessionStart" if payload.get("source").and_then(Value::as_str) == Some("compact") => None,
+        "SessionStart" | "Stop" | "StopFailure" => Some(AgentState::Idle),
         "SessionEnd" => Some(AgentState::Exited),
         "PermissionRequest" => Some(AgentState::Permission),
+        "Elicitation" => Some(AgentState::Waiting),
+        "ElicitationResult" => Some(AgentState::Active),
         "Notification" => match payload.get("notification_type").and_then(Value::as_str) {
-            Some("permission_prompt") => Some(AgentState::Permission),
-            Some("agent_completed") => Some(AgentState::Idle),
-            Some("agent_needs_input") | Some("idle_prompt") | Some("elicitation_dialog") => {
-                Some(AgentState::Waiting)
-            }
+            // `worker_permission_prompt` is an agent-team worker's permission
+            // dialog, shown to the user by the lead (in the CLI, not in its
+            // hooks reference).
+            Some("permission_prompt" | "worker_permission_prompt") => Some(AgentState::Permission),
+            Some(
+                "agent_needs_input"
+                | "elicitation_dialog"
+                | "elicitation_url_dialog"
+                | "quota_auto_resume_stale",
+            ) => Some(AgentState::Waiting),
+            // At the prompt, not asked anything: reading `idle_prompt` as a
+            // question showed every session left alone for a minute as "needs you".
+            Some("agent_completed" | "idle_prompt") => Some(AgentState::Idle),
             // Auth / elicitation-result notifications aren't a state change.
             Some(_) => None,
             // Older CLIs send no type — fall back to the prior "needs input".
@@ -153,7 +200,49 @@ struct HookInput<'a> {
     message: Option<String>,
     /// `SessionStart`'s reason, which decides whether Claude rebinds the row.
     source: Option<&'a str>,
+    /// Who put a pending prompt on screen, as `session_state.asker` stores it:
+    /// `main` (the session's own thread), `agent:<id>` (a subagent), or `None`
+    /// when it can't be told — a Notification is the session's even when the
+    /// dialog it reports is a subagent's (CLI 2.1.312). `None` for every state
+    /// that isn't pending.
+    asker: Option<String>,
+    /// The turn, mode and effort the payload names, when it does.
+    header: Header<'a>,
 }
+
+/// What a payload says about the session beside its state: the turn it
+/// belongs to and the header's permission mode and effort (CLI 2.1.312:
+/// `PermissionRequest`, `PostToolUse`, `Stop` and `UserPromptSubmit` carry
+/// `permission_mode`; all but `UserPromptSubmit` carry `effort`; the
+/// Notifications, `SessionStart` and `SessionEnd` carry neither). A value
+/// that isn't a short string reads as absent, and an absent one leaves the
+/// stored value as it was.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Header<'a> {
+    prompt_id: Option<&'a str>,
+    permission_mode: Option<&'a str>,
+    effort: Option<&'a str>,
+}
+
+/// The most a header value or an id may be. Real ones are a UUID or a word.
+const MAX_SHORT: usize = 128;
+
+impl<'a> Header<'a> {
+    fn of(payload: &'a Value) -> Self {
+        let short = |v: Option<&'a Value>| {
+            v.and_then(Value::as_str)
+                .filter(|s| !s.is_empty() && s.len() <= MAX_SHORT)
+        };
+        Self {
+            prompt_id: short(payload.get("prompt_id")),
+            permission_mode: short(payload.get("permission_mode")),
+            effort: short(payload.get("effort").and_then(|e| e.get("level"))),
+        }
+    }
+}
+
+/// The most of an API error's text a `StopFailure` row keeps as its message.
+const MAX_ERROR_MESSAGE: usize = 2 * 1024;
 
 /// Read a hook payload's fields, by the key names both CLIs actually send.
 ///
@@ -165,8 +254,11 @@ struct HookInput<'a> {
 ///
 /// Only the "needs you" states carry tooltip text; running/idle/exited don't (so
 /// consecutive tool events dedup to a single "running", see [`record`]). For
-/// permission, fall back to the tool name as "run <tool>".
-fn read_hook_input(payload: &Value, state: AgentState) -> HookInput<'_> {
+/// permission, fall back to the tool name as "run <tool>". The one idle row
+/// with a message is a `StopFailure`'s: the API error that ended the turn
+/// (`last_assistant_message`, e.g. `API Error: Request rejected (429) · …`),
+/// bounded.
+fn read_hook_input<'a>(payload: &'a Value, event: &str, state: AgentState) -> HookInput<'a> {
     let field = |k: &str| payload.get(k).and_then(Value::as_str);
     HookInput {
         session_id: field("session_id").unwrap_or_default(),
@@ -177,11 +269,292 @@ fn read_hook_input(payload: &Value, state: AgentState) -> HookInput<'_> {
                 .map(str::to_string)
                 .or_else(|| field("tool_name").map(|t| format!("run {t}"))),
             AgentState::Waiting => field("message").map(str::to_string),
+            AgentState::Idle if event == "StopFailure" => Some(
+                field("last_assistant_message")
+                    .or_else(|| field("error"))
+                    .map(|text| cut(text, MAX_ERROR_MESSAGE).to_string())
+                    .unwrap_or_else(|| "API error".to_string()),
+            ),
             _ => None,
         },
         source: field("source"),
+        asker: state
+            .is_blocked_on_user()
+            .then(
+                || match payload.get("agent_id").filter(|id| !id.is_null()) {
+                    Some(id) => id
+                        .as_str()
+                        // Any other shape is stored as an unknown asker.
+                        .filter(|id| is_subagent_id(id))
+                        .map(|id| format!("{SUBAGENT_ASKER}{id}")),
+                    // The dialog's own event names who asked by leaving
+                    // `agent_id` out; a Notification can't tell.
+                    None if matches!(event, "PermissionRequest" | "Elicitation") => {
+                        Some(MAIN_ASKER.to_string())
+                    }
+                    None => None,
+                },
+            )
+            .flatten(),
+        header: Header::of(payload),
     }
 }
+
+/// `text`'s first `max` bytes at most, ending on a char boundary.
+fn cut(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// `text`'s last `max` bytes at most, starting on a char boundary.
+fn tail(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut start = text.len() - max;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
+// ── The dialog on record ─────────────────────────────────────────────────────
+
+/// The most of a dialog's input a row keeps, as JSON text.
+const MAX_PENDING_INPUT: usize = 64 * 1024;
+/// The most of a permission request's suggestions a row keeps, as JSON text.
+const MAX_PENDING_SUGGESTIONS: usize = 16 * 1024;
+
+/// The dialog a `PermissionRequest` or an `Elicitation` puts on screen, as
+/// `session_state.pending_*` stores it beside the row's state: what the
+/// Conversation view's card draws, and the bounds of what a click on it may
+/// type (COMPLIANCE.md). Claude's only — Codex's `PermissionRequest` is
+/// shaped differently and answered in the terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingDialog {
+    kind: DialogKind,
+    tool: Option<String>,
+    /// JSON text, always valid ([`capped_json`]).
+    input: String,
+    /// JSON text of `permission_suggestions`, when the payload carried one.
+    suggestions: Option<String>,
+    mcp_server: Option<String>,
+    agent_id: Option<String>,
+    agent_type: Option<String>,
+    mode: Option<String>,
+    prompt_id: Option<String>,
+    truncated: bool,
+    /// A permission request's tool call ([`call_id`]), which the hooks that
+    /// report it finished name the same way.
+    call: Option<String>,
+}
+
+/// The dialog `event` announces, by the key names Claude sends (CLI 2.1.312,
+/// captured: notes in the wave-3 contract). `None` for every other event, and
+/// for any provider but Claude.
+fn pending_dialog(event: &str, agent: AgentKind, payload: &Value) -> Option<PendingDialog> {
+    if agent != AgentKind::Claude {
+        return None;
+    }
+    let text = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .map(|s| cut(s, MAX_SHORT).to_string())
+    };
+    let (kind, tool, input, mcp_server) = match event {
+        "PermissionRequest" => {
+            let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+            // `{"name":"probe","source":"dynamic"}`; read a bare name too.
+            let server = payload.get("mcp_server");
+            let server = text(server.and_then(|s| s.get("name")).or(server));
+            (
+                DialogKind::Permission,
+                text(payload.get("tool_name")),
+                input,
+                server,
+            )
+        }
+        "Elicitation" => {
+            // The elicitation's own fields, as one object: a form's schema or
+            // a URL, and what the server says.
+            let mut fields = serde_json::Map::new();
+            for key in [
+                "message",
+                "mode",
+                "requested_schema",
+                "url",
+                "elicitation_id",
+            ] {
+                if let Some(v) = payload.get(key).filter(|v| !v.is_null()) {
+                    fields.insert(key.to_string(), v.clone());
+                }
+            }
+            (
+                DialogKind::Elicitation,
+                None,
+                Value::Object(fields),
+                text(payload.get("mcp_server_name")),
+            )
+        }
+        _ => return None,
+    };
+    let (input, input_cut) = capped_json(&input, MAX_PENDING_INPUT);
+    let suggestions = payload
+        .get("permission_suggestions")
+        .filter(|s| s.is_array())
+        .map(|s| capped_json(s, MAX_PENDING_SUGGESTIONS));
+    let header = Header::of(payload);
+    Some(PendingDialog {
+        kind,
+        tool,
+        input,
+        truncated: input_cut || suggestions.as_ref().is_some_and(|(_, cut)| *cut),
+        suggestions: suggestions.map(|(json, _)| json),
+        mcp_server,
+        agent_id: text(payload.get("agent_id")),
+        agent_type: text(payload.get("agent_type")),
+        mode: header.permission_mode.map(str::to_string),
+        prompt_id: header.prompt_id.map(str::to_string),
+        call: (kind == DialogKind::Permission).then(|| {
+            call_id(
+                payload.get("agent_id"),
+                payload.get("tool_name"),
+                payload.get("tool_input"),
+            )
+        }),
+    })
+}
+
+/// One tool call as the hooks name it, the same in the `PermissionRequest`
+/// that asked about it and in the hooks that report it finished: the thread
+/// that made it (`agent_id`; absent or null for the session's own), the tool,
+/// and its whole input — never the stored copy, which can be cut. The request
+/// carries no `tool_use_id`, but its `tool_input` is the finished call's, key
+/// for key (CLI 2.1.312, captured: all 67 requests of the stacked and serial
+/// probes against their `PostToolBatch` entries, and the `Bash`, `Read` and
+/// `Edit` ones against their `PostToolUse`; a question's and a plan's
+/// `PostToolUse` carries the answer instead).
+///
+/// SHA-256 rather than a fast hash: the input is the model's to choose, and
+/// a collision would read an open dialog as answered.
+fn call_id(
+    agent_id: Option<&Value>,
+    tool_name: Option<&Value>,
+    tool_input: Option<&Value>,
+) -> String {
+    let null = Value::Null;
+    let mut text = String::from("[");
+    canonical_json(agent_id.unwrap_or(&null), &mut text);
+    text.push(',');
+    canonical_json(tool_name.unwrap_or(&null), &mut text);
+    text.push(',');
+    canonical_json(tool_input.unwrap_or(&null), &mut text);
+    text.push(']');
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+/// `value` as compact JSON text with every object's keys in order, so equal
+/// values always read the same: whether serde_json keeps a payload's key order
+/// depends on the build (`preserve_order` is on in the app, which applies the
+/// relayed hooks).
+fn canonical_json(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            out.push('{');
+            for (i, (key, item)) in entries.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String(key.clone()).to_string());
+                out.push(':');
+                canonical_json(item, out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&scalar.to_string()),
+    }
+}
+
+/// The tool calls a hook reports finished ([`call_id`]): a `PostToolUse`'s or
+/// `PostToolUseFailure`'s own, or every call a `PostToolBatch` lists — which
+/// is the one hook a rejection with feedback fires, and the one that names a
+/// question's or a plan's call as it was asked. Claude's only, like the dialogs
+/// they resolve.
+fn finished_calls(event: &str, agent: AgentKind, payload: &Value) -> Vec<String> {
+    if agent != AgentKind::Claude {
+        return Vec::new();
+    }
+    let thread = payload.get("agent_id");
+    let one = |call: &Value| call_id(thread, call.get("tool_name"), call.get("tool_input"));
+    match event {
+        "PostToolUse" | "PostToolUseFailure" => vec![one(payload)],
+        "PostToolBatch" => payload
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| calls.iter().map(one).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// `value` as JSON text of at most `max` bytes, and whether anything was cut.
+///
+/// Cut by shortening the longest strings inside — an edit's `new_string`, a
+/// written file's `content`, a plan — never by cutting the text, so what is
+/// stored always parses. A value still too long with every string down to a
+/// few characters (thousands of keys) is stored as `null`.
+fn capped_json(value: &Value, max: usize) -> (String, bool) {
+    let whole = value.to_string();
+    if whole.len() <= max {
+        return (whole, false);
+    }
+    let mut keep = max / 2;
+    while keep >= 16 {
+        let mut shortened = value.clone();
+        shorten_strings(&mut shortened, keep);
+        let text = shortened.to_string();
+        if text.len() <= max {
+            return (text, true);
+        }
+        keep /= 2;
+    }
+    ("null".to_string(), true)
+}
+
+/// Cut every string in `value` (keys excepted) to at most `max` bytes.
+fn shorten_strings(value: &mut Value, max: usize) {
+    match value {
+        Value::String(s) if s.len() > max => {
+            let kept = cut(s, max).len();
+            s.truncate(kept);
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| shorten_strings(v, max)),
+        Value::Object(map) => map.values_mut().for_each(|v| shorten_strings(v, max)),
+        _ => {}
+    }
+}
+
+/// `session_state.asker` for a prompt the session's own thread put up.
+const MAIN_ASKER: &str = "main";
+/// `session_state.asker`'s prefix for a prompt a subagent put up.
+const SUBAGENT_ASKER: &str = "agent:";
 
 /// What this invocation is. The trailing positional selects it: a hook event
 /// name, Claude's `statusline` command, or `mcp` — the AI-review tool server.
@@ -265,6 +638,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<(String, Mode)> {
 
 /// The binary: `santree-hook --db <path> …` (see [`parse_args`]).
 pub fn run() {
+    // Before anything is read: the closest this process comes to when the
+    // event fired (see `StateWrite::fired_ms`).
+    let fired_ms = now_ms();
     install_exit_zero_panic_hook();
 
     let Some((db_path, mode)) = parse_args(std::env::args().skip(1)) else {
@@ -283,6 +659,7 @@ pub fn run() {
                 &raw,
                 &mut std::io::stdout().lock(),
                 &mut std::io::stderr().lock(),
+                fired_ms,
             );
             if code != 0 {
                 std::process::exit(code);
@@ -314,6 +691,7 @@ pub fn run() {
         agent,
         raw.as_bytes(),
         &HookEnv::from_process(),
+        fired_ms,
     ));
 }
 
@@ -326,10 +704,45 @@ async fn apply_hook<S: Store>(
     agent: AgentKind,
     stdin: &[u8],
     env: &HookEnv,
+    fired_ms: i64,
 ) {
     let payload: Value = serde_json::from_slice(stdin).unwrap_or(Value::Null);
 
-    let Some(state) = resolve_state(event, &payload) else {
+    // The reply as Claude draws it: its own table and its own nudge, never the
+    // session's state (it fires once per line batch).
+    if event == LIVE_TEXT_EVENT {
+        if agent != AgentKind::Claude {
+            return;
+        }
+        let Some(batch) = live_batch(&payload, fired_ms) else {
+            return;
+        };
+        let recorded = store.record_live_text(&batch).await;
+        if store
+            .noted(event, "recording the live text", recorded)
+            .unwrap_or(false)
+        {
+            store.nudge_live_text(batch.session_id);
+        }
+        return;
+    }
+
+    // A call that finished resolves the permission dialog that asked about it,
+    // whichever thread made it — so before the state, which a subagent's tool
+    // events and a `PostToolBatch` never move.
+    let finished = finished_calls(event, agent, &payload);
+    let session = payload.get("session_id").and_then(Value::as_str);
+    if let Some(session_id) = session.filter(|s| !s.is_empty() && !finished.is_empty()) {
+        let resolved = store.resolve_calls(session_id, &finished, fired_ms).await;
+        if store
+            .noted(event, "resolving the dialog's call", resolved)
+            .unwrap_or(false)
+        {
+            store.nudge(STATE_TAG);
+        }
+    }
+
+    let Some(state) = resolve_state(event, agent, &payload) else {
         return; // event/notification that doesn't change state
     };
 
@@ -339,24 +752,40 @@ async fn apply_hook<S: Store>(
         transcript_path: transcript,
         message,
         source,
-    } = read_hook_input(&payload, state);
+        asker,
+        header,
+    } = read_hook_input(&payload, event, state);
     if session_id.is_empty() {
         return; // can't correlate without a session id
     }
+    let pending = pending_dialog(event, agent, &payload);
 
     let recorded = store
-        .record(
+        .record(&StateWrite {
             session_id,
             state,
             event,
             cwd,
-            message.as_deref(),
+            message: message.as_deref(),
             transcript,
-        )
+            asker: asker.as_deref(),
+            source,
+            fired_ms,
+            header,
+            pending: pending.as_ref(),
+            live_text: live_text_clear(event, state, header.prompt_id),
+            notice: (event == "Notification")
+                .then(|| payload.get("notification_type").and_then(Value::as_str))
+                .flatten(),
+        })
         .await;
-    let mut wrote = store
+    let recorded = store
         .noted(event, "recording session state", recorded)
-        .unwrap_or(false);
+        .unwrap_or_default();
+    let mut wrote = recorded.state;
+    if recorded.live_text {
+        store.nudge_live_text(session_id);
+    }
 
     // Bind the live session id to the terminal that launched it (see
     // [`binds_session_id`] for why each provider needs this). For Claude it
@@ -405,6 +834,110 @@ async fn apply_hook<S: Store>(
 const STATE_TAG: u8 = b's';
 /// The signal-socket tag byte for "a session's live usage changed".
 const USAGE_TAG: u8 = b'u';
+/// The signal-socket tag byte for "a session's live text changed", followed
+/// by the session id, so only a view showing that session reads again.
+const LIVE_TEXT_TAG: u8 = b't';
+
+// ── The reply as it streams (`MessageDisplay`) ───────────────────────────────
+
+/// The event that carries the reply Claude is drawing. santree registers it
+/// only on this Mac and only while Settings → Experimental → Conversation
+/// view is on (`hooks.rs`); the Daedalus relay refuses it.
+const LIVE_TEXT_EVENT: &str = "MessageDisplay";
+
+/// The most of one message's text the live-text table keeps: its tail.
+const MAX_LIVE_TEXT: usize = 32 * 1024;
+
+/// What a batch counts against [`MAX_LIVE_TEXT`] at least: a real batch is a
+/// line or more, and this keeps a message to 512 rows whatever its batches
+/// hold.
+const MIN_BATCH_WEIGHT: usize = 64;
+
+/// One `MessageDisplay` event: a batch of whole lines of the main thread's
+/// reply (CLI 2.1.312, captured): `turn_id`, `message_id`, `index` (from 0 per
+/// message), `final` on the message's last batch, `delta` the lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveBatch<'a> {
+    session_id: &'a str,
+    message_id: &'a str,
+    index: i64,
+    turn_id: Option<&'a str>,
+    prompt_id: Option<&'a str>,
+    /// The batch's text, its tail only when it alone is over the cap.
+    delta: &'a str,
+    /// `delta` lost its head to the cap.
+    cut: bool,
+    is_final: bool,
+    fired_ms: i64,
+}
+
+/// A `MessageDisplay` payload as a [`LiveBatch`], or `None` when it is not
+/// one — a missing id or index, or a subagent's (which 2.1.312 never sends:
+/// only the session's own reply is drawn live).
+fn live_batch(payload: &Value, fired_ms: i64) -> Option<LiveBatch<'_>> {
+    if payload.get("agent_id").is_some_and(|id| !id.is_null()) {
+        return None;
+    }
+    let short = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && s.len() <= MAX_SHORT)
+    };
+    let index = payload
+        .get("index")?
+        .as_i64()
+        .filter(|i| (0..=1_000_000).contains(i))?;
+    let delta = payload.get("delta")?.as_str().filter(|d| !d.is_empty())?;
+    let kept = tail(delta, MAX_LIVE_TEXT);
+    Some(LiveBatch {
+        session_id: short("session_id")?,
+        message_id: short("message_id")?,
+        index,
+        turn_id: short("turn_id"),
+        prompt_id: short("prompt_id"),
+        delta: kept,
+        cut: kept.len() < delta.len(),
+        is_final: payload.get("final").and_then(Value::as_bool) == Some(true),
+        fired_ms,
+    })
+}
+
+/// Which of a session's live text a state event ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveTextClear<'a> {
+    /// All of it: the process started or ended, or Claude went idle on its
+    /// own (a Notification names no turn).
+    All,
+    /// The turn `prompt_id`'s: it ended (`Stop`, `StopFailure`), or put up a
+    /// dialog, which means the message before it is in the transcript.
+    Turn(&'a str),
+    /// Every turn's but `prompt_id`'s: a new turn began. A message queued
+    /// mid-turn fires `UserPromptSubmit` with the running turn's id, so it
+    /// clears nothing of the turn it joins.
+    Before(&'a str),
+}
+
+/// What a state event clears of the live text. A heartbeat clears nothing,
+/// and neither does a Notification about a dialog (the dialog's own event
+/// already did).
+fn live_text_clear<'a>(
+    event: &str,
+    state: AgentState,
+    prompt_id: Option<&'a str>,
+) -> Option<LiveTextClear<'a>> {
+    match (event, state) {
+        ("SessionStart" | "SessionEnd", _) | (_, AgentState::Exited) => Some(LiveTextClear::All),
+        ("UserPromptSubmit", _) => {
+            Some(prompt_id.map_or(LiveTextClear::All, LiveTextClear::Before))
+        }
+        ("Stop" | "StopFailure" | "PermissionRequest" | "Elicitation", _) => {
+            Some(prompt_id.map_or(LiveTextClear::All, LiveTextClear::Turn))
+        }
+        ("Notification", AgentState::Idle) => Some(LiveTextClear::All),
+        _ => None,
+    }
+}
 
 /// Exit 0 even on a panic.
 ///
@@ -465,9 +998,15 @@ pub fn note(db_path: &str, event: &str, detail: &str) {
 /// limits, `r` = review drafts, else state). Best-effort: a not-running app just
 /// fails to connect.
 pub(crate) fn ping_socket(db_path: &str, tag: u8) {
+    ping_socket_with(db_path, &[tag]);
+}
+
+/// [`ping_socket`] with a tag and what follows it (the live-text nudge names
+/// its session).
+fn ping_socket_with(db_path: &str, signal: &[u8]) {
     if let Some(dir) = Path::new(db_path).parent() {
         if let Ok(mut stream) = UnixStream::connect(dir.join("santree-signal.sock")) {
-            let _ = stream.write_all(&[tag]);
+            let _ = stream.write_all(signal);
         }
     }
 }
@@ -497,12 +1036,15 @@ const CONTEXT_DISPLAY_MULTIPLIER: f64 = 1.2;
 /// The status-line run: `raw` is the payload Claude piped in; what to render
 /// goes to `out`/`err`; the return value is the process exit code. Split from
 /// `main` so the passthrough contract can be tested without a real stdin.
+/// `started_ms` is when this run began, before it read anything: when Claude
+/// started the render.
 fn statusline(
     db_path: &str,
     then: Option<&str>,
     raw: &[u8],
     out: &mut dyn Write,
     err: &mut dyn Write,
+    started_ms: i64,
 ) -> i32 {
     // Start the user's command first: its runtime then overlaps the db write
     // below instead of adding to it. Its output is forwarded once both are done
@@ -533,7 +1075,7 @@ fn statusline(
         let _ = out.flush();
     }
 
-    record_statusline(db_path, &p, &reading);
+    record_statusline(db_path, &p, &reading, started_ms);
 
     let Some(running) = running else {
         return 0;
@@ -566,6 +1108,12 @@ struct StatuslineReading<'a> {
     model_id: &'a str,
     /// Shown.
     model_display: &'a str,
+    /// `output_style.name`, for the Conversation view's header.
+    output_style: Option<&'a str>,
+    /// `vim.mode`, present only while vim mode is on.
+    vim_mode: Option<&'a str>,
+    /// `effort.level`, stored on the session's state row.
+    effort: Option<&'a str>,
 }
 
 impl<'a> StatuslineReading<'a> {
@@ -582,6 +1130,10 @@ impl<'a> StatuslineReading<'a> {
             .and_then(|m| m.get("display_name"))
             .and_then(Value::as_str)
             .unwrap_or(model_id);
+        let short = |v: Option<&'a Value>| {
+            v.and_then(Value::as_str)
+                .filter(|s| !s.is_empty() && s.len() <= MAX_SHORT)
+        };
         Self {
             used_pct: num(cw.and_then(|c| c.get("used_percentage"))),
             input_tokens: num(cw.and_then(|c| c.get("total_input_tokens"))),
@@ -589,6 +1141,9 @@ impl<'a> StatuslineReading<'a> {
             cost: num(p.get("cost").and_then(|c| c.get("total_cost_usd"))),
             model_id,
             model_display,
+            output_style: short(p.get("output_style").and_then(|o| o.get("name"))),
+            vim_mode: short(p.get("vim").and_then(|v| v.get("mode"))),
+            effort: short(p.get("effort").and_then(|e| e.get("level"))),
         }
     }
 }
@@ -597,7 +1152,7 @@ impl<'a> StatuslineReading<'a> {
 /// rate-limit windows — and nudge the app for whichever changed. Best-effort in
 /// every branch: a missing db, a locked db, or no runtime all mean "record
 /// nothing", never "fail the status line".
-fn record_statusline(db_path: &str, p: &Value, reading: &StatuslineReading<'_>) {
+fn record_statusline(db_path: &str, p: &Value, reading: &StatuslineReading<'_>, started_ms: i64) {
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -610,6 +1165,7 @@ fn record_statusline(db_path: &str, p: &Value, reading: &StatuslineReading<'_>) 
         p,
         reading,
         env.account_for(AgentKind::Claude),
+        Some(started_ms),
     ));
 }
 
@@ -617,12 +1173,14 @@ fn record_statusline(db_path: &str, p: &Value, reading: &StatuslineReading<'_>) 
 ///
 /// `account` is the santree account the session runs on (`SANTREE_ACCOUNT`):
 /// its windows are that account's, and writing them over the Default
-/// account's would show one account's usage as another's.
+/// account's would show one account's usage as another's. `started_ms` is
+/// when the render started, when that is known ([`note_render_on`]).
 async fn record_statusline_to<S: Store>(
     store: &mut S,
     p: &Value,
     reading: &StatuslineReading<'_>,
     account: Option<&str>,
+    started_ms: Option<i64>,
 ) {
     let session_id = p
         .get("session_id")
@@ -630,11 +1188,14 @@ async fn record_statusline_to<S: Store>(
         .unwrap_or_default();
     if !session_id.is_empty() {
         let wrote = store
-            .record_usage(session_id, reading)
+            .record_usage(session_id, reading, started_ms)
             .await
-            .unwrap_or(false);
-        if wrote {
+            .unwrap_or_default();
+        if wrote.usage {
             store.nudge(USAGE_TAG);
+        }
+        if wrote.state {
+            store.nudge(STATE_TAG);
         }
     }
 
@@ -833,31 +1394,28 @@ fn compact(n: f64) -> String {
     }
 }
 
-/// UPSERT the session's live usage. Returns `Ok(true)` when a row was written.
-/// Dedups on an unchanged `(used_pct, input_tokens)` so identical re-renders don't
-/// nudge the UI. Never creates the db.
+/// What one status-line render changed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct UsageWrite {
+    /// `session_usage_live` (a usage nudge).
+    usage: bool,
+    /// Something the state row shows (a state nudge): its effort, or the
+    /// dialog on record closing ([`note_render_on`]).
+    state: bool,
+}
+
+/// UPSERT the session's live usage. Dedups on an unchanged reading so identical
+/// re-renders don't nudge the UI. Never creates the db.
 async fn record_usage(
     db_path: &str,
     session_id: &str,
-    used_pct: f64,
-    input_tokens: f64,
-    context_size: f64,
-    model: &str,
-    cost: f64,
-) -> Result<bool, sqlx::Error> {
+    reading: &StatuslineReading<'_>,
+    started_ms: Option<i64>,
+) -> Result<UsageWrite, sqlx::Error> {
     let Some(mut conn) = open(db_path).await? else {
-        return Ok(false);
+        return Ok(UsageWrite::default());
     };
-    let wrote = record_usage_on(
-        &mut conn,
-        session_id,
-        used_pct,
-        input_tokens,
-        context_size,
-        model,
-        cost,
-    )
-    .await?;
+    let wrote = record_usage_on(&mut conn, session_id, reading, started_ms).await?;
 
     // Close before returning: the caller nudges the app the moment this resolves, and
     // the app then reads the row. Letting the connection drop instead hands the WAL
@@ -866,49 +1424,213 @@ async fn record_usage(
     Ok(wrote)
 }
 
+/// The usage row, and the session's effort: the status line is the one
+/// payload that carries `effort.level` before the first turn (and through a
+/// `/effort` change, which fires no hook), so it keeps the state row's copy
+/// current too.
 async fn record_usage_on(
     conn: &mut SqliteConnection,
     session_id: &str,
-    used_pct: f64,
-    input_tokens: f64,
-    context_size: f64,
-    model: &str,
-    cost: f64,
-) -> Result<bool, sqlx::Error> {
-    let current: Option<(f64, i64)> = sqlx::query_as(
-        "SELECT used_pct, input_tokens FROM session_usage_live WHERE session_id = ?",
+    r: &StatuslineReading<'_>,
+    started_ms: Option<i64>,
+) -> Result<UsageWrite, sqlx::Error> {
+    let closed = match started_ms {
+        Some(started_ms) => note_render_on(conn, session_id, started_ms).await?,
+        None => false,
+    };
+    let effort = match r.effort {
+        Some(level) => {
+            sqlx::query(
+                "UPDATE session_state SET effort_level = ?1 \
+                 WHERE session_id = ?2 AND effort_level IS NOT ?1",
+            )
+            .bind(level)
+            .bind(session_id)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected()
+                > 0
+        }
+        None => false,
+    };
+    let current: Option<(f64, i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT used_pct, input_tokens, output_style, vim_mode \
+         FROM session_usage_live WHERE session_id = ?",
     )
     .bind(session_id)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some((up, it)) = current {
-        if (up - used_pct).abs() < 1e-9 && it == input_tokens as i64 {
-            return Ok(false);
+    if let Some((up, it, style, vim)) = current {
+        if (up - r.used_pct).abs() < 1e-9
+            && it == r.input_tokens as i64
+            && style.as_deref() == r.output_style
+            && vim.as_deref() == r.vim_mode
+        {
+            return Ok(UsageWrite {
+                usage: false,
+                state: effort || closed,
+            });
         }
     }
 
     sqlx::query(
         "INSERT INTO session_usage_live \
-           (session_id, used_pct, input_tokens, context_size, model, cost_usd, updated_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) \
+           (session_id, used_pct, input_tokens, context_size, model, cost_usd, updated_at_ms, \
+            output_style, vim_mode) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(session_id) DO UPDATE SET \
            used_pct = excluded.used_pct, \
            input_tokens = excluded.input_tokens, \
            context_size = excluded.context_size, \
            model = excluded.model, \
            cost_usd = excluded.cost_usd, \
-           updated_at_ms = excluded.updated_at_ms",
+           updated_at_ms = excluded.updated_at_ms, \
+           output_style = excluded.output_style, \
+           vim_mode = excluded.vim_mode",
     )
     .bind(session_id)
-    .bind(used_pct)
-    .bind(input_tokens as i64)
-    .bind(context_size as i64)
-    .bind(model)
-    .bind(cost)
+    .bind(r.used_pct)
+    .bind(r.input_tokens as i64)
+    .bind(r.context_size as i64)
+    .bind(r.model_id)
+    .bind(r.cost)
     .bind(now_ms())
+    .bind(r.output_style)
+    .bind(r.vim_mode)
     .execute(&mut *conn)
     .await?;
-    Ok(true)
+    Ok(UsageWrite {
+        usage: true,
+        state: effort || closed,
+    })
+}
+
+/// How long after a dialog was recorded a status-line render must start to
+/// say the dialog closed. Claude can launch a render just before a dialog
+/// draws (serial probe `sp1`: ~35 ms before), and a process starts when the
+/// scheduler gets to it, not in launch order (a third of a second late and
+/// more under load), while the dialog's own hook records it ~50 ms after the
+/// draw. A false close costs more than a late one: the next request reads
+/// whether it is stacked from it, and one behind the dialog would read
+/// unstacked. At 1 s, a false close needs the render's process to start a
+/// full second after the dialog's own hook landed; an answer within 1 s of a
+/// dialog appearing closes it by its call, or by the next render.
+const RENDER_MARGIN_MS: i64 = 1_000;
+
+/// Note that Claude started a status-line render at `started_ms` (the
+/// status-line command's own start), when it is the first to start after the
+/// dialog on record was recorded ([`RENDER_MARGIN_MS`] after):
+/// `pending_rendered_at_ms`, set once, and never `updated_at_ms` — that is the
+/// dialog's record time and the reconciler's anchor. Returns whether that
+/// closed the dialog ([`DialogMarks::closed_at`]).
+///
+/// Claude renders no status line while a dialog is open (CLI 2.1.312: none in
+/// 35.8 s of stacked dialogs with a 15 s refresh), and renders 65-120 ms after
+/// an answer when no dialog follows — the one sign an approval leaves until
+/// the tool ends, and the only one an Esc leaves at all. A render that started
+/// before the dialog was recorded and only lands after it says nothing about
+/// it. One writer from the read to the write, like [`record_on`].
+async fn note_render_on(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    started_ms: i64,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+    let Some((recorded_at, marks)) = dialog_on_record(&mut tx, session_id).await? else {
+        return Ok(false);
+    };
+    if started_ms <= recorded_at + RENDER_MARGIN_MS || marks.rendered_at_ms.is_some() {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE session_state SET pending_rendered_at_ms = ? WHERE session_id = ?")
+        .bind(started_ms)
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let rendered = DialogMarks {
+        rendered_at_ms: Some(started_ms),
+        ..marks
+    };
+    Ok(marks.closed_at().is_none() && rendered.closed_at().is_some())
+}
+
+/// The dialog the row holds, while it is still the row's — the write that
+/// stored it is the row's latest (`pending_at_ms` is its `updated_at_ms`) and
+/// the row is in that dialog's state — as when it was recorded and what has
+/// been seen of it since. The app's reader (`hooks.rs` `pending_prompt`)
+/// offers a dialog by the same test.
+async fn dialog_on_record(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+) -> Result<Option<(i64, DialogMarks)>, sqlx::Error> {
+    type Row = (
+        String,
+        Option<String>,
+        Option<i64>,
+        i64,
+        Option<bool>,
+        Option<i64>,
+        Option<i64>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT state, pending_kind, pending_at_ms, updated_at_ms, pending_stacked, \
+                pending_rendered_at_ms, pending_resolved_at_ms \
+         FROM session_state WHERE session_id = ?",
+    )
+    .bind(session_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.and_then(
+        |(state, kind, pending_at, updated_at, stacked, rendered, resolved)| {
+            let kind = DialogKind::parse(kind.as_deref()?)?;
+            let held =
+                AgentState::parse(&state) == Some(kind.state()) && pending_at == Some(updated_at);
+            held.then_some((
+                updated_at,
+                DialogMarks {
+                    kind,
+                    stacked: stacked.unwrap_or(false),
+                    rendered_at_ms: rendered,
+                    resolved_at_ms: resolved,
+                },
+            ))
+        },
+    ))
+}
+
+/// Note that the tool calls `finished` ended, at `ended_ms`: when one is the
+/// call the permission dialog on record asked about, its
+/// `pending_resolved_at_ms`, set once. Nothing else of the row moves — not its
+/// state, not `updated_at_ms`: a dialog's own call ending is not the turn
+/// moving on, and only some dialogs close by it ([`DialogMarks::closed_at`]).
+/// Returns whether it was that call.
+async fn resolve_calls_on(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    finished: &[String],
+    ended_ms: i64,
+) -> Result<bool, sqlx::Error> {
+    for call in finished {
+        let resolved = sqlx::query(
+            "UPDATE session_state SET pending_resolved_at_ms = ?1 \
+             WHERE session_id = ?2 AND pending_call = ?3 AND pending_resolved_at_ms IS NULL \
+               AND pending_kind = ?4 AND state = ?5 AND pending_at_ms = updated_at_ms",
+        )
+        .bind(ended_ms)
+        .bind(session_id)
+        .bind(call)
+        .bind(DialogKind::Permission.as_str())
+        .bind(DialogKind::Permission.state().as_str())
+        .execute(&mut *conn)
+        .await?
+        .rows_affected()
+            > 0;
+        if resolved {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -918,48 +1640,182 @@ pub(crate) fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// UPSERT the session's current state. Returns `Ok(true)` when a row was
-/// written. Never creates the db — if the app hasn't made it yet, no-op.
-async fn record(
-    db_path: &str,
-    session_id: &str,
+/// One write to `session_state`: what one hook event says about its session.
+#[derive(Debug, Clone, Copy)]
+struct StateWrite<'a> {
+    session_id: &'a str,
     state: AgentState,
-    event: &str,
-    cwd: &str,
-    message: Option<&str>,
-    transcript: Option<&str>,
-) -> Result<bool, sqlx::Error> {
-    let Some(mut conn) = open(db_path).await? else {
-        return Ok(false);
-    };
-    let wrote = record_on(
-        &mut conn, session_id, state, event, cwd, message, transcript,
-    )
-    .await?;
-    conn.close().await?;
-    Ok(wrote)
+    event: &'a str,
+    cwd: &'a str,
+    message: Option<&'a str>,
+    transcript: Option<&'a str>,
+    /// Who asked, for a pending state ([`HookInput::asker`]).
+    asker: Option<&'a str>,
+    /// `SessionStart`'s reason ([`HookInput::source`]).
+    source: Option<&'a str>,
+    /// When this invocation began, epoch ms, before it read anything: the
+    /// closest the hook gets to when the event fired (Claude spawns an `async`
+    /// hook as the event happens). For a relayed event, when the app began
+    /// applying it.
+    fired_ms: i64,
+    /// The turn, mode and effort the payload names ([`Header`]).
+    header: Header<'a>,
+    /// The dialog this event puts on screen, stored with the row
+    /// ([`pending_dialog`]).
+    pending: Option<&'a PendingDialog>,
+    /// What of the session's live text this event ends ([`live_text_clear`]).
+    live_text: Option<LiveTextClear<'a>>,
+    /// A `Notification`'s `notification_type`.
+    notice: Option<&'a str>,
 }
 
+/// What one [`record`] changed: the session's row (worth a state nudge), and
+/// its live text (worth a live-text nudge).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Recorded {
+    state: bool,
+    live_text: bool,
+}
+
+/// Record one state write. Never creates the db — if the app hasn't made it
+/// yet, no-op.
+async fn record(db_path: &str, write: &StateWrite<'_>) -> Result<Recorded, sqlx::Error> {
+    let Some(mut conn) = open(db_path).await? else {
+        return Ok(Recorded::default());
+    };
+    let recorded = record_on(&mut conn, write).await?;
+    conn.close().await?;
+    Ok(recorded)
+}
+
+/// The row, then the live text the event ends. The live text goes whatever
+/// the row did: a guard that keeps a subagent's dialog on record past the
+/// main thread's `Stop` keeps the dialog, not the turn's streaming text.
+///
+/// One writer at a time from the read to the write: parallel tool calls fire
+/// their `PermissionRequest`s within ~5 ms of each other, each in its own
+/// hook process, and the second has to see the first to know it is stacked
+/// ([`write_state`]). `IMMEDIATE` takes the write lock at `BEGIN`, so the
+/// second waits on the busy timeout instead of reading a row the first is
+/// about to replace.
 async fn record_on(
     conn: &mut SqliteConnection,
-    session_id: &str,
-    state: AgentState,
-    event: &str,
-    cwd: &str,
-    message: Option<&str>,
-    transcript: Option<&str>,
+    write: &StateWrite<'_>,
+) -> Result<Recorded, sqlx::Error> {
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+    let state = write_state(&mut tx, write).await?;
+    let live_text = match write.live_text {
+        Some(clear) => clear_live_text_on(&mut tx, write.session_id, clear).await?,
+        None => false,
+    };
+    tx.commit().await?;
+    Ok(Recorded { state, live_text })
+}
+
+/// A `session_state` row as [`write_state`] reads it: state, message, asker,
+/// `updated_at_ms`, `pending_kind`, permission mode, effort.
+type CurrentRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// UPSERT the session's current state, with the dialog it puts up and the
+/// header values it carries. Returns whether anything the app shows changed
+/// (so the caller nudges it).
+async fn write_state(
+    conn: &mut SqliteConnection,
+    write: &StateWrite<'_>,
 ) -> Result<bool, sqlx::Error> {
+    let &StateWrite {
+        session_id,
+        state,
+        event,
+        cwd,
+        message,
+        transcript,
+        asker,
+        source,
+        fired_ms,
+        header,
+        pending,
+        live_text: _,
+        notice,
+    } = write;
     // Dedup: if the stored state + message already match, do nothing (return
     // false → no UI nudge). This keeps high-frequency tool events from
     // re-nudging every tool call while already "running" — only real transitions
     // (e.g. permission → running, running → idle) write and notify.
-    let current: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT state, message FROM session_state WHERE session_id = ?")
-            .bind(session_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-    if let Some((cur_state, cur_message)) = &current {
+    let current: Option<CurrentRow> = sqlx::query_as(
+        "SELECT state, message, asker, updated_at_ms, pending_kind, permission_mode, \
+                effort_level \
+         FROM session_state WHERE session_id = ?",
+    )
+    .bind(session_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    // A dialog recorded while the one on record is still open is behind it on
+    // screen (`1 of 2`): parallel calls and a subagent asking beside the main
+    // thread fire every `PermissionRequest` at once, and the ones behind fire
+    // nothing when they come forward (CLI 2.1.312, probed). Open is "no sign
+    // of its close yet" ([`DialogMarks::closed_at`]). In a serial pair the
+    // first call's `PostToolUse` landed 4-11 ms before the next request in 9
+    // of 9 runs; one that loses that race reads stacked, which only costs the
+    // card.
+    let stacked = match pending {
+        Some(_) => dialog_on_record(conn, session_id)
+            .await?
+            .is_some_and(|(_, marks)| marks.closed_at().is_none()),
+        None => false,
+    };
+    if let Some((cur_state, cur_message, cur_asker, cur_at, cur_pending, cur_mode, cur_effort)) =
+        &current
+    {
         let stored = AgentState::parse(cur_state);
+        // A subagent's question outlives the main thread's turn: Claude runs
+        // subagents in the background, and the main thread ends its turn (its
+        // `Stop`, then `idle_prompt`) while the subagent's dialog is still on
+        // screen. The session is at a dialog, not at its prompt, until a new
+        // turn, a new process or the end of the session says otherwise.
+        let subagents_dialog = state == AgentState::Idle
+            && event != "SessionStart"
+            && stored.is_some_and(AgentState::is_blocked_on_user)
+            && cur_asker
+                .as_deref()
+                .is_some_and(|a| a.starts_with(SUBAGENT_ASKER));
+        // A launch that carries its first prompt fires `SessionStart` and that
+        // prompt's `UserPromptSubmit` ~50 ms apart, both `async`, so their writes
+        // can land in either order. A row written after this `SessionStart`
+        // began is the new process's own first turn — newer than this event —
+        // and is not overwritten. Only a fresh or resumed process: `clear` and
+        // `fork` start a session under a new id, and `compact` sets no state.
+        let older_start = event == "SessionStart"
+            && matches!(source, Some("startup" | "resume"))
+            && *cur_at > fired_ms;
+        // Claude's `permission_prompt` notification comes ~6 s into a dialog its
+        // `PermissionRequest` already recorded, and says less about it (for a
+        // subagent's dialog, not even the tool); an `elicitation_dialog` one
+        // comes ~6 s into an `Elicitation` the same way. The record stays as
+        // written — its dialog and its time the dialog's.
+        let said_less = event == "Notification"
+            && stored == Some(state)
+            && ((state == AgentState::Permission && cur_message.is_some())
+                || (state.is_blocked_on_user() && cur_pending.is_some()));
+        // Nor does a notice about a dialog replace a dialog on record of the
+        // other kind: a dialog recorded after the one the notice is about is
+        // stacked with it (a subagent asks while the main thread's form is up,
+        // and the form's notice lands ~6 s after the form), and writing the
+        // notice there would drop that dialog's record.
+        let notice_behind = cur_pending.is_some()
+            && stored.is_some_and(AgentState::is_blocked_on_user)
+            && matches!(
+                notice,
+                Some("permission_prompt" | "elicitation_dialog" | "elicitation_url_dialog")
+            );
         // A heartbeat must never overrule a state the user still has to answer.
         // Tool hooks are registered `async`, so they are fire-and-forget with no
         // ordering guarantee: a `PostToolUse` from the *previous* tool can land
@@ -967,10 +1823,29 @@ async fn record_on(
         // there would clear a prompt that is still on screen. This is the whole
         // reason per-tool events were kept out before; handling them as
         // heartbeats — rather than as transitions — is what makes them safe.
-        if is_heartbeat_event(event) && stored.is_some_and(AgentState::is_blocked_on_user) {
-            return Ok(false);
+        let stale_heartbeat =
+            is_heartbeat_event(event) && stored.is_some_and(AgentState::is_blocked_on_user);
+        // `ElicitationResult` answers an MCP server's form, and nothing else:
+        // over a permission dialog — one a subagent raised while the form was
+        // up, recorded stacked behind it — it is not that dialog's answer, and
+        // the dialog comes forward firing nothing. Clearing it would read the
+        // session as running with a dialog on screen, and the next request as
+        // the only one up.
+        let answers_another =
+            event == "ElicitationResult" && stored == Some(AgentState::Permission);
+        if subagents_dialog
+            || older_start
+            || said_less
+            || notice_behind
+            || stale_heartbeat
+            || answers_another
+        {
+            return touch_header(conn, session_id, header).await;
         }
-        if cur_state == state.as_str() && cur_message.as_deref() == message {
+        // A dialog's own event always writes: the next of two parallel tool
+        // calls asks with the same state and the same "run <tool>", and is a
+        // new dialog all the same.
+        if pending.is_none() && cur_state == state.as_str() && cur_message.as_deref() == message {
             // Same state, so no UI nudge — but the clock still advances when the
             // state is one the app reads as "working". `updated_at_ms` is the
             // app's evidence that the turn is still moving (see `hooks.rs`'s
@@ -981,28 +1856,71 @@ async fn record_on(
             // *when the prompt was recorded*, and the reconciler compares the
             // transcript against it to notice the user answered. Bumping it would
             // make a resolved prompt look pending forever.
-            if !state.is_blocked_on_user() {
-                sqlx::query("UPDATE session_state SET updated_at_ms = ? WHERE session_id = ?")
-                    .bind(now_ms())
-                    .bind(session_id)
-                    .execute(&mut *conn)
-                    .await?;
+            if state.is_blocked_on_user() {
+                return touch_header(conn, session_id, header).await;
             }
-            return Ok(false);
+            sqlx::query(
+                "UPDATE session_state SET updated_at_ms = ?, \
+                   prompt_id = COALESCE(?, prompt_id), \
+                   permission_mode = COALESCE(?, permission_mode), \
+                   effort_level = COALESCE(?, effort_level) \
+                 WHERE session_id = ?",
+            )
+            .bind(now_ms())
+            .bind(header.prompt_id)
+            .bind(header.permission_mode)
+            .bind(header.effort)
+            .bind(session_id)
+            .execute(&mut *conn)
+            .await?;
+            // A changed mode or effort is something the header shows.
+            let moved = |new: Option<&str>, cur: &Option<String>| {
+                new.is_some_and(|new| cur.as_deref() != Some(new))
+            };
+            return Ok(moved(header.permission_mode, cur_mode) || moved(header.effort, cur_effort));
         }
     }
 
+    // A repeat of the same pending state that can't say who asked (the
+    // Notification about a dialog already recorded) keeps the asker on record.
+    // The dialog is the write's own: any write that gets here takes the row out
+    // of the one on record, and a new dialog replaces it.
+    let at = now_ms();
     sqlx::query(
         "INSERT INTO session_state \
-           (session_id, state, event, cwd, message, transcript_path, updated_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?) \
+           (session_id, state, event, cwd, message, transcript_path, updated_at_ms, asker, \
+            prompt_id, permission_mode, effort_level, \
+            pending_kind, pending_tool, pending_input, pending_suggestions, pending_mcp_server, \
+            pending_agent_id, pending_agent_type, pending_mode, pending_prompt_id, \
+            pending_truncated, pending_at_ms, pending_stacked, pending_call) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(session_id) DO UPDATE SET \
            state = excluded.state, \
            event = excluded.event, \
            cwd = excluded.cwd, \
            message = excluded.message, \
            transcript_path = excluded.transcript_path, \
-           updated_at_ms = excluded.updated_at_ms",
+           updated_at_ms = excluded.updated_at_ms, \
+           asker = CASE WHEN excluded.asker IS NULL AND excluded.state = session_state.state \
+                        THEN session_state.asker ELSE excluded.asker END, \
+           prompt_id = COALESCE(excluded.prompt_id, session_state.prompt_id), \
+           permission_mode = COALESCE(excluded.permission_mode, session_state.permission_mode), \
+           effort_level = COALESCE(excluded.effort_level, session_state.effort_level), \
+           pending_kind = excluded.pending_kind, \
+           pending_tool = excluded.pending_tool, \
+           pending_input = excluded.pending_input, \
+           pending_suggestions = excluded.pending_suggestions, \
+           pending_mcp_server = excluded.pending_mcp_server, \
+           pending_agent_id = excluded.pending_agent_id, \
+           pending_agent_type = excluded.pending_agent_type, \
+           pending_mode = excluded.pending_mode, \
+           pending_prompt_id = excluded.pending_prompt_id, \
+           pending_truncated = excluded.pending_truncated, \
+           pending_at_ms = excluded.pending_at_ms, \
+           pending_stacked = excluded.pending_stacked, \
+           pending_call = excluded.pending_call, \
+           pending_rendered_at_ms = NULL, \
+           pending_resolved_at_ms = NULL",
     )
     .bind(session_id)
     .bind(state.as_str())
@@ -1010,10 +1928,197 @@ async fn record_on(
     .bind(cwd)
     .bind(message)
     .bind(transcript)
-    .bind(now_ms())
+    .bind(at)
+    .bind(asker)
+    .bind(header.prompt_id)
+    .bind(header.permission_mode)
+    .bind(header.effort)
+    .bind(pending.map(|p| p.kind.as_str()))
+    .bind(pending.and_then(|p| p.tool.as_deref()))
+    .bind(pending.map(|p| p.input.as_str()))
+    .bind(pending.and_then(|p| p.suggestions.as_deref()))
+    .bind(pending.and_then(|p| p.mcp_server.as_deref()))
+    .bind(pending.and_then(|p| p.agent_id.as_deref()))
+    .bind(pending.and_then(|p| p.agent_type.as_deref()))
+    .bind(pending.and_then(|p| p.mode.as_deref()))
+    .bind(pending.and_then(|p| p.prompt_id.as_deref()))
+    .bind(pending.map(|p| p.truncated))
+    .bind(pending.map(|_| at))
+    .bind(pending.map(|_| stacked))
+    .bind(pending.and_then(|p| p.call.as_deref()))
     .execute(&mut *conn)
     .await?;
     Ok(true)
+}
+
+/// Store the mode and effort a payload carried, and nothing else — not the
+/// state, the clock or the dialog — for an event a guard keeps from writing
+/// the row. Returns whether either changed.
+async fn touch_header(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    header: Header<'_>,
+) -> Result<bool, sqlx::Error> {
+    if header.permission_mode.is_none() && header.effort.is_none() {
+        return Ok(false);
+    }
+    let changed = sqlx::query(
+        "UPDATE session_state SET \
+           permission_mode = COALESCE(?1, permission_mode), \
+           effort_level = COALESCE(?2, effort_level) \
+         WHERE session_id = ?3 \
+           AND (permission_mode IS NOT COALESCE(?1, permission_mode) \
+                OR effort_level IS NOT COALESCE(?2, effort_level))",
+    )
+    .bind(header.permission_mode)
+    .bind(header.effort)
+    .bind(session_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(changed > 0)
+}
+
+/// Delete what `clear` ends of a session's live text. Returns whether
+/// anything was there.
+async fn clear_live_text_on(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    clear: LiveTextClear<'_>,
+) -> Result<bool, sqlx::Error> {
+    let query = match clear {
+        LiveTextClear::All => {
+            sqlx::query("DELETE FROM session_live_text WHERE session_id = ?").bind(session_id)
+        }
+        LiveTextClear::Turn(prompt_id) => {
+            sqlx::query("DELETE FROM session_live_text WHERE session_id = ? AND prompt_id = ?")
+                .bind(session_id)
+                .bind(prompt_id)
+        }
+        LiveTextClear::Before(prompt_id) => {
+            sqlx::query("DELETE FROM session_live_text WHERE session_id = ? AND prompt_id IS NOT ?")
+                .bind(session_id)
+                .bind(prompt_id)
+        }
+    };
+    Ok(query.execute(&mut *conn).await?.rows_affected() > 0)
+}
+
+/// Store one line batch of the reply Claude is drawing. Returns whether it
+/// was stored (so the caller nudges the view).
+///
+/// - A batch of a turn already over is dropped: a message's final batch fires
+///   in the same millisecond as the turn's `Stop` (captured), and both hooks
+///   are async, so it can land after the `Stop` cleared the turn. Over means
+///   the row is idle or exited from that same turn, or holds a dialog of that
+///   turn recorded after the batch fired (the message before a tool call is
+///   in the transcript once its dialog is up).
+/// - Batches are rows keyed by their `index`, not appended text: a message's
+///   batches can land out of order (captured: two fired in the same
+///   millisecond and landed swapped), and the reader joins them in order.
+/// - Only the session's newest message is kept, and its text is capped at
+///   [`MAX_LIVE_TEXT`] by dropping its oldest batches (each counting at least
+///   [`MIN_BATCH_WEIGHT`]); the first one kept is then marked `cut`.
+async fn record_live_text_on(
+    conn: &mut SqliteConnection,
+    batch: &LiveBatch<'_>,
+) -> Result<bool, sqlx::Error> {
+    // The check and the insert under one write lock, or a `Stop` committing
+    // between them would let a batch of its turn back in.
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+    let row: Option<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT state, prompt_id, updated_at_ms FROM session_state WHERE session_id = ?",
+    )
+    .bind(batch.session_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((state, prompt_id, at)) = row {
+        if batch.prompt_id.is_some() && prompt_id.as_deref() == batch.prompt_id {
+            let over = match AgentState::parse(&state) {
+                Some(AgentState::Idle | AgentState::Exited) => true,
+                Some(s) => s.is_blocked_on_user() && at >= batch.fired_ms,
+                None => false,
+            };
+            if over {
+                return Ok(false);
+            }
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO session_live_text \
+           (session_id, message_id, idx, turn_id, prompt_id, delta, final, cut, fired_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(session_id, message_id, idx) DO UPDATE SET \
+           turn_id = excluded.turn_id, \
+           prompt_id = excluded.prompt_id, \
+           delta = excluded.delta, \
+           final = excluded.final, \
+           cut = excluded.cut, \
+           fired_ms = excluded.fired_ms",
+    )
+    .bind(batch.session_id)
+    .bind(batch.message_id)
+    .bind(batch.index)
+    .bind(batch.turn_id)
+    .bind(batch.prompt_id)
+    .bind(batch.delta)
+    .bind(batch.is_final)
+    .bind(batch.cut)
+    .bind(batch.fired_ms)
+    .execute(&mut *tx)
+    .await?;
+    // An older message's text is in the transcript by the time the next one
+    // streams. A straggler of an older message deletes nothing newer than it.
+    sqlx::query(
+        "DELETE FROM session_live_text \
+         WHERE session_id = ? AND message_id <> ? AND fired_ms < ?",
+    )
+    .bind(batch.session_id)
+    .bind(batch.message_id)
+    .bind(batch.fired_ms)
+    .execute(&mut *tx)
+    .await?;
+    // The cap: drop the oldest batches while the rest of the message is over it.
+    let dropped = sqlx::query(
+        "DELETE FROM session_live_text \
+         WHERE session_id = ?1 AND message_id = ?2 AND idx <= ( \
+           SELECT idx FROM ( \
+             SELECT idx, SUM(MAX(length(CAST(delta AS BLOB)), ?4)) \
+                      OVER (ORDER BY idx DESC) AS kept \
+             FROM session_live_text WHERE session_id = ?1 AND message_id = ?2) \
+           WHERE kept > ?3 ORDER BY idx DESC LIMIT 1)",
+    )
+    .bind(batch.session_id)
+    .bind(batch.message_id)
+    .bind(MAX_LIVE_TEXT as i64)
+    .bind(MIN_BATCH_WEIGHT as i64)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if dropped > 0 {
+        sqlx::query(
+            "UPDATE session_live_text SET cut = 1 \
+             WHERE session_id = ?1 AND message_id = ?2 AND idx = ( \
+               SELECT MIN(idx) FROM session_live_text WHERE session_id = ?1 AND message_id = ?2)",
+        )
+        .bind(batch.session_id)
+        .bind(batch.message_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// [`record_live_text_on`] against the db file at `db_path`.
+async fn record_live_text(db_path: &str, batch: &LiveBatch<'_>) -> Result<bool, sqlx::Error> {
+    let Some(mut conn) = open(db_path).await? else {
+        return Ok(false);
+    };
+    let stored = record_live_text_on(&mut conn, batch).await?;
+    conn.close().await?;
+    Ok(stored)
 }
 
 /// Point the terminal `(repo, term_key, agent)`'s stored session id at
@@ -1133,15 +2238,18 @@ async fn open(db_path: &str) -> Result<Option<SqliteConnection>, sqlx::Error> {
 /// [`apply_hook`], [`record_statusline_to`] — are shared, so a relayed event
 /// can't be recorded differently from a local one.
 trait Store {
-    async fn record(
+    async fn record(&mut self, write: &StateWrite<'_>) -> Result<Recorded, sqlx::Error>;
+
+    /// Tool calls that finished ([`resolve_calls_on`]).
+    async fn resolve_calls(
         &mut self,
         session_id: &str,
-        state: AgentState,
-        event: &str,
-        cwd: &str,
-        message: Option<&str>,
-        transcript: Option<&str>,
+        finished: &[String],
+        ended_ms: i64,
     ) -> Result<bool, sqlx::Error>;
+
+    /// One `MessageDisplay` batch ([`record_live_text_on`]).
+    async fn record_live_text(&mut self, batch: &LiveBatch<'_>) -> Result<bool, sqlx::Error>;
 
     async fn reconcile_terminal_session(
         &mut self,
@@ -1157,7 +2265,8 @@ trait Store {
         &mut self,
         session_id: &str,
         reading: &StatuslineReading<'_>,
-    ) -> Result<bool, sqlx::Error>;
+        started_ms: Option<i64>,
+    ) -> Result<UsageWrite, sqlx::Error>;
 
     async fn record_rate_limits(
         &mut self,
@@ -1170,6 +2279,9 @@ trait Store {
 
     /// A table changed; `tag` is the signal-socket byte naming which.
     fn nudge(&mut self, tag: u8);
+
+    /// `session_id`'s live text changed.
+    fn nudge_live_text(&mut self, session_id: &str);
 
     /// Unwrap a hook-path result, leaving a [`Store::note`] behind when it
     /// failed.
@@ -1198,16 +2310,26 @@ trait Store {
 struct PathStore<'a>(&'a str);
 
 impl Store for PathStore<'_> {
-    async fn record(
+    async fn record(&mut self, write: &StateWrite<'_>) -> Result<Recorded, sqlx::Error> {
+        record(self.0, write).await
+    }
+
+    async fn resolve_calls(
         &mut self,
         session_id: &str,
-        state: AgentState,
-        event: &str,
-        cwd: &str,
-        message: Option<&str>,
-        transcript: Option<&str>,
+        finished: &[String],
+        ended_ms: i64,
     ) -> Result<bool, sqlx::Error> {
-        record(self.0, session_id, state, event, cwd, message, transcript).await
+        let Some(mut conn) = open(self.0).await? else {
+            return Ok(false);
+        };
+        let resolved = resolve_calls_on(&mut conn, session_id, finished, ended_ms).await?;
+        conn.close().await?;
+        Ok(resolved)
+    }
+
+    async fn record_live_text(&mut self, batch: &LiveBatch<'_>) -> Result<bool, sqlx::Error> {
+        record_live_text(self.0, batch).await
     }
 
     async fn reconcile_terminal_session(
@@ -1226,17 +2348,9 @@ impl Store for PathStore<'_> {
         &mut self,
         session_id: &str,
         r: &StatuslineReading<'_>,
-    ) -> Result<bool, sqlx::Error> {
-        record_usage(
-            self.0,
-            session_id,
-            r.used_pct,
-            r.input_tokens,
-            r.context_size,
-            r.model_id,
-            r.cost,
-        )
-        .await
+        started_ms: Option<i64>,
+    ) -> Result<UsageWrite, sqlx::Error> {
+        record_usage(self.0, session_id, r, started_ms).await
     }
 
     async fn record_rate_limits(
@@ -1254,6 +2368,13 @@ impl Store for PathStore<'_> {
     fn nudge(&mut self, tag: u8) {
         ping_socket(self.0, tag);
     }
+
+    fn nudge_live_text(&mut self, session_id: &str) {
+        let mut signal = Vec::with_capacity(1 + session_id.len());
+        signal.push(LIVE_TEXT_TAG);
+        signal.extend_from_slice(session_id.as_bytes());
+        ping_socket_with(self.0, &signal);
+    }
 }
 
 /// The relay's store: a connection the caller owns, and a record of what to
@@ -1264,19 +2385,21 @@ struct ConnStore<'c> {
 }
 
 impl Store for ConnStore<'_> {
-    async fn record(
+    async fn record(&mut self, write: &StateWrite<'_>) -> Result<Recorded, sqlx::Error> {
+        record_on(self.conn, write).await
+    }
+
+    async fn resolve_calls(
         &mut self,
         session_id: &str,
-        state: AgentState,
-        event: &str,
-        cwd: &str,
-        message: Option<&str>,
-        transcript: Option<&str>,
+        finished: &[String],
+        ended_ms: i64,
     ) -> Result<bool, sqlx::Error> {
-        record_on(
-            self.conn, session_id, state, event, cwd, message, transcript,
-        )
-        .await
+        resolve_calls_on(self.conn, session_id, finished, ended_ms).await
+    }
+
+    async fn record_live_text(&mut self, batch: &LiveBatch<'_>) -> Result<bool, sqlx::Error> {
+        record_live_text_on(self.conn, batch).await
     }
 
     async fn reconcile_terminal_session(
@@ -1296,17 +2419,9 @@ impl Store for ConnStore<'_> {
         &mut self,
         session_id: &str,
         r: &StatuslineReading<'_>,
-    ) -> Result<bool, sqlx::Error> {
-        record_usage_on(
-            self.conn,
-            session_id,
-            r.used_pct,
-            r.input_tokens,
-            r.context_size,
-            r.model_id,
-            r.cost,
-        )
-        .await
+        started_ms: Option<i64>,
+    ) -> Result<UsageWrite, sqlx::Error> {
+        record_usage_on(self.conn, session_id, r, started_ms).await
     }
 
     async fn record_rate_limits(
@@ -1329,6 +2444,11 @@ impl Store for ConnStore<'_> {
             _ => nudges.state = true,
         }
     }
+
+    /// The relay never applies `MessageDisplay` ([`Invocation::parse_relayed`]),
+    /// and a Daedalus session has no live text for a state event to clear, so
+    /// there is nothing for a view to read again.
+    fn nudge_live_text(&mut self, _session_id: &str) {}
 }
 
 // ── The relay's entry point ──────────────────────────────────────────────────
@@ -1401,13 +2521,15 @@ impl Invocation {
     /// `--agent-kind Codex SessionStart` and `statusline` all mean what they
     /// mean locally. Parsed by the binary's own [`parse_args`], so the two
     /// vocabularies can't drift. `None` for `mcp` and anything the binary
-    /// wouldn't run.
+    /// wouldn't run, and for `MessageDisplay`: santree never registers it on
+    /// the box, and a line-by-line feed is not something the relay takes.
     pub fn parse_relayed(event: &str) -> Option<Self> {
         let args = ["--db", "<relayed>"]
             .into_iter()
             .map(str::to_string)
             .chain(event.split_whitespace().map(str::to_string));
         match parse_args(args)?.1 {
+            Mode::Hook { event, .. } if event == LIVE_TEXT_EVENT => None,
             Mode::Hook { event, agent } => Some(Self::Hook { event, agent }),
             Mode::Statusline { .. } => Some(Self::Statusline),
             Mode::Mcp(_) => None,
@@ -1453,13 +2575,23 @@ pub async fn apply(
     };
     match invocation {
         Invocation::Hook { event, agent } => {
-            apply_hook(&mut store, event, *agent, stdin, env).await;
+            apply_hook(&mut store, event, *agent, stdin, env, now_ms()).await;
         }
         Invocation::Statusline => {
             let p: Value = serde_json::from_slice(stdin).unwrap_or(Value::Null);
             let reading = StatuslineReading::of(&p);
-            record_statusline_to(&mut store, &p, &reading, env.account_for(AgentKind::Claude))
-                .await;
+            // When the render started is on the box, and a render that started
+            // just before a dialog fired can reach the queue after the dialog's
+            // own hook: dated here it would read as that dialog's close. A
+            // relayed render closes nothing.
+            record_statusline_to(
+                &mut store,
+                &p,
+                &reading,
+                env.account_for(AgentKind::Claude),
+                None,
+            )
+            .await;
         }
     }
     store.applied
@@ -1634,6 +2766,11 @@ mod tests {
             ("PermissionRequest", Some(AgentState::Permission)),
             ("PostToolUse", Some(AgentState::Active)),
             ("PostToolUseFailure", Some(AgentState::Active)),
+            ("StopFailure", Some(AgentState::Idle)),
+            ("Elicitation", Some(AgentState::Waiting)),
+            ("ElicitationResult", Some(AgentState::Active)),
+            // The reply line by line: its own table, never a state.
+            ("MessageDisplay", None),
             ("PreToolUse", None),
             ("PermissionDenied", None),
             ("PreCompact", None),
@@ -1641,80 +2778,139 @@ mod tests {
             ("SubagentStart", None),
             ("SubagentStop", None),
         ] {
-            assert_eq!(resolve_state(event, &nil), want, "{event}");
+            assert_eq!(
+                resolve_state(event, AgentKind::Claude, &nil),
+                want,
+                "{event}"
+            );
             assert_eq!(
                 is_heartbeat_event(event),
                 event.starts_with("PostToolUse"),
                 "{event}"
             );
         }
+        // Auto-compaction fires `SessionStart` in the middle of a turn that goes
+        // on afterwards: it is no sign the session is at its prompt.
+        assert_eq!(
+            resolve_state(
+                "SessionStart",
+                AgentKind::Claude,
+                &serde_json::json!({ "source": "compact" })
+            ),
+            None
+        );
     }
 
-    /// Codex runs the injected hook command for its subagents too, tagging those
-    /// payloads with the child's `agent_id`. Recording one would show a helper's
-    /// state on the user's surface, and its `SessionStart` would repoint the
-    /// terminal at a thread the user never opened.
+    /// Both CLIs run the injected hook command inside a subagent and tag the
+    /// payload with its `agent_id`. A Codex child is a thread of its own:
+    /// recording it would show a helper's state on the user's surface, and its
+    /// `SessionStart` would repoint the terminal at a thread the user never
+    /// opened. A Claude subagent's events land on the parent session (CLI
+    /// 2.1.312, captured): its turns are not the parent's state, but the dialog
+    /// it puts up is on the parent's screen — the one thing recorded.
     #[test]
-    fn ignores_every_subagent_payload() {
-        let subagent = |event: &str| {
+    fn a_subagent_payload_records_only_a_claude_subagents_question() {
+        let subagent = |agent: AgentKind, event: &str, kind: Option<&str>| {
             resolve_state(
                 event,
+                agent,
                 &serde_json::json!({
-                    "session_id": "child-thread",
-                    "agent_id": "agent_01",
+                    "session_id": "parent",
+                    "agent_id": "a3a8e734fe1a2da00",
                     "hook_event_name": event,
+                    "notification_type": kind,
                 }),
             )
         };
         for event in [
             "SessionStart",
             "UserPromptSubmit",
+            "PostToolUse",
             "Stop",
             "SessionEnd",
             "PermissionRequest",
         ] {
-            assert_eq!(subagent(event), None, "{event}");
+            assert_eq!(subagent(AgentKind::Codex, event, None), None, "{event}");
+        }
+        for (event, kind, want) in [
+            ("PermissionRequest", None, Some(AgentState::Permission)),
+            (
+                "Notification",
+                Some("permission_prompt"),
+                Some(AgentState::Permission),
+            ),
+            (
+                "Notification",
+                Some("elicitation_dialog"),
+                Some(AgentState::Waiting),
+            ),
+            ("Notification", Some("idle_prompt"), None),
+            ("SessionStart", None, None),
+            ("UserPromptSubmit", None, None),
+            ("PostToolUse", None, None),
+            ("Stop", None, None),
+            ("SessionEnd", None, None),
+        ] {
+            assert_eq!(
+                subagent(AgentKind::Claude, event, kind),
+                want,
+                "{event} {kind:?}"
+            );
         }
         // The same events without an `agent_id` are the user's own session — and
         // so is a null one, the shape an absent optional serializes to. Reading
         // that as "subagent" would ignore every event the root session fires.
-        assert_eq!(
-            resolve_state("Stop", &serde_json::json!({ "session_id": "root" })),
-            Some(AgentState::Idle)
-        );
-        assert_eq!(
-            resolve_state(
-                "Stop",
-                &serde_json::json!({ "session_id": "root", "agent_id": null })
-            ),
-            Some(AgentState::Idle)
-        );
+        for agent in [AgentKind::Claude, AgentKind::Codex] {
+            assert_eq!(
+                resolve_state("Stop", agent, &serde_json::json!({ "session_id": "root" })),
+                Some(AgentState::Idle)
+            );
+            assert_eq!(
+                resolve_state(
+                    "Stop",
+                    agent,
+                    &serde_json::json!({ "session_id": "root", "agent_id": null })
+                ),
+                Some(AgentState::Idle)
+            );
+        }
     }
 
+    /// The `notification_type`s Claude's hooks reference documents, each read as
+    /// what is on screen. "Waiting" is never seen-gated, so a type that is not a
+    /// question must not map to it: `idle_prompt` (finished a minute ago, nothing
+    /// typed since) once did, and every quiet session said "needs you".
     #[test]
     fn refines_notification_by_type() {
-        let with_type = |t: &str| serde_json::json!({ "notification_type": t });
-        assert_eq!(
-            resolve_state("Notification", &with_type("permission_prompt")),
-            Some(AgentState::Permission)
-        );
-        // A completed turn is idle, not a red "waiting".
-        assert_eq!(
-            resolve_state("Notification", &with_type("agent_completed")),
-            Some(AgentState::Idle)
-        );
-        assert_eq!(
-            resolve_state("Notification", &with_type("agent_needs_input")),
-            Some(AgentState::Waiting)
-        );
-        // Non-state notifications don't change anything.
-        assert_eq!(
-            resolve_state("Notification", &with_type("auth_success")),
-            None
-        );
+        for (kind, want) in [
+            ("permission_prompt", Some(AgentState::Permission)),
+            // An agent-team worker's permission request, shown by the lead.
+            ("worker_permission_prompt", Some(AgentState::Permission)),
+            ("agent_needs_input", Some(AgentState::Waiting)),
+            ("elicitation_dialog", Some(AgentState::Waiting)),
+            ("elicitation_url_dialog", Some(AgentState::Waiting)),
+            ("quota_auto_resume_stale", Some(AgentState::Waiting)),
+            // A finished turn is idle, not a red "waiting".
+            ("agent_completed", Some(AgentState::Idle)),
+            ("idle_prompt", Some(AgentState::Idle)),
+            // Non-state notifications don't change anything.
+            ("auth_success", None),
+            ("elicitation_complete", None),
+            ("elicitation_response", None),
+        ] {
+            assert_eq!(
+                resolve_state(
+                    "Notification",
+                    AgentKind::Claude,
+                    &serde_json::json!({ "notification_type": kind })
+                ),
+                want,
+                "{kind}"
+            );
+        }
         // No type (older CLI) falls back to "waiting".
         assert_eq!(
-            resolve_state("Notification", &Value::Null),
+            resolve_state("Notification", AgentKind::Claude, &Value::Null),
             Some(AgentState::Waiting)
         );
     }
@@ -1742,7 +2938,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_hook_input(&permission, AgentState::Permission),
+            read_hook_input(&permission, "PermissionRequest", AgentState::Permission),
             HookInput {
                 session_id: "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
                 cwd: "/Users/me/dev/app",
@@ -1752,28 +2948,92 @@ mod tests {
                 // No `message` on this one, so the tool name is the tooltip.
                 message: Some("run Bash".into()),
                 source: None,
+                asker: Some(MAIN_ASKER.into()),
+                header: Header {
+                    prompt_id: None,
+                    permission_mode: Some("default"),
+                    effort: None,
+                },
             }
         );
 
-        // Notification: the type refines the state, the message is the tooltip.
+        // The same event from a subagent (CLI 2.1.312, captured): the parent's
+        // session and transcript, and the subagent named by `agent_id`. Its
+        // dialog is on the parent's screen, so it is recorded there, as asked by
+        // that subagent.
+        let subagent: Value = serde_json::from_str(
+            r#"{
+              "session_id": "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+              "transcript_path": "/Users/me/.claude/projects/-Users-me-dev-app/9f1c0e2a.jsonl",
+              "cwd": "/Users/me/dev/app",
+              "permission_mode": "default",
+              "agent_id": "a3a8e734fe1a2da00",
+              "agent_type": "general-purpose",
+              "hook_event_name": "PermissionRequest",
+              "tool_name": "Bash",
+              "tool_input": { "command": "touch x", "description": "Touch" }
+            }"#,
+        )
+        .unwrap();
+        let state = resolve_state("PermissionRequest", AgentKind::Claude, &subagent);
+        assert_eq!(state, Some(AgentState::Permission));
+        assert_eq!(
+            read_hook_input(&subagent, "PermissionRequest", state.unwrap()).asker,
+            Some(format!("{SUBAGENT_ASKER}a3a8e734fe1a2da00"))
+        );
+
+        // Notification: the type refines the state. This is the one Claude sends
+        // a minute after a turn with nothing typed — its wording reads like a
+        // question, but the session is at its prompt, so it is idle and carries
+        // no "needs you" tooltip.
         let notification: Value = serde_json::from_str(
             r#"{
               "session_id": "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
               "transcript_path": "/Users/me/.claude/projects/-Users-me-dev-app/9f1c0e2a.jsonl",
               "cwd": "/Users/me/dev/app",
               "hook_event_name": "Notification",
-              "notification_type": "agent_needs_input",
+              "notification_type": "idle_prompt",
               "message": "Claude is waiting for your input"
             }"#,
         )
         .unwrap();
-        let state = resolve_state("Notification", &notification);
-        assert_eq!(state, Some(AgentState::Waiting));
+        let state = resolve_state("Notification", AgentKind::Claude, &notification);
+        assert_eq!(state, Some(AgentState::Idle));
         assert_eq!(
-            read_hook_input(&notification, state.unwrap())
-                .message
-                .as_deref(),
-            Some("Claude is waiting for your input")
+            read_hook_input(&notification, "Notification", state.unwrap()).message,
+            None
+        );
+
+        // StopFailure (CLI 2.1.312, captured: a 429 the fake API answered with
+        // `x-should-retry: false`): the turn ended on an API error and no `Stop`
+        // follows. Idle, carrying the error the transcript's synthetic message
+        // holds.
+        let failed: Value = serde_json::from_str(
+            r#"{
+              "session_id": "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+              "transcript_path": "/Users/me/.claude/projects/-Users-me-dev-app/9f1c0e2a.jsonl",
+              "cwd": "/Users/me/dev/app",
+              "prompt_id": "ce327951-4429-4cbe-a0d1-82c781c74959",
+              "effort": { "level": "medium" },
+              "hook_event_name": "StopFailure",
+              "error": "rate_limit",
+              "last_assistant_message": "API Error: Request rejected (429) · placeholder"
+            }"#,
+        )
+        .unwrap();
+        let state = resolve_state("StopFailure", AgentKind::Claude, &failed);
+        assert_eq!(state, Some(AgentState::Idle));
+        let input = read_hook_input(&failed, "StopFailure", state.unwrap());
+        assert_eq!(
+            (input.message.as_deref(), input.header),
+            (
+                Some("API Error: Request rejected (429) · placeholder"),
+                Header {
+                    prompt_id: Some("ce327951-4429-4cbe-a0d1-82c781c74959"),
+                    permission_mode: None,
+                    effort: Some("medium"),
+                }
+            )
         );
 
         // SessionStart: `source` is what decides whether Claude rebinds the row.
@@ -1787,7 +3047,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let input = read_hook_input(&cleared, AgentState::Idle);
+        let input = read_hook_input(&cleared, "SessionStart", AgentState::Idle);
         assert_eq!(input.source, Some("clear"));
         assert!(
             binds_session_id(AgentKind::Claude, input.source),
@@ -1814,7 +3074,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_hook_input(&session_start, AgentState::Idle),
+            read_hook_input(&session_start, "SessionStart", AgentState::Idle),
             HookInput {
                 session_id: "01998f6c-1d3f-7c11-9a2b-4e6f8a0b1c2d",
                 cwd: "/Users/me/dev/app",
@@ -1822,6 +3082,12 @@ mod tests {
                 transcript_path: None,
                 message: None,
                 source: Some("startup"),
+                asker: None,
+                header: Header {
+                    prompt_id: None,
+                    permission_mode: Some("default"),
+                    effort: None,
+                },
             }
         );
         // Codex mints its own id, so every SessionStart binds it to the terminal.
@@ -1843,7 +3109,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let input = read_hook_input(&permission, AgentState::Permission);
+        let input = read_hook_input(&permission, "PermissionRequest", AgentState::Permission);
         assert_eq!(input.message.as_deref(), Some("run shell"));
         assert_eq!(
             input.transcript_path,
@@ -1869,7 +3135,10 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(resolve_state("PermissionRequest", &subagent), None);
+        assert_eq!(
+            resolve_state("PermissionRequest", AgentKind::Codex, &subagent),
+            None
+        );
     }
 
     /// A camelCase payload must read as *nothing*, not as a session.
@@ -1890,7 +3159,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_hook_input(&payload, AgentState::Permission),
+            read_hook_input(&payload, "PermissionRequest", AgentState::Permission),
             HookInput {
                 // Empty ⇒ `main` returns before writing anything.
                 session_id: "",
@@ -1898,7 +3167,201 @@ mod tests {
                 transcript_path: None,
                 message: None,
                 source: None,
+                asker: Some(MAIN_ASKER.into()),
+                header: Header::default(),
             }
+        );
+    }
+
+    /// Each dialog's own payload, as CLI 2.1.312 sends it (captured, texts and
+    /// paths replaced), is what its card draws: the dialog stored with the row
+    /// reads every field by Claude's spelling, keeps the JSON as Claude sent
+    /// it, and says when it is not there to read — `[]` suggestions are kept
+    /// apart from none, because a dialog with `[]` has no "don't ask again" row.
+    #[test]
+    fn a_dialogs_own_payload_is_what_its_card_draws() {
+        const ENVELOPE: &str = r#""session_id": "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f",
+            "transcript_path": "/Users/me/.claude/projects/-Users-me-dev-app/9f1c0e2a.jsonl",
+            "cwd": "/Users/me/dev/app", "prompt_id": "8706343f-0000-4000-8000-000000000001",
+            "effort": { "level": "medium" }"#;
+        let payload = |rest: &str| -> Value {
+            serde_json::from_str(&format!("{{ {ENVELOPE}, {rest} }}")).unwrap()
+        };
+        let json = |v: &Value| v.to_string();
+        // (event, payload, kind, tool, server, agent, mode)
+        let cases = [
+            (
+                "PermissionRequest",
+                payload(
+                    r#""permission_mode": "default", "hook_event_name": "PermissionRequest",
+                    "tool_name": "Bash", "tool_input": { "command": "touch probe-a", "description": "Create probe file" },
+                    "permission_suggestions": [
+                      { "type": "addDirectories", "directories": ["/Users/me/dev/app"], "destination": "session" },
+                      { "type": "setMode", "mode": "acceptEdits", "destination": "session" }]"#,
+                ),
+                DialogKind::Permission,
+                Some("Bash"),
+                None,
+                None,
+                Some("default"),
+            ),
+            (
+                // No rule to offer: `[]`, and the dialog's row 2 is auto mode.
+                "PermissionRequest",
+                payload(
+                    r#""permission_mode": "default", "hook_event_name": "PermissionRequest",
+                    "tool_name": "Bash", "tool_input": { "command": "eval \"$PLACEHOLDER\"", "description": "Eval a variable" },
+                    "permission_suggestions": []"#,
+                ),
+                DialogKind::Permission,
+                Some("Bash"),
+                None,
+                None,
+                Some("default"),
+            ),
+            (
+                "PermissionRequest",
+                payload(
+                    r#""permission_mode": "default", "agent_id": "a8b673e1aefb31430",
+                    "agent_type": "general-purpose", "hook_event_name": "PermissionRequest",
+                    "tool_name": "Bash", "tool_input": { "command": "touch sub-file", "description": "Subagent touch" },
+                    "permission_suggestions": [{ "type": "setMode", "mode": "acceptEdits", "destination": "session" }]"#,
+                ),
+                DialogKind::Permission,
+                Some("Bash"),
+                None,
+                Some(("a8b673e1aefb31430", "general-purpose")),
+                Some("default"),
+            ),
+            (
+                "PermissionRequest",
+                payload(
+                    r#""permission_mode": "default", "hook_event_name": "PermissionRequest",
+                    "tool_name": "mcp__probe__echo", "tool_input": { "text": "hello mcp" },
+                    "permission_suggestions": [{ "type": "addRules", "rules": [{ "toolName": "mcp__probe__echo" }],
+                      "behavior": "allow", "destination": "localSettings" }],
+                    "mcp_server": { "name": "probe", "source": "dynamic" }"#,
+                ),
+                DialogKind::Permission,
+                Some("mcp__probe__echo"),
+                Some("probe"),
+                None,
+                Some("default"),
+            ),
+            (
+                // Questions and plans carry no suggestions at all.
+                "PermissionRequest",
+                payload(
+                    r#""permission_mode": "default", "hook_event_name": "PermissionRequest",
+                    "tool_name": "AskUserQuestion", "tool_input": { "questions": [{ "question": "Which color?",
+                      "header": "Color", "options": [{ "label": "Red", "description": "A warm color" },
+                      { "label": "Blue", "description": "A cool color" }], "multiSelect": false }] }"#,
+                ),
+                DialogKind::Permission,
+                Some("AskUserQuestion"),
+                None,
+                None,
+                Some("default"),
+            ),
+            (
+                "PermissionRequest",
+                payload(
+                    r##""permission_mode": "plan", "hook_event_name": "PermissionRequest",
+                    "tool_name": "ExitPlanMode", "tool_input": { "plan": "# Placeholder plan\n\n1. Step\n",
+                      "planFilePath": "/Users/me/.claude/plans/placeholder.md" }"##,
+                ),
+                DialogKind::Permission,
+                Some("ExitPlanMode"),
+                None,
+                None,
+                Some("plan"),
+            ),
+            (
+                "Elicitation",
+                payload(
+                    r#""hook_event_name": "Elicitation", "mcp_server_name": "probe",
+                    "message": "Pick a deploy target", "mode": "form",
+                    "requested_schema": { "type": "object", "properties": { "target": { "type": "string",
+                      "title": "Target", "enum": ["staging", "production"] } }, "required": ["target"] }"#,
+                ),
+                DialogKind::Elicitation,
+                None,
+                Some("probe"),
+                None,
+                None,
+            ),
+        ];
+        for (event, p, kind, tool, server, agent, mode) in cases {
+            let dialog = pending_dialog(event, AgentKind::Claude, &p).expect(event);
+            let input: Value = serde_json::from_str(&dialog.input).unwrap();
+            let want_input = match kind {
+                DialogKind::Permission => p["tool_input"].clone(),
+                DialogKind::Elicitation => serde_json::json!({
+                    "message": p["message"], "mode": p["mode"],
+                    "requested_schema": p["requested_schema"],
+                }),
+            };
+            assert_eq!(
+                (
+                    dialog.kind,
+                    dialog.tool.as_deref(),
+                    input,
+                    dialog.suggestions.clone(),
+                    dialog.mcp_server.as_deref(),
+                    dialog.agent_id.as_deref().zip(dialog.agent_type.as_deref()),
+                    dialog.mode.as_deref(),
+                    dialog.prompt_id.as_deref(),
+                    dialog.truncated,
+                ),
+                (
+                    kind,
+                    tool,
+                    want_input,
+                    p.get("permission_suggestions").map(json),
+                    server,
+                    agent,
+                    mode,
+                    Some("8706343f-0000-4000-8000-000000000001"),
+                    false,
+                ),
+                "{event} {tool:?}"
+            );
+        }
+        // A URL elicitation keeps its URL and id.
+        let url = payload(
+            r#""hook_event_name": "Elicitation", "mcp_server_name": "probe",
+            "message": "Sign in to the probe service", "mode": "url",
+            "url": "https://example.invalid/probe-auth", "elicitation_id": "probe-url-1""#,
+        );
+        let dialog = pending_dialog("Elicitation", AgentKind::Claude, &url).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&dialog.input).unwrap(),
+            serde_json::json!({ "message": "Sign in to the probe service", "mode": "url",
+                "url": "https://example.invalid/probe-auth", "elicitation_id": "probe-url-1" })
+        );
+
+        // A file written whole is over the cap: the content is cut, the JSON
+        // still parses, and the dialog says it was cut.
+        let big = payload(&format!(
+            r#""permission_mode": "default", "hook_event_name": "PermissionRequest",
+            "tool_name": "Write", "tool_input": {{ "file_path": "/Users/me/dev/app/big.txt", "content": "{}" }}"#,
+            "x".repeat(200 * 1024)
+        ));
+        let dialog = pending_dialog("PermissionRequest", AgentKind::Claude, &big).unwrap();
+        let input: Value = serde_json::from_str(&dialog.input).unwrap();
+        assert!(dialog.truncated && dialog.input.len() <= MAX_PENDING_INPUT);
+        assert_eq!(input["file_path"], "/Users/me/dev/app/big.txt");
+        assert!(input["content"].as_str().unwrap().starts_with("xxxx"));
+
+        // Codex's PermissionRequest is answered in the terminal; nothing else
+        // puts a dialog on record.
+        assert_eq!(
+            pending_dialog("PermissionRequest", AgentKind::Codex, &big),
+            None
+        );
+        assert_eq!(
+            pending_dialog("Notification", AgentKind::Claude, &big),
+            None
         );
     }
 
@@ -1918,7 +3381,7 @@ mod tests {
         )
         .unwrap();
         // The explicit message wins over the tool-name fallback.
-        let message = |state| read_hook_input(&payload, state).message;
+        let message = |state| read_hook_input(&payload, "PermissionRequest", state).message;
         assert_eq!(
             message(AgentState::Permission).as_deref(),
             Some("Claude needs your permission to use Bash")
@@ -1937,11 +3400,11 @@ mod tests {
             serde_json::from_str(r#"{ "session_id": "s1", "cwd": "/w", "tool_name": "Bash" }"#)
                 .unwrap();
         assert_eq!(
-            read_hook_input(&no_message, AgentState::Waiting).message,
+            read_hook_input(&no_message, "Notification", AgentState::Waiting).message,
             None
         );
         assert_eq!(
-            read_hook_input(&no_message, AgentState::Permission)
+            read_hook_input(&no_message, "PermissionRequest", AgentState::Permission)
                 .message
                 .as_deref(),
             Some("run Bash")
@@ -2000,67 +3463,93 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let db_path = base.join("santree.db");
         let db = db_path.to_str().unwrap();
+        // A render as CLI 2.1.312 sends it (keymap §9), vim mode on.
+        let payload = |used: f64, tokens: f64, vim: &str| {
+            serde_json::json!({
+                "session_id": "s1",
+                "effort": { "level": "medium" },
+                "model": { "id": "claude-opus-4-8", "display_name": "Opus" },
+                "output_style": { "name": "default" },
+                "context_window": {
+                    "total_input_tokens": tokens,
+                    "context_window_size": 200_000,
+                    "used_percentage": used,
+                },
+                "vim": { "mode": vim },
+            })
+        };
+        let usage = |p: &Value| {
+            let p = p.clone();
+            async move {
+                record_usage(db, "s1", &StatuslineReading::of(&p), Some(now_ms()))
+                    .await
+                    .unwrap()
+            }
+        };
 
         // No db yet → no-op, no panic, and crucially no db created.
-        assert!(!record_usage(db, "s1", 10.0, 100.0, 200_000.0, "m", 0.1)
-            .await
-            .unwrap());
+        assert_eq!(
+            usage(&payload(10.0, 100.0, "NORMAL")).await,
+            UsageWrite::default()
+        );
         assert!(!db_path.exists(), "must never create the app's db");
 
-        // The table the app owns (mirrors migration 0011).
-        {
-            let mut c = SqliteConnectOptions::new()
-                .filename(&db_path)
-                .create_if_missing(true)
-                .connect()
-                .await
-                .unwrap();
-            sqlx::query(
-                "CREATE TABLE session_usage_live (session_id TEXT PRIMARY KEY, used_pct REAL NOT NULL, \
-                 input_tokens INTEGER NOT NULL, context_size INTEGER NOT NULL, model TEXT NOT NULL, \
-                 cost_usd REAL NOT NULL, updated_at_ms INTEGER NOT NULL)",
-            )
-            .execute(&mut c)
-            .await
-            .unwrap();
-            c.close().await.unwrap();
-        }
-
-        assert!(
-            record_usage(db, "s1", 10.0, 100.0, 200_000.0, "claude-opus-4-8", 0.1)
-                .await
-                .unwrap()
-        );
-        // Identical (used_pct, input_tokens) → no write, no UI nudge.
-        assert!(
-            !record_usage(db, "s1", 10.0, 100.0, 200_000.0, "claude-opus-4-8", 0.2)
-                .await
-                .unwrap()
-        );
-        // A real change writes again.
-        assert!(
-            record_usage(db, "s1", 24.0, 500.0, 200_000.0, "claude-opus-4-8", 0.3)
-                .await
-                .unwrap()
-        );
-
+        // The tables the app owns ([`USAGE_DDL`], and the state row the effort
+        // lands on).
         let mut c = SqliteConnectOptions::new()
             .filename(&db_path)
+            .create_if_missing(true)
             .connect()
             .await
             .unwrap();
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM session_usage_live")
-            .fetch_one(&mut c)
-            .await
-            .unwrap();
-        assert_eq!(count, 1, "one row per session");
-        let (used, tokens, cost): (f64, i64, f64) =
-            sqlx::query_as("SELECT used_pct, input_tokens, cost_usd FROM session_usage_live")
+        for ddl in [USAGE_DDL, STATE_DDL[0]] {
+            sqlx::query(ddl).execute(&mut c).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO session_state (session_id, state, event, updated_at_ms) \
+             VALUES ('s1', 'idle', 'SessionStart', 1)",
+        )
+        .execute(&mut c)
+        .await
+        .unwrap();
+
+        // The first render writes the usage, and the effort onto the state row
+        // (no hook before the first turn carries it).
+        assert_eq!(
+            usage(&payload(10.0, 100.0, "NORMAL")).await,
+            UsageWrite {
+                usage: true,
+                state: true
+            }
+        );
+        // Identical → no write, no UI nudge.
+        assert_eq!(
+            usage(&payload(10.0, 100.0, "NORMAL")).await,
+            UsageWrite::default()
+        );
+        // The vim mode alone moving is a change the header shows.
+        assert!(usage(&payload(10.0, 100.0, "INSERT")).await.usage);
+        // A real change writes again.
+        assert!(usage(&payload(24.0, 500.0, "INSERT")).await.usage);
+
+        let row: (i64, f64, i64, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT COUNT(*), used_pct, input_tokens, output_style, vim_mode \
+             FROM session_usage_live",
+        )
+        .fetch_one(&mut c)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (1, 24.0, 500, Some("default".into()), Some("INSERT".into())),
+            "one row per session, latest render"
+        );
+        let (effort,): (Option<String>,) =
+            sqlx::query_as("SELECT effort_level FROM session_state WHERE session_id = 's1'")
                 .fetch_one(&mut c)
                 .await
                 .unwrap();
-        assert_eq!((used, tokens), (24.0, 500), "latest usage won");
-        assert_eq!(cost, 0.3);
+        assert_eq!(effort.as_deref(), Some("medium"));
         c.close().await.unwrap();
 
         let _ = std::fs::remove_dir_all(&base);
@@ -2217,19 +3706,13 @@ mod tests {
         let db = db_path.to_str().unwrap();
 
         // No db yet → no-op, no panic.
-        assert!(!record(
-            db,
-            "s1",
-            AgentState::Active,
-            "SessionStart",
-            "/w",
-            None,
-            None
-        )
-        .await
-        .unwrap());
+        assert!(
+            !record_state(db, &write(AgentState::Active, "SessionStart", None, None))
+                .await
+                .unwrap()
+        );
 
-        // Create the table the app owns (mirrors migration 0010).
+        // Create the tables the app owns ([`STATE_DDL`]).
         {
             let mut c = SqliteConnectOptions::new()
                 .filename(&db_path)
@@ -2237,38 +3720,29 @@ mod tests {
                 .connect()
                 .await
                 .unwrap();
-            sqlx::query(
-                "CREATE TABLE session_state (session_id TEXT PRIMARY KEY, state TEXT NOT NULL, \
-                 event TEXT NOT NULL, cwd TEXT NOT NULL DEFAULT '', message TEXT, \
-                 transcript_path TEXT, updated_at_ms INTEGER NOT NULL)",
-            )
-            .execute(&mut c)
-            .await
-            .unwrap();
+            for ddl in STATE_DDL {
+                sqlx::query(ddl).execute(&mut c).await.unwrap();
+            }
             c.close().await.unwrap();
         }
 
-        assert!(record(
-            db,
-            "s1",
-            AgentState::Active,
-            "SessionStart",
-            "/w",
-            None,
-            None
-        )
-        .await
-        .unwrap());
-        // Dedup: the same state + message again is a no-op (no UI nudge) — this is
-        // what keeps repeated PreToolUse/PostToolUse from re-notifying every tool.
         assert!(
-            !record(db, "s1", AgentState::Active, "PreToolUse", "/w", None, None)
+            record_state(db, &write(AgentState::Active, "SessionStart", None, None))
                 .await
                 .unwrap()
         );
-        assert!(record(db, "s1", AgentState::Idle, "Stop", "/w", None, None)
-            .await
-            .unwrap());
+        // Dedup: the same state + message again is a no-op (no UI nudge) — this is
+        // what keeps repeated PreToolUse/PostToolUse from re-notifying every tool.
+        assert!(
+            !record_state(db, &write(AgentState::Active, "PreToolUse", None, None))
+                .await
+                .unwrap()
+        );
+        assert!(
+            record_state(db, &write(AgentState::Idle, "Stop", None, None))
+                .await
+                .unwrap()
+        );
 
         // One row for the session, holding the latest state.
         let mut c = SqliteConnectOptions::new()
@@ -2293,8 +3767,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A db holding just `session_state` (migration 0010), for the tests that
-    /// exercise [`record`] directly.
+    /// [`record`], for the tests that only check whether the row changed.
+    async fn record_state(db: &str, write: &StateWrite<'_>) -> Result<bool, sqlx::Error> {
+        Ok(record(db, write).await?.state)
+    }
+
+    /// `session_state` as migrations 0010, 0042 and 0043 leave it, and the
+    /// live-text table 0043 adds.
+    const STATE_DDL: [&str; 2] = [
+        "CREATE TABLE session_state (session_id TEXT PRIMARY KEY, state TEXT NOT NULL, \
+         event TEXT NOT NULL, cwd TEXT NOT NULL DEFAULT '', message TEXT, \
+         transcript_path TEXT, updated_at_ms INTEGER NOT NULL, asker TEXT, \
+         prompt_id TEXT, permission_mode TEXT, effort_level TEXT, pending_kind TEXT, \
+         pending_tool TEXT, pending_input TEXT, pending_suggestions TEXT, \
+         pending_mcp_server TEXT, pending_agent_id TEXT, pending_agent_type TEXT, \
+         pending_mode TEXT, pending_prompt_id TEXT, pending_truncated INTEGER, \
+         pending_at_ms INTEGER, pending_stacked INTEGER, pending_call TEXT, \
+         pending_rendered_at_ms INTEGER, pending_resolved_at_ms INTEGER)",
+        "CREATE TABLE session_live_text (session_id TEXT NOT NULL, message_id TEXT NOT NULL, \
+         idx INTEGER NOT NULL, turn_id TEXT, prompt_id TEXT, delta TEXT NOT NULL, \
+         final INTEGER NOT NULL DEFAULT 0, cut INTEGER NOT NULL DEFAULT 0, \
+         fired_ms INTEGER NOT NULL, PRIMARY KEY (session_id, message_id, idx))",
+    ];
+
+    /// `session_usage_live` as migrations 0011 and 0043 leave it.
+    const USAGE_DDL: &str =
+        "CREATE TABLE session_usage_live (session_id TEXT PRIMARY KEY, used_pct REAL NOT NULL, \
+         input_tokens INTEGER NOT NULL, context_size INTEGER NOT NULL, model TEXT NOT NULL, \
+         cost_usd REAL NOT NULL, updated_at_ms INTEGER NOT NULL, output_style TEXT, vim_mode TEXT)";
+
+    /// What the hook writes for one of session `s1`'s events, fired now.
+    fn write<'a>(
+        state: AgentState,
+        event: &'a str,
+        message: Option<&'a str>,
+        asker: Option<&'a str>,
+    ) -> StateWrite<'a> {
+        StateWrite {
+            session_id: "s1",
+            state,
+            event,
+            cwd: "/w",
+            message,
+            transcript: None,
+            asker,
+            source: None,
+            fired_ms: now_ms(),
+            header: Header::default(),
+            pending: None,
+            live_text: None,
+            notice: None,
+        }
+    }
+
+    /// A db holding just `session_state` and the live text ([`STATE_DDL`]),
+    /// for the tests that exercise [`record`] directly.
     async fn state_db(name: &str) -> (std::path::PathBuf, String) {
         let base = std::env::temp_dir().join(format!("santree-hook-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -2306,14 +3833,9 @@ mod tests {
             .connect()
             .await
             .unwrap();
-        sqlx::query(
-            "CREATE TABLE session_state (session_id TEXT PRIMARY KEY, state TEXT NOT NULL, \
-             event TEXT NOT NULL, cwd TEXT NOT NULL DEFAULT '', message TEXT, \
-             transcript_path TEXT, updated_at_ms INTEGER NOT NULL)",
-        )
-        .execute(&mut c)
-        .await
-        .unwrap();
+        for ddl in STATE_DDL {
+            sqlx::query(ddl).execute(&mut c).await.unwrap();
+        }
         c.close().await.unwrap();
         (base, db_path.to_str().unwrap().to_string())
     }
@@ -2344,14 +3866,9 @@ mod tests {
     async fn a_deduped_heartbeat_still_advances_the_clock() {
         let (base, db) = state_db("heartbeat-clock").await;
 
-        assert!(record(
+        assert!(record_state(
             &db,
-            "s1",
-            AgentState::Active,
-            "UserPromptSubmit",
-            "/w",
-            None,
-            None
+            &write(AgentState::Active, "UserPromptSubmit", None, None)
         )
         .await
         .unwrap());
@@ -2360,17 +3877,9 @@ mod tests {
         // Far enough apart that a frozen clock is unambiguous.
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(
-            !record(
-                &db,
-                "s1",
-                AgentState::Active,
-                "PostToolUse",
-                "/w",
-                None,
-                None
-            )
-            .await
-            .unwrap(),
+            !record_state(&db, &write(AgentState::Active, "PostToolUse", None, None))
+                .await
+                .unwrap(),
             "an unchanged state must not nudge the UI"
         );
         let (state, _, second) = row_of(&db, "s1").await;
@@ -2383,6 +3892,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The dialog on record for `session`: its kind, its tool, when it was
+    /// stored, and the row's own clock (the two agree while it is the row's).
+    async fn dialog_of(
+        db: &str,
+        session: &str,
+    ) -> (Option<String>, Option<String>, Option<i64>, i64) {
+        let mut c = SqliteConnectOptions::new()
+            .filename(db)
+            .connect()
+            .await
+            .unwrap();
+        let row = sqlx::query_as(
+            "SELECT pending_kind, pending_tool, pending_at_ms, updated_at_ms \
+             FROM session_state WHERE session_id = ?",
+        )
+        .bind(session)
+        .fetch_one(&mut c)
+        .await
+        .unwrap();
+        c.close().await.unwrap();
+        row
+    }
+
+    /// A Claude dialog's event for session `s1`, with the dialog its payload
+    /// puts up, as [`apply_hook`] builds it.
+    fn dialog(event: &str, tool_input: Value) -> PendingDialog {
+        let payload = serde_json::json!({
+            "tool_name": "Bash", "tool_input": tool_input, "permission_suggestions": [],
+            "mcp_server_name": "probe", "message": "Pick one", "mode": "form",
+        });
+        pending_dialog(event, AgentKind::Claude, &payload).unwrap()
+    }
+
     /// The reason per-tool events were kept out of the injected set for so long,
     /// now handled instead of avoided: these hooks are `async`, so a `PostToolUse`
     /// from the previous tool can land *after* the `PermissionRequest` for the
@@ -2391,36 +3933,48 @@ mod tests {
     /// It must not touch the clock either: for a pending prompt `updated_at_ms`
     /// means *when the prompt was recorded*, and the app decides the user answered
     /// by comparing the transcript against it. Bumping it would make a resolved
-    /// prompt look pending forever.
+    /// prompt look pending forever. Nor the dialog stored with it, which the
+    /// Conversation view's card draws and types its answer into.
     #[tokio::test]
     async fn a_straggling_tool_heartbeat_never_clears_a_live_permission_prompt() {
         let (base, db) = state_db("heartbeat-permission").await;
-
-        assert!(record(
-            &db,
-            "s1",
-            AgentState::Permission,
+        let asks = dialog(
             "PermissionRequest",
-            "/w",
-            Some("run Bash"),
-            None
+            serde_json::json!({ "command": "touch a" }),
+        );
+
+        assert!(record_state(
+            &db,
+            &StateWrite {
+                pending: Some(&asks),
+                ..write(
+                    AgentState::Permission,
+                    "PermissionRequest",
+                    Some("run Bash"),
+                    Some(MAIN_ASKER)
+                )
+            }
         )
         .await
         .unwrap());
         let (_, _, recorded_at) = row_of(&db, "s1").await;
+        let stored = dialog_of(&db, "s1").await;
+        assert_eq!(
+            stored,
+            (
+                Some("permission".into()),
+                Some("Bash".into()),
+                Some(recorded_at),
+                recorded_at
+            )
+        );
 
         tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(!record(
-            &db,
-            "s1",
-            AgentState::Active,
-            "PostToolUse",
-            "/w",
-            None,
-            None
-        )
-        .await
-        .unwrap());
+        assert!(
+            !record_state(&db, &write(AgentState::Active, "PostToolUse", None, None))
+                .await
+                .unwrap()
+        );
 
         let (state, message, updated) = row_of(&db, "s1").await;
         assert_eq!(state, "permission", "the prompt is still up");
@@ -2429,20 +3983,710 @@ mod tests {
             updated, recorded_at,
             "a blocked-on-user row's clock is when the prompt appeared, not now"
         );
+        assert_eq!(dialog_of(&db, "s1").await, stored, "and its dialog with it");
 
         // A real transition still gets through — this guard is about heartbeats,
-        // not about freezing the row.
+        // not about freezing the row — and takes the dialog with it.
         assert!(
-            record(&db, "s1", AgentState::Idle, "Stop", "/w", None, None)
+            record_state(&db, &write(AgentState::Idle, "Stop", None, None))
                 .await
                 .unwrap()
         );
+        assert_eq!(row_of(&db, "s1").await.0, "idle");
+        assert_eq!(dialog_of(&db, "s1").await.0, None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The next of two parallel tool calls asks ~90 ms after the first is
+    /// answered, with the same state and the same "run Bash" (CLI 2.1.312): it
+    /// is a new dialog, and replaces the first — a card that kept drawing the
+    /// first command would type its answer into the second. An MCP server's
+    /// form is a dialog of its own: its Notification ~6 s later keeps it, and
+    /// the user's answer (`ElicitationResult`) clears it.
+    #[tokio::test]
+    async fn each_dialog_replaces_the_last_and_its_answer_clears_it() {
+        let (base, db) = state_db("dialog-replaced").await;
+        let first = dialog(
+            "PermissionRequest",
+            serde_json::json!({ "command": "touch a" }),
+        );
+        let second = dialog(
+            "PermissionRequest",
+            serde_json::json!({ "command": "touch b" }),
+        );
+        let asks = |d| StateWrite {
+            pending: Some(d),
+            ..write(
+                AgentState::Permission,
+                "PermissionRequest",
+                Some("run Bash"),
+                Some(MAIN_ASKER),
+            )
+        };
+        let input_of = || {
+            let db = db.clone();
+            async move {
+                let mut c = SqliteConnectOptions::new()
+                    .filename(&db)
+                    .connect()
+                    .await
+                    .unwrap();
+                let (input,): (Option<String>,) = sqlx::query_as(
+                    "SELECT pending_input FROM session_state WHERE session_id = 's1'",
+                )
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+                input
+            }
+        };
+
+        assert!(record_state(&db, &asks(&first)).await.unwrap());
+        let (_, _, first_at, _) = dialog_of(&db, "s1").await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(record_state(&db, &asks(&second)).await.unwrap());
+        let (kind, _, second_at, updated) = dialog_of(&db, "s1").await;
+        assert_eq!(kind.as_deref(), Some("permission"));
+        assert!(second_at > first_at && second_at == Some(updated));
+        assert_eq!(input_of().await.as_deref(), Some(second.input.as_str()));
+
+        let form = dialog("Elicitation", Value::Null);
+        assert!(record_state(
+            &db,
+            &StateWrite {
+                pending: Some(&form),
+                ..write(
+                    AgentState::Waiting,
+                    "Elicitation",
+                    Some("Pick one"),
+                    Some(MAIN_ASKER)
+                )
+            }
+        )
+        .await
+        .unwrap());
+        let stored = dialog_of(&db, "s1").await;
+        assert_eq!(stored.0.as_deref(), Some("elicitation"));
+        assert!(
+            !record_state(
+                &db,
+                &write(
+                    AgentState::Waiting,
+                    "Notification",
+                    Some("Claude Code needs your input"),
+                    None
+                )
+            )
+            .await
+            .unwrap(),
+            "the form's Notification says less than the form did"
+        );
+        assert_eq!(dialog_of(&db, "s1").await, stored);
+        assert!(record_state(
+            &db,
+            &write(AgentState::Active, "ElicitationResult", None, None)
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            (row_of(&db, "s1").await.0, dialog_of(&db, "s1").await.0),
+            ("active".to_string(), None)
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    async fn connect(db: &str) -> SqliteConnection {
+        SqliteConnectOptions::new()
+            .filename(db)
+            .connect()
+            .await
+            .unwrap()
+    }
+
+    /// A db for the dialog tests: [`STATE_DDL`], and [`USAGE_DDL`] for the
+    /// usage a status-line render records too.
+    async fn dialog_db(name: &str) -> (std::path::PathBuf, String) {
+        let (base, db) = state_db(name).await;
+        let mut c = connect(&db).await;
+        sqlx::query(USAGE_DDL).execute(&mut c).await.unwrap();
+        c.close().await.unwrap();
+        (base, db)
+    }
+
+    /// A subagent's id, as CLI 2.1.312 names one.
+    const SUBAGENT: &str = "a646af0b6bd309ebc";
+
+    /// Session `s1`'s hook `event` with `payload`, through the flow the binary
+    /// and the relay share ([`apply_hook`]); whether it nudged the state.
+    async fn fire(db: &str, event: &str, mut payload: Value) -> bool {
+        payload["session_id"] = "s1".into();
+        payload["hook_event_name"] = event.into();
+        let mut c = connect(db).await;
+        let applied = apply(
+            &mut c,
+            &Invocation::Hook {
+                event: event.into(),
+                agent: AgentKind::Claude,
+            },
+            payload.to_string().as_bytes(),
+            &HookEnv::default(),
+        )
+        .await;
+        c.close().await.unwrap();
+        assert!(
+            applied.failures.is_empty(),
+            "{event}: {:?}",
+            applied.failures
+        );
+        applied.nudges.state
+    }
+
+    /// The fields CLI 2.1.312 sends with a tool call's hooks: the call, the
+    /// turn's header, and `agent_id`/`agent_type` for a subagent's.
+    fn call(tool: &str, input: &Value, agent: Option<&str>) -> Value {
+        let mut payload = serde_json::json!({
+            "cwd": "/run/work", "prompt_id": "p-1", "permission_mode": "default",
+            "effort": { "level": "medium" }, "tool_name": tool, "tool_input": input,
+        });
+        if let Some(agent) = agent {
+            payload["agent_id"] = agent.into();
+            payload["agent_type"] = "general-purpose".into();
+        }
+        payload
+    }
+
+    /// A `PermissionRequest` for that call.
+    fn asks(tool: &str, input: &Value, agent: Option<&str>) -> Value {
+        let mut payload = call(tool, input, agent);
+        payload["permission_suggestions"] = serde_json::json!([]);
+        payload
+    }
+
+    /// The call's `PostToolUse`.
+    fn ran(tool: &str, input: &Value, agent: Option<&str>) -> Value {
+        let mut payload = call(tool, input, agent);
+        payload["tool_response"] = serde_json::json!({ "stdout": "", "stderr": "" });
+        payload["tool_use_id"] = "toolu_01".into();
+        payload["duration_ms"] = 12.into();
+        payload
+    }
+
+    /// The main thread's `PostToolBatch` listing these calls.
+    fn batch(calls: &[(&str, &Value)]) -> Value {
+        let calls: Vec<Value> = calls
+            .iter()
+            .map(|(tool, input)| {
+                serde_json::json!({
+                    "tool_name": tool, "tool_input": input, "tool_use_id": "toolu_02",
+                    "tool_response": "done",
+                })
+            })
+            .collect();
+        let mut payload = call("", &Value::Null, None);
+        let fields = payload.as_object_mut().unwrap();
+        fields.remove("tool_name");
+        fields.remove("tool_input");
+        payload["tool_calls"] = calls.into();
+        payload
+    }
+
+    /// A status-line render of `s1` that started at `started_ms`, recorded as
+    /// the binary records one; whether it nudged the state.
+    async fn render(db: &str, started_ms: i64) -> bool {
+        let mut c = connect(db).await;
+        let mut store = ConnStore {
+            conn: &mut c,
+            applied: Applied::default(),
+        };
+        let p = serde_json::json!({ "session_id": "s1" });
+        let reading = StatuslineReading::of(&p);
+        record_statusline_to(&mut store, &p, &reading, None, Some(started_ms)).await;
+        let nudged = store.applied.nudges.state;
+        c.close().await.unwrap();
+        nudged
+    }
+
+    /// The render an answer to `s1`'s dialog on record leaves: the first that
+    /// can say it closed ([`RENDER_MARGIN_MS`]); whether it nudged the state.
+    async fn answered(db: &str) -> bool {
+        let recorded = dialog_of(db, "s1").await.2.unwrap();
+        render(db, recorded + RENDER_MARGIN_MS + 1).await
+    }
+
+    /// `s1`'s dialog on record as the next write reads it: stored stacked,
+    /// and closed. `None` while the row holds none.
+    async fn on_record(db: &str) -> Option<(bool, bool)> {
+        let mut c = connect(db).await;
+        let found = dialog_on_record(&mut c, "s1").await.unwrap();
+        c.close().await.unwrap();
+        found.map(|(_, marks)| (marks.stacked, marks.closed_at().is_some()))
+    }
+
+    /// S1-S3 as probed (CLI 2.1.312): parallel calls fire every
+    /// `PermissionRequest` within ~5 ms, in any order, and a background
+    /// subagent asking beside the main thread fires its own seconds later;
+    /// Claude shows one dialog at a time, and the ones behind fire nothing
+    /// when they come forward. So the second request reads stacked whichever
+    /// landed first, and a stack closes only on a render: the call that
+    /// finished may be the one that was in front.
+    #[tokio::test]
+    async fn parallel_requests_stack_and_only_a_render_closes_them() {
+        let alpha = serde_json::json!({ "file_path": "/run/outA/alpha-first.txt" });
+        let beta = serde_json::json!({ "file_path": "/run/outB/beta-second.txt" });
+        let sub = serde_json::json!({ "command": "touch sub-a" });
+        for (n, (first, second)) in [(&alpha, &beta), (&beta, &alpha)].into_iter().enumerate() {
+            let (base, db) = dialog_db(&format!("parallel-{n}")).await;
+            assert!(fire(&db, "PermissionRequest", asks("Read", first, None)).await);
+            assert_eq!(on_record(&db).await, Some((false, false)));
+            assert!(fire(&db, "PermissionRequest", asks("Read", second, None)).await);
+            assert_eq!(on_record(&db).await, Some((true, false)));
+
+            // Either call can be the one answered first.
+            fire(&db, "PostToolUse", ran("Read", second, None)).await;
+            fire(&db, "PostToolUse", ran("Read", first, None)).await;
+            assert_eq!(on_record(&db).await, Some((true, false)));
+
+            // S3: a subagent asks while the stack is still up.
+            assert!(fire(&db, "PermissionRequest", asks("Bash", &sub, Some(SUBAGENT))).await);
+            assert_eq!(on_record(&db).await, Some((true, false)));
+
+            // Every dialog answered, the status line renders, and the next
+            // request is behind nothing.
+            assert!(answered(&db).await);
+            assert_eq!(on_record(&db).await, Some((true, true)));
+            assert!(fire(&db, "PermissionRequest", asks("Read", &alpha, None)).await);
+            assert_eq!(on_record(&db).await, Some((false, false)));
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+    }
+
+    /// Serial calls ask one after the other (S2's `touch` pairs and the serial
+    /// probes, CLI 2.1.312): the next dialog draws 33-54 ms after the answer,
+    /// and the render that would have followed is dropped. What separates the
+    /// two is the first call finishing: its `PostToolUse` landed 4-11 ms
+    /// before the next request in 9 of 9 pairs, and after "No, and tell
+    /// Claude" the `PostToolBatch` listing the rejected call came first in 5
+    /// of 5.
+    #[tokio::test]
+    async fn a_request_after_its_predecessors_call_finished_is_not_stacked() {
+        let (base, db) = dialog_db("serial").await;
+        let touch = |n: u32| serde_json::json!({ "command": format!("touch ../outside/x-{n}"), "description": "Touch" });
+
+        // Approved: the call runs and says so, once.
+        fire(&db, "PermissionRequest", asks("Bash", &touch(1), None)).await;
+        assert!(fire(&db, "PostToolUse", ran("Bash", &touch(1), None)).await);
+        assert_eq!(on_record(&db).await, Some((false, true)));
+        assert!(!fire(&db, "PostToolBatch", batch(&[("Bash", &touch(1))])).await);
+        fire(&db, "PermissionRequest", asks("Bash", &touch(2), None)).await;
+        assert_eq!(on_record(&db).await, Some((false, false)));
+
+        // Rejected with feedback: only the batch reports the call.
+        assert!(fire(&db, "PostToolBatch", batch(&[("Bash", &touch(2))])).await);
+        fire(&db, "PermissionRequest", asks("Bash", &touch(3), None)).await;
+        assert_eq!(on_record(&db).await, Some((false, false)));
+
+        // The hooks are async: a request that lands before the previous call's
+        // report reads stacked, until a render.
+        fire(&db, "PermissionRequest", asks("Bash", &touch(4), None)).await;
+        fire(&db, "PostToolUse", ran("Bash", &touch(3), None)).await;
+        assert_eq!(on_record(&db).await, Some((true, false)));
+        assert!(answered(&db).await);
+
+        // [Glob, Read, Read]: the auto-allowed Glob finishing between the two
+        // requests is not the first Read's call.
+        let read = |path: &str| serde_json::json!({ "file_path": path });
+        fire(
+            &db,
+            "PermissionRequest",
+            asks("Read", &read("/run/outA/a"), None),
+        )
+        .await;
+        fire(
+            &db,
+            "PostToolUse",
+            ran("Glob", &serde_json::json!({ "pattern": "*" }), None),
+        )
+        .await;
+        fire(
+            &db,
+            "PermissionRequest",
+            asks("Read", &read("/run/outB/b"), None),
+        )
+        .await;
+        assert_eq!(on_record(&db).await, Some((true, false)));
+        assert!(answered(&db).await);
+
+        // A question's `PostToolUse` carries the answer; the batch carries the
+        // question as it was asked.
+        let question = serde_json::json!({ "questions": [{
+            "question": "Which color for probe 1?", "header": "Color", "multiSelect": false,
+            "options": [{ "label": "Red", "description": "" }, { "label": "Blue", "description": "" }],
+        }] });
+        let mut answered = question.clone();
+        answered["answers"] = serde_json::json!({ "Which color for probe 1?": "Red" });
+        answered["annotations"] = serde_json::json!({});
+        fire(
+            &db,
+            "PermissionRequest",
+            asks("AskUserQuestion", &question, None),
+        )
+        .await;
+        fire(&db, "PostToolUse", ran("AskUserQuestion", &answered, None)).await;
+        assert_eq!(on_record(&db).await, Some((false, false)));
+        assert!(
+            fire(
+                &db,
+                "PostToolBatch",
+                batch(&[("AskUserQuestion", &question)])
+            )
+            .await
+        );
+        assert_eq!(on_record(&db).await, Some((false, true)));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A dialog's call is matched by its thread, its tool and its whole input
+    /// (the request carries no `tool_use_id`): a subagent's call with the same
+    /// tool and input is not the main thread's, and an input too long to store
+    /// whole still matches, whatever order its keys come in.
+    #[tokio::test]
+    async fn a_dialogs_call_is_its_thread_tool_and_whole_input() {
+        let (base, db) = dialog_db("call-identity").await;
+        let ls = serde_json::json!({ "command": "ls /run/dirA" });
+        fire(&db, "PermissionRequest", asks("Bash", &ls, None)).await;
+        fire(&db, "PostToolUse", ran("Bash", &ls, Some(SUBAGENT))).await;
+        let other = serde_json::json!({ "command": "ls /run/dirB" });
+        fire(&db, "PostToolUse", ran("Bash", &other, None)).await;
+        assert_eq!(on_record(&db).await, Some((false, false)));
+
+        // S3 the other way round: the subagent asks beside the main thread's
+        // open dialog. Its own call finishing is its, but it was stacked.
+        let sub = serde_json::json!({ "command": "touch sub-a" });
+        fire(&db, "PermissionRequest", asks("Bash", &sub, Some(SUBAGENT))).await;
+        fire(&db, "PostToolUse", ran("Bash", &sub, Some(SUBAGENT))).await;
+        assert_eq!(on_record(&db).await, Some((true, false)));
+        assert!(answered(&db).await);
+
+        // A subagent's own dialog, alone, closes with its own call.
+        fire(&db, "PermissionRequest", asks("Bash", &ls, Some(SUBAGENT))).await;
+        fire(&db, "PostToolUse", ran("Bash", &ls, None)).await;
+        assert_eq!(on_record(&db).await, Some((false, false)));
+        fire(&db, "PostToolUse", ran("Bash", &ls, Some(SUBAGENT))).await;
+        assert_eq!(on_record(&db).await, Some((false, true)));
+
+        // A write the row keeps only part of.
+        let content = "x".repeat(MAX_PENDING_INPUT * 2);
+        let write = serde_json::json!({ "file_path": "/run/work/big.txt", "content": content });
+        let reordered = serde_json::json!({ "content": content, "file_path": "/run/work/big.txt" });
+        fire(&db, "PermissionRequest", asks("Write", &write, None)).await;
+        fire(&db, "PostToolUse", ran("Write", &reordered, None)).await;
+        assert_eq!(on_record(&db).await, Some((false, true)));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An MCP server's form closes by neither sign: neither was probed for
+    /// one, and a wrong "closed" lets an Enter land on the open form. A render
+    /// after it closes nothing, and a request while it is up is behind it.
+    #[tokio::test]
+    async fn an_elicitation_closes_only_by_its_answer() {
+        let (base, db) = dialog_db("elicitation").await;
+        assert!(
+            fire(
+                &db,
+                "Elicitation",
+                serde_json::json!({
+                    "cwd": "/run/work", "mcp_server_name": "probe", "message": "Pick one",
+                    "mode": "form", "requested_schema": { "type": "object", "properties": {} },
+                }),
+            )
+            .await
+        );
+        assert!(!answered(&db).await);
+        assert_eq!(on_record(&db).await, Some((false, false)));
+        let ls = serde_json::json!({ "command": "ls /run/dirA" });
+        fire(&db, "PermissionRequest", asks("Bash", &ls, None)).await;
+        assert_eq!(on_record(&db).await, Some((true, false)));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The main thread's MCP form is up and a background subagent asks
+    /// permission: its request is recorded stacked behind the form. The
+    /// form's own notice lands ~6 s after the form, and the user answers the
+    /// form in the terminal. Neither is about the subagent's dialog, which
+    /// comes forward firing nothing (payloads as CLI 2.1.312 sends them): the
+    /// row keeps that dialog, still stacked, and a request after it is behind
+    /// it too. Over a form on record, the answer still clears it.
+    #[tokio::test]
+    async fn a_forms_answer_leaves_a_permission_dialog_on_record() {
+        let form = serde_json::json!({
+            "cwd": "/run/work", "mcp_server_name": "probe", "message": "Pick one",
+            "mode": "form", "requested_schema": { "type": "object", "properties": {} },
+        });
+        let notice = serde_json::json!({
+            "cwd": "/run/work", "message": "Claude Code needs your input",
+            "notification_type": "elicitation_dialog",
+        });
+        let answer = serde_json::json!({
+            "cwd": "/run/work", "mcp_server_name": "probe", "mode": "form",
+            "action": "accept", "content": { "confirm": true },
+        });
+        let (base, db) = dialog_db("form-answer").await;
+        fire(&db, "Elicitation", form.clone()).await;
+        let sub = serde_json::json!({ "command": "touch sub-a" });
+        fire(&db, "PermissionRequest", asks("Bash", &sub, Some(SUBAGENT))).await;
+        assert_eq!(on_record(&db).await, Some((true, false)));
+        assert!(!fire(&db, "Notification", notice).await);
+        assert!(!fire(&db, "ElicitationResult", answer.clone()).await);
+        assert_eq!(row_of(&db, "s1").await.0, "permission");
+        assert_eq!(on_record(&db).await, Some((true, false)));
+        let ls = serde_json::json!({ "command": "ls /run/dirA" });
+        fire(&db, "PermissionRequest", asks("Bash", &ls, None)).await;
+        assert_eq!(on_record(&db).await, Some((true, false)));
+
+        let (base2, db2) = dialog_db("form-answered").await;
+        fire(&db2, "Elicitation", form).await;
+        assert!(fire(&db2, "ElicitationResult", answer).await);
+        assert_eq!(
+            (row_of(&db2, "s1").await.0, on_record(&db2).await),
+            ("active".to_string(), None)
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&base2);
+    }
+
+    /// The two hooks of a parallel pair land 0-5 ms apart, in separate
+    /// processes: the second must see the first, so exactly one of them reads
+    /// stacked, every time.
+    #[tokio::test]
+    async fn two_dialogs_written_at_once_stack_exactly_one() {
+        let (base, db) = state_db("stacked-race").await;
+        let first = dialog(
+            "PermissionRequest",
+            serde_json::json!({ "command": "ls /a" }),
+        );
+        let second = dialog(
+            "PermissionRequest",
+            serde_json::json!({ "command": "ls /b" }),
+        );
+        for n in 0..20 {
+            let session = format!("race-{n}");
+            let asks = |d| StateWrite {
+                session_id: &session,
+                pending: Some(d),
+                ..write(
+                    AgentState::Permission,
+                    "PermissionRequest",
+                    Some("run Bash"),
+                    Some(MAIN_ASKER),
+                )
+            };
+            let (one, other) = (asks(&first), asks(&second));
+            let (a, b) = tokio::join!(record(&db, &one), record(&db, &other));
+            assert!(a.unwrap().state && b.unwrap().state);
+            // The one that landed second is the one stored, and it saw the first.
+            let mut c = connect(&db).await;
+            let (stacked,): (Option<bool>,) =
+                sqlx::query_as("SELECT pending_stacked FROM session_state WHERE session_id = ?")
+                    .bind(&session)
+                    .fetch_one(&mut c)
+                    .await
+                    .unwrap();
+            c.close().await.unwrap();
+            assert_eq!(stacked, Some(true), "{session}");
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The first render to start well after a dialog was recorded
+    /// ([`RENDER_MARGIN_MS`]) closes it, once, and never moves the row's clock,
+    /// which is the dialog's record time. A render launched before the dialog
+    /// drew closes nothing, whether it lands after the dialog's hook or starts
+    /// after it (`sp1`) — 330 ms late, as a process can under load, or a full
+    /// second — and neither does a relayed one, whose start is on the box.
+    #[tokio::test]
+    async fn the_first_render_after_a_dialog_closes_it_once() {
+        let (base, db) = dialog_db("render-closes").await;
+        let sleep = serde_json::json!({ "command": "sleep 8 && touch s4-done" });
+        fire(&db, "PermissionRequest", asks("Bash", &sleep, None)).await;
+        let (_, _, recorded, clock) = dialog_of(&db, "s1").await;
+        let recorded = recorded.unwrap();
+
+        assert!(
+            !render(&db, recorded - 1).await,
+            "launched before the dialog fired"
+        );
+        assert!(
+            !render(&db, recorded + 330).await,
+            "launched as the dialog drew, its process stalled under load"
+        );
+        assert!(
+            !render(&db, recorded + RENDER_MARGIN_MS).await,
+            "launched as the dialog drew, started a second after its hook"
+        );
+        let mut c = connect(&db).await;
+        let relayed = apply(
+            &mut c,
+            &Invocation::Statusline,
+            br#"{"session_id":"s1"}"#,
+            &HookEnv::default(),
+        )
+        .await;
+        c.close().await.unwrap();
+        assert!(!relayed.nudges.state && relayed.failures.is_empty());
+        assert_eq!(on_record(&db).await, Some((false, false)));
+
+        assert!(answered(&db).await, "the approval's render");
+        assert!(
+            !render(&db, recorded + RENDER_MARGIN_MS + 15_000).await,
+            "the next refresh"
+        );
+        assert_eq!(on_record(&db).await, Some((false, true)));
+        assert_eq!(dialog_of(&db, "s1").await.3, clock);
+
+        // The next dialog is a new one to close.
+        fire(&db, "PermissionRequest", asks("Bash", &sleep, None)).await;
+        assert_eq!(on_record(&db).await, Some((false, false)));
+        assert!(answered(&db).await);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// What CLI 2.1.312 fires when a background subagent asks permission
+    /// (captured): the subagent's `PermissionRequest`, the main thread's `Stop`
+    /// ~20 ms later with the dialog still up, then the `permission_prompt`
+    /// Notification ~6 s later naming no agent. The dialog stays on record
+    /// through all of it, asked by that subagent, until a new turn: a `Stop`
+    /// that cleared it would read a session with a dialog on screen as one at
+    /// its prompt.
+    #[tokio::test]
+    async fn a_subagents_dialog_outlives_the_main_threads_turn() {
+        let (base, db) = state_db("subagent-dialog").await;
+        let asked = format!("{SUBAGENT_ASKER}a3a8e734fe1a2da00");
+        let row = || {
+            let db = db.clone();
+            async move {
+                let mut c = SqliteConnectOptions::new()
+                    .filename(&db)
+                    .connect()
+                    .await
+                    .unwrap();
+                let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+                    "SELECT state, message, asker FROM session_state WHERE session_id = 's1'",
+                )
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+                row
+            }
+        };
+        let on_record = || {
+            (
+                "permission".to_string(),
+                Some("run Bash".to_string()),
+                Some(asked.clone()),
+            )
+        };
+
+        let subagents = dialog(
+            "PermissionRequest",
+            serde_json::json!({ "command": "touch x" }),
+        );
+        let asks = StateWrite {
+            pending: Some(&subagents),
+            ..write(
+                AgentState::Permission,
+                "PermissionRequest",
+                Some("run Bash"),
+                Some(&asked),
+            )
+        };
+        assert!(record_state(&db, &asks).await.unwrap());
+        let stored = dialog_of(&db, "s1").await;
+        for (state, event, message) in [
+            // The main thread's turn ends behind the dialog…
+            (AgentState::Idle, "Stop", None),
+            (AgentState::Idle, "Notification", None),
+            // …and the notification about the dialog says less than the
+            // request did: no tool, no asker.
+            (
+                AgentState::Permission,
+                "Notification",
+                Some("Claude needs your permission"),
+            ),
+        ] {
+            assert!(
+                !record_state(&db, &write(state, event, message, None))
+                    .await
+                    .unwrap(),
+                "{event} {state:?}"
+            );
+            assert_eq!(row().await, on_record(), "after {event} {state:?}");
+            assert_eq!(
+                dialog_of(&db, "s1").await,
+                stored,
+                "the dialog stays on record after {event} {state:?}"
+            );
+        }
+
+        // A new turn ends it, and that turn's `Stop` is the prompt again.
+        assert!(record_state(
+            &db,
+            &write(AgentState::Active, "UserPromptSubmit", None, None)
+        )
+        .await
+        .unwrap());
+        assert_eq!(row().await, ("active".to_string(), None, None));
+        assert_eq!(dialog_of(&db, "s1").await.0, None);
+        assert!(
+            record_state(&db, &write(AgentState::Idle, "Stop", None, None))
+                .await
+                .unwrap()
+        );
+        assert_eq!(row().await.0, "idle");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A launch that carries its first prompt fires `SessionStart` and that
+    /// prompt's `UserPromptSubmit` ~50 ms apart, both `async`, so their writes
+    /// can land in either order. A `SessionStart` that began before the
+    /// prompt's row was written must not read the turn as idle; one that
+    /// began after it (a later process resuming) still lands.
+    #[tokio::test]
+    async fn a_session_start_landing_after_its_first_prompt_keeps_the_turn_running() {
+        let (base, db) = state_db("launch-race").await;
+        let started = |fired_ms| StateWrite {
+            source: Some("startup"),
+            fired_ms,
+            ..write(AgentState::Idle, "SessionStart", None, None)
+        };
+        let began = now_ms() - 50;
+        assert!(record_state(
+            &db,
+            &write(AgentState::Active, "UserPromptSubmit", None, None)
+        )
+        .await
+        .unwrap());
+        assert!(!record_state(&db, &started(began)).await.unwrap());
+        assert_eq!(row_of(&db, "s1").await.0, "active");
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(record_state(&db, &started(now_ms())).await.unwrap());
         assert_eq!(row_of(&db, "s1").await.0, "idle");
 
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A db with the two tables the status line writes (migrations 0011 + 0027).
+    /// A db with the tables the status line writes (migrations 0011 + 0027 +
+    /// 0043, and `session_state` for the effort).
     async fn statusline_db(name: &str) -> (std::path::PathBuf, String) {
         let base = std::env::temp_dir().join(format!("santree-hook-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -2455,11 +4699,10 @@ mod tests {
             .await
             .unwrap();
         for ddl in [
-            "CREATE TABLE session_usage_live (session_id TEXT PRIMARY KEY, used_pct REAL NOT NULL, \
-             input_tokens INTEGER NOT NULL, context_size INTEGER NOT NULL, model TEXT NOT NULL, \
-             cost_usd REAL NOT NULL, updated_at_ms INTEGER NOT NULL)",
+            USAGE_DDL,
             "CREATE TABLE claude_rate_limits (window TEXT PRIMARY KEY, used_pct REAL NOT NULL, \
              resets_at_ms INTEGER, updated_at_ms INTEGER NOT NULL)",
+            STATE_DDL[0],
         ] {
             sqlx::query(ddl).execute(&mut c).await.unwrap();
         }
@@ -2504,13 +4747,13 @@ mod tests {
 
         // Without `--then` the status line is santree's own bar.
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(statusline(&db, None, raw, &mut out, &mut err), 0);
+        assert_eq!(statusline(&db, None, raw, &mut out, &mut err, now_ms()), 0);
         let shown = String::from_utf8(out).unwrap();
         // 42% raw → 50% with the 1.2x display nudge.
         assert!(shown.contains("50%") && shown.contains("Opus"), "{shown:?}");
 
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = statusline(&db, Some("cat"), raw, &mut out, &mut err);
+        let code = statusline(&db, Some("cat"), raw, &mut out, &mut err, now_ms());
         assert_eq!(code, 0);
         assert_eq!(out, raw, "the user's command saw the exact payload bytes");
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
@@ -2526,7 +4769,14 @@ mod tests {
 
         // stderr and a non-zero exit are the user's own, forwarded unchanged.
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = statusline(&db, Some("cat >&2; exit 7"), raw, &mut out, &mut err);
+        let code = statusline(
+            &db,
+            Some("cat >&2; exit 7"),
+            raw,
+            &mut out,
+            &mut err,
+            now_ms(),
+        );
         assert_eq!(code, 7);
         assert!(out.is_empty());
         assert_eq!(err, raw);
@@ -2546,6 +4796,7 @@ mod tests {
             raw,
             &mut out,
             &mut err,
+            now_ms(),
         );
         assert_eq!(code, 0);
         assert_eq!(out, raw);
@@ -2821,6 +5072,8 @@ mod tests {
             "mcp",
             "--agent-kind Cursor Stop",
             "--agent-kind Nope Stop",
+            // Never registered on the box: a line-by-line feed is not relayed.
+            "MessageDisplay",
         ] {
             assert_eq!(Invocation::parse_relayed(refused), None, "{refused:?}");
         }
@@ -2859,14 +5112,9 @@ mod tests {
             .connect()
             .await
             .unwrap();
-        sqlx::query(
-            "CREATE TABLE session_state (session_id TEXT PRIMARY KEY, state TEXT NOT NULL, \
-             event TEXT NOT NULL, cwd TEXT NOT NULL DEFAULT '', message TEXT, \
-             transcript_path TEXT, updated_at_ms INTEGER NOT NULL)",
-        )
-        .execute(&mut conn)
-        .await
-        .unwrap();
+        for ddl in STATE_DDL {
+            sqlx::query(ddl).execute(&mut conn).await.unwrap();
+        }
 
         let start = Invocation::parse_relayed("--agent-kind Codex SessionStart").unwrap();
         let payload = br#"{"session_id":"t-1","cwd":"/srv/w","source":"startup"}"#;

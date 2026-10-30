@@ -92,10 +92,27 @@ anchors.
 
 ## States and settings
 
+- **Daedalus is experimental.** The link runs only while Settings → Experimental →
+  Daedalus is on (`experimental_daedalus`; a fresh install has no row, which is
+  off). `set_experimental` is the switch's one writer and applies it at once
+  (`DaedalusHost::apply`); launch applies the stored switch before the first
+  frame. Off is `stop()`: nothing connects and "Run check" tries nothing; the live
+  connection is ended, so a pane with a session on the box waits, reconnecting,
+  and attaches again when the switch comes back on, while a pane that never
+  reached a session, or one opened while off, is lost; `daedalus_settings` and
+  `daedalus_set_setting` don't reach the agent; an action that needs the box fails
+  with "Daedalus is off. Turn it on in Settings › Experimental." Nothing stored
+  goes: projects, the hook cursor and the sessions' rows stay. While it is off,
+  Settings › Daedalus, the sidebar's section and "Add from Daedalus…" are gone,
+  and every list, picker and fallback that opens a project or starts something in
+  one reads `useOfferedRepos()`, which leaves Daedalus projects out. `useRepos()`
+  stays the whole registry: a pane's trust and the hooks a launch carries never
+  depend on a switch.
 - `DaedalusLink` (what `daedalus_status` returns, pushed by `DaedalusLinkChanged`):
-  `AgentMissing | AgentOutdated | Connecting | SantreeOff |
+  `Off | AgentMissing | AgentOutdated | Connecting | SantreeOff |
   HostKeyChanged { reason } | Unavailable { reason } | VersionMismatch { theirs } |
-  Connected { hostname, version, projectsRoot, agent }`. `forbidden`, `busy`, an
+  Connected { hostname, version, projectsRoot, agent }`. `Off` is the switch
+  above, never a failure. `forbidden`, `busy`, an
   untrusted socket, a host that ends the stream before `hello` and every local
   failure are `Unavailable` with the reason; `src/lib/daedalusLink.ts` holds the one
   wording of each state and what to do about it.
@@ -733,8 +750,9 @@ fake agent and daemon, whose `FakeOptions::env` gives the fake box a home and
   a rollout written into the fake box's home — a 13 MB one sampled — and the
   link-down case reading nothing.
 - `host.rs` — `DaedalusHost` (Tauri-managed): the one `RemoteHost` over the
-  `AgentConnector`, started once with the saved hook cursor (`resume`);
-  `state()` / `settled()` → `DaedalusLink`; `retry_now()`; `client()` /
+  `AgentConnector`, started and stopped by the Experimental switch (`apply`: on
+  resumes after the saved hook cursor, `resume`; off is `stop`);
+  `state()` / `settled()` → `DaedalusLink` (`Off` while the switch is); `retry_now()`; `client()` /
   `client_within(wait)` (≤5 s while `Connecting`, `CONNECT_WAIT`) →
   `Result<Arc<RemoteClient>, NotConnected>`; the `DaedalusLinkChanged` event; the
   hook `Relay`.

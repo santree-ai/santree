@@ -8,6 +8,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useExperimental } from "../lib/queries";
 import { useAppUi } from "../state/AppContext";
 import { SearchIcon } from "./icons";
 import { useModalA11y } from "./primitives";
@@ -24,8 +25,10 @@ interface Section {
 
 /** Build the section list; the numbers follow the sidebar's destinations, top to
  *  bottom, so they match what's on screen (see `SidebarNav`). Reviews and Triage
- *  are sections of the tree, not destinations, so neither has a number. */
-function buildSections(): Section[] {
+ *  are sections of the tree, not destinations, so neither has a number. ⌘J is
+ *  listed only while the Conversation view is on (Settings → Experimental):
+ *  off, nothing binds it. */
+function buildSections(conversation: boolean): Section[] {
   const tabLabels = ["Tickets"];
   return [
     {
@@ -61,6 +64,14 @@ function buildSections(): Section[] {
       title: "Trees",
       items: [{ label: "Toggle the side panel", keys: ["⌘", "L"] }],
     },
+    ...(conversation
+      ? [
+          {
+            title: "Claude Code tabs",
+            items: [{ label: "Switch between terminal and conversation", keys: ["⌘", "J"] }],
+          },
+        ]
+      : []),
     {
       title: "Reviews",
       items: [{ label: "Toggle info panel", keys: ["⌘", "L"] }],
@@ -89,6 +100,7 @@ export function Kbd({ token }: { token: string }) {
 
 export function ShortcutsOverlay() {
   const { shortcutsOpen, setShortcutsOpen } = useAppUi();
+  const conversation = useExperimental("Conversation");
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -109,13 +121,13 @@ export function ShortcutsOverlay() {
   });
 
   const sections = useMemo(() => {
-    const all = buildSections();
+    const all = buildSections(conversation);
     const q = query.trim().toLowerCase();
     if (!q) return all;
     return all
       .map((s) => ({ ...s, items: s.items.filter((i) => i.label.toLowerCase().includes(q)) }))
       .filter((s) => s.items.length > 0);
-  }, [query]);
+  }, [query, conversation]);
 
   if (!shortcutsOpen) return null;
 

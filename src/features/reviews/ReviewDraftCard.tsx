@@ -156,7 +156,7 @@ export function ReviewDraftCard({
           <>
             <div className="text-[12px]">
               <SuggestionOriginal value={original}>
-                <Markdown>{composeDraftBody(draft)}</Markdown>
+                <Markdown noRemote>{composeDraftBody(draft)}</Markdown>
               </SuggestionOriginal>
             </div>
             <div className="mt-2 flex items-center gap-2">

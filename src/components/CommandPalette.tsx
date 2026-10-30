@@ -16,12 +16,14 @@
 import { useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
+import type { ExperimentalFeature } from "../bindings";
 import { BASE_TICKET } from "../features/agents/registry";
 import { useAgentEntries } from "../features/agents/useAgents";
 import { useOpenAgent } from "../features/agents/useOpenAgent";
 import {
+  useExperimental,
+  useOfferedRepos,
   useRefreshExternal,
-  useRepos,
   useReviews,
   useTasksByRepo,
   useTriageOrgRepo,
@@ -69,14 +71,26 @@ interface PaletteItem extends Searchable {
   run: () => void;
 }
 
-/** The settings sections, in the order the Settings nav lists them. */
-const SETTINGS_SECTIONS: { key: string; label: string; keywords?: string }[] = [
+/** The settings sections, in the order the Settings nav lists them. A section
+ *  with a `feature` is listed only while that Settings → Experimental switch is
+ *  on, as in the nav. */
+const SETTINGS_SECTIONS: {
+  key: string;
+  label: string;
+  keywords?: string;
+  feature?: ExperimentalFeature;
+}[] = [
   { key: "general", label: "General", keywords: "appearance theme accent" },
   { key: "linear", label: "Linear", keywords: "org token connect" },
   { key: "jira", label: "Jira", keywords: "atlassian site connect" },
   { key: "ticktick", label: "TickTick", keywords: "tasks lists token connect" },
   { key: "github", label: "GitHub", keywords: "gh auth" },
-  { key: "daedalus", label: "Daedalus", keywords: "home server remote agent machines" },
+  {
+    key: "daedalus",
+    label: "Daedalus",
+    keywords: "home server remote agent machines",
+    feature: "Daedalus",
+  },
   { key: "agent-claude", label: "Claude Code", keywords: "agent model" },
   { key: "agent-codex", label: "Codex", keywords: "agent model openai" },
   { key: "triage", label: "Triage", keywords: "rotation schedule" },
@@ -84,9 +98,19 @@ const SETTINGS_SECTIONS: { key: string; label: string; keywords?: string }[] = [
   { key: "review", label: "Reviews", keywords: "ai review prompt" },
   { key: "prompts", label: "Prompts", keywords: "template" },
   { key: "usage", label: "Usage", keywords: "tokens cost limits" },
-  { key: "english-tutor", label: "English tutor", keywords: "writing coach" },
+  {
+    key: "english-tutor",
+    label: "English tutor",
+    keywords: "writing coach",
+    feature: "EnglishTutor",
+  },
   { key: "environment", label: "Variables", keywords: "environment env vars" },
   { key: "terminal", label: "Terminal", keywords: "shell font" },
+  {
+    key: "experimental",
+    label: "Experimental",
+    keywords: "daedalus english tutor conversation view beta",
+  },
 ];
 
 export function CommandPalette() {
@@ -108,7 +132,12 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
   const { refresh } = useRefreshExternal();
   const openAgent = useOpenAgent();
 
-  const { data: repos = [] } = useRepos();
+  // Only what santree offers: a project Settings → Experimental hides isn't one
+  // to open, nor are its worktrees, agents or pull requests.
+  const { data: offered, hidden } = useOfferedRepos();
+  const repos = useMemo(() => offered ?? [], [offered]);
+  const daedalusOn = useExperimental("Daedalus");
+  const englishTutorOn = useExperimental("EnglishTutor");
   const repoNames = useMemo(() => repos.map((repo) => repo.name), [repos]);
   const tasksByRepo = useTasksByRepo(repoNames);
   const worktreesByRepo = useWorktreesByRepo(repoNames);
@@ -214,7 +243,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
     const seenPrs = new Set<string>();
     const reviewItems: PaletteItem[] = [];
     for (const pr of prs) {
-      if (seenPrs.has(pr.url)) continue;
+      if (seenPrs.has(pr.url) || hidden(pr.project)) continue;
       seenPrs.add(pr.url);
       reviewItems.push({
         key: `pr-${pr.url}`,
@@ -286,7 +315,14 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
       run: closeAnd(() => navigate({ to: "/trees", search: { project: repo.name } })),
     }));
 
-    const settingsItems = SETTINGS_SECTIONS.map<PaletteItem>((section) => ({
+    const switchOn: Record<ExperimentalFeature, boolean> = {
+      Daedalus: daedalusOn,
+      EnglishTutor: englishTutorOn,
+      Conversation: true,
+    };
+    const settingsItems = SETTINGS_SECTIONS.filter(
+      (section) => section.feature === undefined || switchOn[section.feature],
+    ).map<PaletteItem>((section) => ({
       key: `settings-${section.key}`,
       group: "Settings",
       label: section.label,
@@ -337,6 +373,9 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
     ];
   }, [
     agents,
+    daedalusOn,
+    englishTutorOn,
+    hidden,
     inbox,
     navigate,
     onClose,

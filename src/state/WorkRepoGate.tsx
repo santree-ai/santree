@@ -13,7 +13,8 @@
  *
  * A Daedalus project is answered like any other while santree can reach the
  * box, where its agents run; with the link down it is never answered for the
- * user, and is only a disabled row in the dialog, saying why.
+ * user, and is only a disabled row in the dialog, saying why. With
+ * Settings → Experimental → Daedalus off it is not a candidate at all.
  *
  * `always` skips the first two answers: the menu's "Run in another project…" is
  * a request to be asked. Modelled on `TriageRepoGate`, down to the
@@ -25,7 +26,7 @@ import { createContext, type ReactNode, useCallback, useContext, useRef, useStat
 
 import { ProjectPickerDialog } from "../components/ProjectPickerDialog";
 import { linkUp } from "../lib/daedalusLink";
-import { useDaedalusStatus, useRepos, useWorkDefaultRepo } from "../lib/queries";
+import { useDaedalusStatus, useOfferedRepos, useRepos, useWorkDefaultRepo } from "../lib/queries";
 
 /** Resolve the project for `action` — named in the dialog, so it reads
  *  "Starting AK-1 needs a project." — out of `candidates`, the projects that
@@ -59,10 +60,15 @@ export function WorkRepoGateProvider({ children }: { children: ReactNode }) {
   const defaultRef = useRef(defaultRepo);
   defaultRef.current = defaultRepo;
   const { data: repos } = useRepos();
+  const { hidden } = useOfferedRepos();
   const { data: link } = useDaedalusStatus();
   const startableRef = useRef<(name: string) => boolean>(() => false);
   startableRef.current = (name) =>
     repos?.find((r) => r.name === name)?.location !== "Daedalus" || linkUp(link);
+  // A project Settings → Experimental hides is never a candidate: not answered
+  // for the user, and not a row in the dialog.
+  const hiddenRef = useRef(hidden);
+  hiddenRef.current = hidden;
 
   const settle = useCallback((picked: string | null) => {
     pending.current?.(picked);
@@ -70,7 +76,8 @@ export function WorkRepoGateProvider({ children }: { children: ReactNode }) {
     setQuestion(null);
   }, []);
 
-  const ask = useCallback<AskWorkRepo>((candidates, action, opts) => {
+  const ask = useCallback<AskWorkRepo>((asked, action, opts) => {
+    const candidates = asked.filter((name) => !hiddenRef.current(name));
     if (!opts?.always) {
       const startable = candidates.filter((name) => startableRef.current(name));
       if (candidates.length === 1 && startable.length === 1) return Promise.resolve(startable[0]);

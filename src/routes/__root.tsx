@@ -8,7 +8,7 @@ import { TerminalLayer } from "../features/terminal/TerminalLayer";
 import { AgentRunHost } from "../features/trees/AgentRunHost";
 import { useBrowserEvents } from "../features/web/useBrowserEvents";
 import {
-  useRepos,
+  useOfferedRepos,
   useUpdateWatcher,
   useWorktreeBaseChanges,
   useWorktreeWatcher,
@@ -44,7 +44,9 @@ function RootLayout() {
   useBrowserEvents();
   useUpdateWatcher();
   useWorktreeBaseChanges();
-  const { data: repos } = useRepos();
+  // What the first-run screen waits for: a project santree offers. Registered
+  // Daedalus projects don't count while Settings → Experimental hides them.
+  const { data: repos } = useOfferedRepos();
   // The filesystem watcher follows the open workspace's project. It is a single
   // watcher by construction (`watch_worktrees` re-points rather than adding, and
   // `WorktreeChanged` names no repo), so it can only ever cover one — and the one

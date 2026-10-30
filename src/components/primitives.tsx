@@ -523,6 +523,7 @@ export function Segmented<T extends string>({
   value,
   onChange,
   className,
+  ariaLabel,
 }: {
   options: {
     value: T;
@@ -532,10 +533,16 @@ export function Segmented<T extends string>({
      *  selected and muted at zero, so an empty bucket reads as available rather
      *  than as something to go looking in. */
     count?: number;
+    /** The option's name when its label is left empty (an icon-only option). */
+    ariaLabel?: string;
+    /** Its tooltip — where a shortcut is said. */
+    title?: string;
   }[];
   value: T;
   onChange: (value: T) => void;
   className?: string;
+  /** The group's name, when nothing beside it says what it picks. */
+  ariaLabel?: string;
 }) {
   const checked = options.findIndex((o) => o.value === value);
   const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -549,6 +556,7 @@ export function Segmented<T extends string>({
     <div
       role="radiogroup"
       aria-orientation="horizontal"
+      aria-label={ariaLabel}
       onKeyDown={onKeyDown}
       className={`flex gap-1 rounded-lg border border-line-2 bg-input p-[2px] ${className ?? ""}`}
     >
@@ -568,6 +576,8 @@ export function Segmented<T extends string>({
             type="button"
             role="radio"
             aria-checked={active}
+            aria-label={opt.ariaLabel}
+            title={opt.title}
             // Roving tabindex: with nothing checked yet, the first option is the
             // one Tab lands on, so the group can never fall out of the tab order.
             tabIndex={(checked < 0 ? 0 : checked) === i ? 0 : -1}

@@ -329,6 +329,8 @@ mod tests {
         (39, "ticktick", "ed027b987f4a5c5af9fe43a5aa77ee2e09c8f37750023b3633a4402acd90245be70c0869dc554f2df00fc7502c3a2434"),
         (40, "agent accounts", "1f311f26bb353ff3bcaac830ca8cf63086fdf31cefbe656b455e864008371bc50ef90c4a22b931c39bbefe3bd303dfd9"),
         (41, "web tabs", "9b2e16bbf41abba97ee068b64a7d7c53a52c887980b0eeb08a01819ad9b54564fd3bd6a11a7dbfbfe86bbf741caad062"),
+        (42, "session state asker", "70d30dbf540fcb9f13102c43d184426cf9927ba0550fc90e5854909e1f611fba071f8e81b00ef35998620a5ce40c1775"),
+        (43, "conversation live", "e098063134ba6b76e82dd9502bcf21a70d4ec78f549065ca0315780d9db744abb3dfce73ba10795a930e90ffca402dd3"),
     ];
 
     /// See [`SHIPPED_MIGRATIONS`]. Checked against the embedded set, so it fails at

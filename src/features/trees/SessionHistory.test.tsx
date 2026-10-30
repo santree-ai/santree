@@ -31,6 +31,9 @@ vi.mock("../../lib/queries", () => ({
   },
   useRevealSessionTranscript: () => ({ mutate: spies.reveal }),
   useRepoReach: () => ({ remote: spies.remote }),
+  // The Conversation view's offer reads where the project lives and its switch.
+  useRepos: () => ({ data: [] }),
+  useExperimental: () => true,
 }));
 
 vi.mock("../agents/useAgents", () => ({ useAgentEntries: () => spies.entries }));

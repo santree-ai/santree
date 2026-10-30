@@ -32,26 +32,9 @@ import { bucketAnnotations, type DiffAnnotation } from "./bucketThreads";
 import { type CommentTarget, isRightSide } from "./commentTarget";
 import { InlineCommentBox } from "./InlineCommentBox";
 import { PrThreadCard } from "./PrThreadCard";
-import { clampToHunk } from "./patchLines";
+import { clampToHunk, toUnifiedDiff } from "./patchLines";
 import { ReviewDraftCard } from "./ReviewDraftCard";
 import { useGutterDrag } from "./useGutterDrag";
-
-/**
- * GitHub's REST `patch` is only the hunk body (it starts at `@@`) — it omits the
- * `diff --git` / `---` / `+++` header that `@git-diff-view` needs to locate the
- * file and its hunks ("No hunks found" without it). Synthesize a minimal header,
- * with `/dev/null` on the missing side for added/removed files.
- */
-function toUnifiedDiff(
-  path: string,
-  previousPath: string | null | undefined,
-  status: string,
-  patch: string,
-): string {
-  const oldPath = status === "added" ? "/dev/null" : `a/${previousPath ?? path}`;
-  const newPath = status === "removed" ? "/dev/null" : `b/${path}`;
-  return `diff --git a/${path} b/${path}\n--- ${oldPath}\n+++ ${newPath}\n${patch}`;
-}
 
 /**
  * Confirm that full-file content and GitHub's patch describe the same snapshots.

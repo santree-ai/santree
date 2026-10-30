@@ -383,7 +383,10 @@ the supervisor gives up (`Down`, `Failing`), panes that never reached a session
 are `Lost` at once, and `refuse_unbound` makes panes opened meanwhile `Lost` from
 birth, so a later Start never types a line asked for long before. A line queued
 across a link outage is typed only if the outage was under 45 s. Daedalus panes
-keep waiting (docs/remote.md).
+keep waiting (docs/remote.md). Keystrokes never wait: a write to a pane whose
+link is not live is refused rather than accepted and then discarded, so the
+Conversation composer knows its draft did not arrive (the terminal's own
+keystrokes ignore the refusal).
 
 **"Terminals aren't responding".** After 10 s waiting on its host (reconnecting,
 or an open or attach unanswered) a pane shows a hint pointing at Settings →

@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AgentKind } from "../../bindings";
 import { useHeldFor } from "../../lib/useHeldFor";
+import { inputReached, watchInput } from "./inputWatch";
 import type { PaneHandle } from "./orchestrator";
 import { paneAddress } from "./paneAddress";
 import { clearSessionTitle, setSessionTitle } from "./sessionTitles";
@@ -203,6 +204,7 @@ export function TerminalView({
     renderer.onTitle((title) => setSessionTitle(paneAddress(label, agentKind), title));
 
     let unregisterPane: (() => void) | undefined;
+    let unwatchInput: (() => void) | undefined;
     let disposed = false;
     const { cols, rows } = safeFit(renderer);
     const handlers = {
@@ -264,8 +266,24 @@ export function TerminalView({
         idRef.current = id;
         setStarting(false);
         lastSizeRef.current = { cols, rows };
-        renderer.onInput((data) => backend.write(id, data));
-        unregisterPane = onReadyRef.current?.({ end: () => backend.close(id) });
+        // Every byte the pane sends leaves by this one writer — the user's
+        // keys and the Conversation view's alike — and the input watch notes
+        // when (`inputWatch`), from now: what came before this page attached,
+        // it never saw.
+        unwatchInput = watchInput(id);
+        const write = (data: string) => {
+          inputReached(id, data);
+          return backend.write(id, data);
+        };
+        renderer.onInput(write);
+        unregisterPane = onReadyRef.current?.({
+          id,
+          end: () => backend.close(id),
+          // Typing from outside the pane goes through this renderer, and so
+          // through the writer above — whose answer it hands back: nothing
+          // reaches the session another way.
+          input: { paste: (text) => renderer.paste(text), press: (key) => renderer.press(key) },
+        });
         // Seeding an adopted session would type the launch command into a shell
         // that is already running the agent it names — `adoptId` is the test,
         // not `created`, because a session this pane opened still needs its seed
@@ -278,6 +296,7 @@ export function TerminalView({
         // verbatim. See `terminal_seed` in `terminal.rs`.
         if (seed && adoptId === undefined && !seededRef.current) {
           seededRef.current = true;
+          inputReached(id, seed);
           backend.seed(id, seed);
         }
         if (focusedRef.current) renderer.focus();
@@ -296,6 +315,7 @@ export function TerminalView({
       disposed = true;
       stopObserving();
       unregisterPane?.();
+      unwatchInput?.();
       // Detach, never close. A pane unmounting says nothing about whether the
       // work in it should stop — the user switched tabs, or the window
       // reloaded. Ending the session is an explicit act, and it happens in
@@ -324,11 +344,18 @@ export function TerminalView({
 
   // Refit when this pane comes on screen (it may have been sized to zero while
   // hidden behind another tab), and take the keyboard when it is the one being
-  // worked in.
+  // worked in. Off screen it lets go of the keyboard: a hidden terminal that
+  // kept it would hand the user's next keys to a program they can't see — an
+  // Enter typed after ⌘J to the conversation would confirm whatever prompt is
+  // up. The layer makes a hidden pane `inert` as well, but WebKit is not
+  // guaranteed to move focus out of an element that becomes inert.
   useEffect(() => {
-    if (!active) return;
     const renderer = rendererRef.current;
     if (!renderer) return;
+    if (!active) {
+      renderer.blur();
+      return;
+    }
     const raf = requestAnimationFrame(() => {
       const { cols, rows } = safeFit(renderer);
       commitResize(cols, rows);

@@ -49,6 +49,8 @@ function session(over: Partial<SessionState> & { sessionId: string }): SessionSt
   return {
     agentKind: "Claude",
     state: "active",
+    recordedState: over.state ?? "active",
+    interruptedAtMs: null,
     event: "UserPromptSubmit",
     cwd: "/repo",
     message: null,
@@ -56,6 +58,9 @@ function session(over: Partial<SessionState> & { sessionId: string }): SessionSt
     updatedAtMs: NOW,
     repo: REPO,
     termKey: null,
+    prompt: null,
+    permissionMode: null,
+    effortLevel: null,
     ...over,
   };
 }
@@ -86,7 +91,7 @@ function seen(
   agentKind: AgentProcess["agentKind"],
   paneAgentKind: AgentProcess["paneAgentKind"] = null,
 ): AgentProcess {
-  return { termKey, paneAgentKind, agentKind };
+  return { termKey, paneAgentKind, agentKind, paneId: null, startedAtMs: null };
 }
 
 function renderSegment() {

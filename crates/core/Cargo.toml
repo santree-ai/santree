@@ -16,6 +16,7 @@ specta = { workspace = true }
 # `AgentKind`, re-exported from `domain`. Its `specta` feature is on here, and
 # only here, so the domain structs that carry one can derive `Type`.
 santree-agent-kind = { path = "../agent-kind", features = ["specta"] }
-
-[dev-dependencies]
+# The Conversation view's transcript parser (`conversation::claude`) reads the
+# agent's JSON Lines record and its RFC 3339 timestamps.
 serde_json = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std"] }

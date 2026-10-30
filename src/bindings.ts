@@ -301,6 +301,22 @@ export const commands = {
 	 */
 	worktreeSessionSubagents: (repo: string, issueId: string, sessionId: string) => typedError<SessionSubagent[], CmdError>(__TAURI_INVOKE("worktree_session_subagents", { repo, issueId, sessionId })),
 	/**
+	 *  A conversation as the agent's own record tells it — a tab's live session or
+	 *  a listed one, or one of its subagents (`agent_id`) — from the reader's
+	 *  cursor on. The webview names a session; the file is derived here, and
+	 *  nothing read reaches a model, a prompt or a PTY.
+	 */
+	conversationRead: (target: ConversationTarget, agentId: string | null, cursor: {
+	/**
+	 *  Names the backend's parse of one record file. A different value — the
+	 *  app restarted, the parse was evicted, the tab now names another session,
+	 *  the file was replaced — makes the next read a reset.
+	 */
+	epoch: string,
+	/**  The last revision the reader holds. */
+	rev: number,
+} | null) => typedError<ConversationRead, CmdError>(__TAURI_INVOKE("conversation_read", { target, agentId, cursor })),
+	/**
 	 *  Reveal one of those sessions' transcripts in the OS file browser. The path is
 	 *  derived in Rust from the validated listing — the webview names a session, not
 	 *  a file.
@@ -1008,8 +1024,9 @@ export const commands = {
 	 *  present — capture is unconditional; whether the app *displays* the inline
 	 *  usage bar is a runtime frontend decision. `None` when the hook binary/db can't
 	 *  be resolved — the frontend then launches without the flag. Its content depends
-	 *  only on the English-tutor setting, so the frontend caches the path until that
-	 *  one flips.
+	 *  only on the English tutor (its own switch and Settings → Experimental's) and on
+	 *  Settings → Experimental → Conversation view (which adds `MessageDisplay`), so
+	 *  the frontend caches the path until one of those flips.
 	 */
 	claudeHookSettings: () => __TAURI_INVOKE<string | null>("claude_hook_settings"),
 	/**
@@ -1069,6 +1086,40 @@ export const commands = {
 	 *  status-line stdin. Newest first.
 	 */
 	sessionUsageLive: () => typedError<SessionUsageLive[], CmdError>(__TAURI_INVOKE("session_usage_live")),
+	/**
+	 *  The reply a Claude session is drawing right now, line by line, from its
+	 *  `MessageDisplay` hook — registered only while Settings → Experimental →
+	 *  Conversation view is on. `None` while nothing is streaming. Display only.
+	 *  `session_id` comes from the webview, so it must have the shape of an id
+	 *  santree mints before it reaches a query.
+	 */
+	sessionLiveText: (sessionId: string) => typedError<{
+	sessionId: string,
+	/**  The turn's `prompt_id`, as the hooks' other payloads carry it. */
+	promptId: string | null,
+	/**  Claude's `turn_id`: the same for every message of one turn. */
+	turnId: string | null,
+	/**
+	 *  Claude's id for the message. It is not the API message id and nothing
+	 *  in the transcript names it.
+	 */
+	messageId: string,
+	/**
+	 *  The message so far: its line batches joined in order, up to the first
+	 *  one that has not landed yet. Whole lines, except the last batch's tail.
+	 */
+	text: string,
+	/**  The `index` of the last batch in `text`. */
+	index: number | null,
+	/**  `text` ends with the message's final batch: the message is complete. */
+	final: boolean,
+	/**  The start of the message was dropped to keep it under the cap. */
+	truncated: boolean,
+	/**  When the message's first batch kept here fired, epoch ms. */
+	startedAtMs: number | null,
+	/**  When its newest batch fired, epoch ms. */
+	updatedAtMs: number | null,
+} | null, CmdError>(__TAURI_INVOKE("session_live_text", { sessionId })),
 	/**
 	 *  Claude's account-level subscription rate-limit windows (5-hour, 7-day, ...),
 	 *  as its own status line last reported them — captured from the same stdin as
@@ -1165,6 +1216,14 @@ export const commands = {
 	getSetting: (scope: string, key: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("get_setting", { scope, key })),
 	/**  Write (or clear, when `value` is null) a setting for a scope. */
 	setSetting: (scope: string, key: string, value: string | null) => typedError<null, CmdError>(__TAURI_INVOKE("set_setting", { scope, key, value })),
+	/**
+	 *  Turn a Settings → Experimental switch on or off — the switches' one writer
+	 *  (the generic `set_setting` refuses their keys). Daedalus is applied at once:
+	 *  on starts the link, off ends it; its projects and everything else it keeps
+	 *  stay. The English tutor's is read by every launch, and the Conversation
+	 *  view's by the frontend and by every launch (it registers `MessageDisplay`).
+	 */
+	setExperimental: (feature: ExperimentalFeature, on: boolean) => typedError<null, CmdError>(__TAURI_INVOKE("set_experimental", { feature, on })),
 	/**  Resolve a repo-scoped setting: the repo's override, else the app value. */
 	resolveSetting: (repo: string, key: string) => typedError<string | null, CmdError>(__TAURI_INVOKE("resolve_setting", { repo, key })),
 	/**
@@ -1350,14 +1409,16 @@ export const commands = {
 	 *  box — as the Daedalus agent here keeps them, or why they can't be read. A
 	 *  value, never an error. Once the box has turned santree on (an admin confirmed
 	 *  it in the browser), the link is tried at once rather than at the end of its
-	 *  slow backoff.
+	 *  slow backoff. With Settings → Experimental → Daedalus off, the agent is not
+	 *  asked at all.
 	 */
 	daedalusSettings: () => typedError<DaedalusMachine, CmdError>(__TAURI_INVOKE("daedalus_settings")),
 	/**
 	 *  Ask the box for one of this Mac's settings, through the Daedalus agent.
 	 *  santree ON is never sent: the agent names the Daedalus page where an admin
 	 *  confirms it, and this opens it in the browser (https only). A refusal is a
-	 *  value the card shows, never an error.
+	 *  value the card shows, never an error — and with Settings → Experimental →
+	 *  Daedalus off, every ask is refused unsent.
 	 */
 	daedalusSetSetting: (key: DaedalusSettingKey, value: boolean) => typedError<DaedalusSettingAnswer, CmdError>(__TAURI_INVOKE("daedalus_set_setting", { key, value })),
 	/**
@@ -1637,9 +1698,11 @@ export const events = {
 	browserPointerDown: makeEvent<BrowserPointerDown>("browser-pointer-down"),
 	browserShortcut: makeEvent<BrowserShortcut>("browser-shortcut"),
 	claudeRateLimitsChanged: makeEvent<ClaudeRateLimitsChanged>("claude-rate-limits-changed"),
+	conversationChanged: makeEvent<ConversationChanged>("conversation-changed"),
 	daedalusLinkChanged: makeEvent<DaedalusLinkChanged>("daedalus-link-changed"),
 	reviewAiChanged: makeEvent<ReviewAiChanged>("review-ai-changed"),
 	serverStateChanged: makeEvent<ServerStateChanged>("server-state-changed"),
+	sessionLiveTextChanged: makeEvent<SessionLiveTextChanged>("session-live-text-changed"),
 	sessionStateChanged: makeEvent<SessionStateChanged>("session-state-changed"),
 	sessionUsageChanged: makeEvent<SessionUsageChanged>("session-usage-changed"),
 	updateProgress: makeEvent<UpdateProgress>("update-progress"),
@@ -1742,6 +1805,10 @@ export type AgentDef = {
  */
 export type AgentKind = "Claude" | "Codex" | "Cursor" | "Opencode";
 
+export type AgentMessage = {
+	text: string,
+};
+
 /**
  *  Which coding agent the host process table says is running in one terminal
  *  pane, keyed by the pane's `term_key`. Read by walking the pane's process
@@ -1756,6 +1823,8 @@ export type AgentKind = "Claude" | "Codex" | "Cursor" | "Opencode";
  *  slow, and a CLI launched through an interpreter is not recognisable by
  *  `argv[0]`. Nothing may read an absent entry as a claim that a pane is a plain
  *  shell, and nothing may substitute a default provider for one.
+ * 
+ *  Only `PartialEq` (not `Eq`) because of the `f64` start time.
  */
 export type AgentProcess = {
 	/**  The `term_key` the pane's PTY was opened under. */
@@ -1771,6 +1840,22 @@ export type AgentProcess = {
 	paneAgentKind: AgentKind | null,
 	/**  Which agent the process table actually sees in the pane's foreground. */
 	agentKind: AgentKind,
+	/**
+	 *  The pane this answer is about: the PTY session id `terminal_open` (or
+	 *  an attach) returned for it. A pane that closed and reopened under the
+	 *  same address is another pane, so an answer about the old one must not
+	 *  be read for the new one. `None` for a Daedalus pane.
+	 */
+	paneId: number | null,
+	/**
+	 *  When that foreground agent process started, epoch ms (this Mac's
+	 *  clock, the one the hooks stamp rows with). Anything a session's hooks
+	 *  or transcript recorded before it came from an earlier process. A
+	 *  santree launch `exec`s the CLI, which keeps the pane root's process,
+	 *  so for those it is when the pane was spawned. `None` for a Daedalus
+	 *  pane, or when the kernel could not answer.
+	 */
+	startedAtMs: number | null,
 };
 
 /**
@@ -2396,6 +2481,140 @@ export type CommentKind =
 /**  An inline comment anchored to a file in a review thread. */
 "ReviewThread";
 
+export type ContextUsage = {
+	usedTokens: number | null,
+	windowTokens: number | null,
+};
+
+/**
+ *  Whether there is a conversation to draw. `NoSession` and `NotFound` are
+ *  states, not errors: the view says so in place.
+ */
+export type ConversationAvailability = "Ready" | 
+/**
+ *  The tab's agent has not started a session yet — a Codex tab before its
+ *  first prompt has no thread, so there is nothing recorded to read.
+ */
+"NoSession" | 
+/**
+ *  The session's record is not on this Mac: purged, persistence turned off,
+ *  or never written.
+ */
+"NotFound" | 
+/**
+ *  A Daedalus session: its record is on the home server, which is not read
+ *  live.
+ */
+"Remote";
+
+/**
+ *  "A record a Conversation view reads changed on disk". The view whose
+ *  session this names reads again from its cursor.
+ */
+export type ConversationChanged = {
+	/**  The Claude session id or Codex thread id whose record changed. */
+	sessionId: string,
+};
+
+/**
+ *  Where a reader is in a conversation. Opaque to the frontend: it hands back
+ *  the cursor the last read returned.
+ */
+export type ConversationCursor = {
+	/**
+	 *  Names the backend's parse of one record file. A different value — the
+	 *  app restarted, the parse was evicted, the tab now names another session,
+	 *  the file was replaced — makes the next read a reset.
+	 */
+	epoch: string,
+	/**  The last revision the reader holds. */
+	rev: number,
+};
+
+/**  One entry of the journal. */
+export type ConversationItem = {
+	/**
+	 *  Stable for the life of the record: a later read that changes this item
+	 *  carries the same id.
+	 */
+	id: string,
+	/**  Order in the conversation, assigned when the item is first seen. */
+	seq: number,
+	/**
+	 *  The user turn it belongs to: 0 before the first typed prompt, then one
+	 *  more at each prompt the user typed.
+	 */
+	turn: number,
+	/**  When the record says it happened, epoch ms. */
+	atMs: number | null,
+	body: ItemBody,
+};
+
+/**  What the record says about the session as a whole, as of this read. */
+export type ConversationMeta = {
+	/**  Claude's `custom-title`, else its `ai-title`; Codex's thread name. */
+	title: string | null,
+	/**  The model of the latest main-thread turn. */
+	model: string | null,
+	cwd: string | null,
+	gitBranch: string | null,
+	/**  The CLI version that last wrote the record. */
+	cliVersion: string | null,
+	/**
+	 *  Claude's permission mode, or Codex's approval policy and sandbox, as
+	 *  last recorded.
+	 */
+	permissionMode: string | null,
+	/**
+	 *  The context in use after the latest main-thread turn. Codex's
+	 *  `token_count` carries the window; Claude's transcript does not, so the
+	 *  view takes Claude's window from the status line.
+	 */
+	context: ContextUsage | null,
+	/**  Main-thread totals, each API message counted once. */
+	usage: TokenUsage | null,
+	/**
+	 *  The record was larger than the read bound and only its tail was parsed:
+	 *  the conversation's start is missing, and the view says so.
+	 */
+	truncated: boolean,
+};
+
+/**  One read of a conversation. */
+export type ConversationRead = {
+	availability: ConversationAvailability,
+	/**  The agent whose record this is; `None` when nothing was found. */
+	agent: AgentKind | null,
+	/**
+	 *  The Claude session id or Codex thread id that was read. A view keys its
+	 *  change subscription on it ([`ConversationChanged`] in the app crate).
+	 */
+	sessionId: string | null,
+	cursor: ConversationCursor,
+	/**  Drop everything held and take `items` as the whole conversation. */
+	reset: boolean,
+	/**
+	 *  What was created or changed after the reader's cursor, ordered by
+	 *  `seq`. An item replaces the held item with the same `id`.
+	 */
+	items: ConversationItem[],
+	meta: ConversationMeta,
+};
+
+/**
+ *  Which conversation a view reads. Never a path: the backend derives the file
+ *  from the tab's own `terminal_sessions` row, or from the worktree's validated
+ *  session listing exactly as Session history does.
+ */
+export type ConversationTarget = 
+/**
+ *  The session a tab's terminal is bound to now. It follows the row, so a
+ *  `/clear` or a resume that rebinds the tab moves the view with it.
+ */
+{ kind: "tab"; repo: string; termKey: string } | 
+/**  A session from a worktree's history list. */
+{ kind: "session"; repo: string; issueId: string; sessionId: string };
+
 /**  What an import did. */
 export type CookieImport = {
 	cookies: number,
@@ -2486,6 +2705,8 @@ export type DaedalusIcon = {
  *  as a plain value so it never becomes a red toast.
  */
 export type DaedalusLink = 
+/**  Settings → Experimental → Daedalus is off: santree doesn't link. */
+{ kind: "Off" } | 
 /**  No Daedalus agent on this machine. */
 { kind: "AgentMissing" } | 
 /**  The agent here is older than santree's socket in it. */
@@ -2637,6 +2858,16 @@ export type DaedalusWorkspaceList = {
 	workspaces: DaedalusWorkspace[],
 };
 
+/**  Which dialog a [`PendingPrompt`] is. */
+export type DialogKind = 
+/**
+ *  Claude's `PermissionRequest`: a tool's permission prompt, a question
+ *  (`AskUserQuestion`) or a plan to approve (`ExitPlanMode`).
+ */
+"permission" | 
+/**  An MCP server's `Elicitation`: a form to fill or a URL to open. */
+"elicitation";
+
 /**
  *  An older server revision that is still running because it holds terminals.
  *  It is left alone until its terminals end; a new server serves new ones.
@@ -2729,6 +2960,39 @@ export type EnvVar = {
 };
 
 /**
+ *  A switch on Settings → Experimental: a feature santree ships turned off.
+ *  While a switch is off its feature is off wherever it reaches, not only on
+ *  its settings page.
+ */
+export type ExperimentalFeature = 
+/**
+ *  Daedalus projects, the link to the Daedalus agent on this Mac, and this
+ *  Mac's settings through it (docs/remote.md).
+ */
+"Daedalus" | 
+/**  The English tutor on the Claude sessions santree starts. */
+"EnglishTutor" | 
+/**  A Claude tab's Conversation face (docs/conversation.md). */
+"Conversation";
+
+export type FileChange = {
+	path: string,
+	op: FileOp,
+	/**
+	 *  Unified-diff hunks — `@@ -a,b +c,d @@` headers and ` `/`+`/`-` lines,
+	 *  the shape the PR diff renderer takes. `None` when only the fact of the
+	 *  change is known.
+	 */
+	patch: string | null,
+	added: number,
+	removed: number,
+	/**  `patch` was cut at the size bound. */
+	truncated: boolean,
+};
+
+export type FileOp = "Add" | "Update" | "Delete";
+
+/**
  *  The old (HEAD) and new (working-tree) full contents of a file, used by the
  *  diff viewer to expand unchanged context above/below a hunk (GitHub-style).
  *  Either side is empty when it doesn't exist (added vs. deleted).
@@ -2783,6 +3047,47 @@ export type Integrations = {
 	linear?: boolean,
 	triage?: boolean,
 };
+
+export type ItemBody = 
+/**  Something sent to the agent as the user. */
+{
+	kind: "user",
+} & UserMessage | 
+/**  The agent's prose, as markdown. */
+{
+	kind: "agent",
+} & AgentMessage | 
+/**
+ *  The agent's reasoning. Claude records thinking mostly empty — a short
+ *  summary at most — so `text` may be blank and only the duration is known.
+ */
+{
+	kind: "reasoning",
+} & Reasoning | 
+/**  A tool call and, once it lands, its result. */
+{
+	kind: "tool",
+} & ToolCall | 
+/**
+ *  Not a message: a compaction, an API error, an interruption, a mode or
+ *  model change.
+ */
+{
+	kind: "notice",
+} & Notice | 
+/**  The end of a user turn. */
+{
+	kind: "turnEnd",
+} & TurnEnd | 
+/**
+ *  A message typed while the agent worked, from the moment it entered the
+ *  agent's queue (at the Enter) to the moment it left it. Its delivery is
+ *  drawn where it landed, as a [`UserOrigin::Queued`] message; this item
+ *  only says it is waiting, and then that it no longer is.
+ */
+{
+	kind: "queued",
+} & QueuedMessage;
 
 /**  A connected Jira Cloud site (the Jira counterpart of [`LinearOrg`]). */
 export type JiraSite = {
@@ -2924,6 +3229,41 @@ export type LinearTeam = {
 	hasRotation: boolean | null,
 	/**  The team holds a triage issue assigned to the viewer. */
 	hasAssigned: boolean,
+};
+
+/**
+ *  The reply Claude is drawing in a session's terminal right now, from its
+ *  `MessageDisplay` hook: the newest assistant message of the session's own
+ *  thread, line by line, a few seconds before the transcript records it.
+ *  Display only. Registered only while Settings → Experimental →
+ *  Conversation view is on, and never on Daedalus.
+ */
+export type LiveText = {
+	sessionId: string,
+	/**  The turn's `prompt_id`, as the hooks' other payloads carry it. */
+	promptId: string | null,
+	/**  Claude's `turn_id`: the same for every message of one turn. */
+	turnId: string | null,
+	/**
+	 *  Claude's id for the message. It is not the API message id and nothing
+	 *  in the transcript names it.
+	 */
+	messageId: string,
+	/**
+	 *  The message so far: its line batches joined in order, up to the first
+	 *  one that has not landed yet. Whole lines, except the last batch's tail.
+	 */
+	text: string,
+	/**  The `index` of the last batch in `text`. */
+	index: number | null,
+	/**  `text` ends with the message's final batch: the message is complete. */
+	final: boolean,
+	/**  The start of the message was dropped to keep it under the cap. */
+	truncated: boolean,
+	/**  When the message's first batch kept here fired, epoch ms. */
+	startedAtMs: number | null,
+	/**  When its newest batch fired, epoch ms. */
+	updatedAtMs: number | null,
 };
 
 /**
@@ -3121,6 +3461,13 @@ export type NewReviewWorkItem = {
 	onRight: boolean | null,
 };
 
+export type Notice = {
+	tone: NoticeTone,
+	text: string,
+};
+
+export type NoticeTone = "Info" | "Warning" | "Error";
+
 /**  An external app/location a worktree can be opened in (Conductor-style menu). */
 export type Opener = {
 	/**  Stable key passed back to `open_in_app` (e.g. "finder", "cursor"). */
@@ -3144,6 +3491,105 @@ export type Opener = {
  *  along with the news; `Lost` leaves the tab up, saying why.
  */
 export type PaneLink = "live" | "reconnecting" | "lost";
+
+/**
+ *  The dialog Claude is showing, from the hook that announced it: what a card
+ *  can draw without reading the screen.
+ * 
+ *  The JSON fields are JSON *text*, always valid JSON (parse them with
+ *  `JSON.parse`): the payload's own shape varies per tool, so it is passed
+ *  through as Claude sent it rather than modelled here. A string inside that
+ *  would push the whole past the cap is cut short instead, and [`Self::truncated`]
+ *  says so.
+ */
+export type PendingPrompt = {
+	kind: DialogKind,
+	/**
+	 *  The tool asking: `Bash`, `Edit`, `Write`, `WebFetch`, `AskUserQuestion`,
+	 *  `ExitPlanMode`, `mcp__<server>__<tool>`, … `None` for an elicitation.
+	 */
+	toolName: string | null,
+	/**
+	 *  For a permission request, its `tool_input` (`{command, description}`,
+	 *  `{file_path, old_string, new_string, replace_all}`, `{questions}`,
+	 *  `{plan, planFilePath}`, …). For an elicitation, its own fields:
+	 *  `{message, mode, requested_schema}` for a form, `{message, mode, url,
+	 *  elicitation_id}` for a URL.
+	 */
+	toolInput: string,
+	/**
+	 *  `permission_suggestions`, a JSON array, when the payload carried one —
+	 *  possibly `[]`, which Claude sends when it has no rule to offer (and then
+	 *  the dialog has no "don't ask again" row). `None` for questions, plans
+	 *  and elicitations, which carry none.
+	 */
+	suggestions: string | null,
+	/**
+	 *  The MCP server behind the dialog: a permission request's
+	 *  `mcp_server.name`, an elicitation's `mcp_server_name`.
+	 */
+	mcpServer: string | null,
+	/**
+	 *  The subagent that asked (`agent_id`, `agent_type`); `None` when the
+	 *  session's own thread did.
+	 */
+	agentId: string | null,
+	agentType: string | null,
+	/**  The permission mode the dialog was raised under. */
+	permissionMode: string | null,
+	/**
+	 *  The turn's `prompt_id`; a background subagent's request carries the id
+	 *  of the turn that launched it.
+	 */
+	promptId: string | null,
+	/**
+	 *  When the hook recorded the dialog, epoch ms — the row's
+	 *  [`SessionState::updated_at_ms`] as of that write. A new dialog (the
+	 *  next of two parallel tool calls, a repeat) has a new one.
+	 */
+	recordedAtMs: number | null,
+	/**  Part of the input or the suggestions was cut to fit the cap. */
+	truncated: boolean,
+	/**
+	 *  The dialog was recorded while an earlier one was still open: parallel
+	 *  tool calls (two `Read`s, two read-only commands) and a subagent asking
+	 *  beside the main thread each fire their `PermissionRequest` at once,
+	 *  Claude shows them one at a time (`1 of 2`), and the one on screen may
+	 *  not be this one. The ones behind it fire nothing when they come
+	 *  forward. A dialog that follows the previous one's close reads false;
+	 *  one whose hook lands before any sign of that close reads true, which
+	 *  costs only the card.
+	 */
+	stacked: boolean,
+	/**
+	 *  When the dialog left the screen, epoch ms on this Mac's clock (the one
+	 *  the hook stamps with), by the latest of Claude's own signs
+	 *  ([`DialogMarks::closed_at`]): a status-line render that started at
+	 *  least 1 s after it was recorded, or, for one that isn't
+	 *  [`Self::stacked`], its own tool call finishing (never on Daedalus by a
+	 *  render). `None` while it is open. Answered in the view or in the
+	 *  terminal alike. Never for an elicitation. The row keeps its state until
+	 *  the next hook moves it, so this is what says the dialog is gone in the
+	 *  meantime. For display (the card, the dot): a render's start is timing,
+	 *  and one Claude launched just before this dialog drew can start late
+	 *  under load and read as its close while it is still up. A reader that
+	 *  would type goes by [`Self::call_ended_at_ms`].
+	 */
+	closedAtMs: number | null,
+	/**
+	 *  When the dialog's own tool call finished (its `PostToolUse`,
+	 *  `PostToolUseFailure`, or a `PostToolBatch` that lists it), epoch ms on
+	 *  this Mac's clock, for a dialog that isn't [`Self::stacked`]: behind a
+	 *  stack, the call that finished can be the one that was in front.
+	 *  Evidence the dialog was answered, not timing — a status-line render
+	 *  never sets it. `None` until then, and always for an elicitation. A
+	 *  reader that would type still waits before trusting it (~250 ms with no
+	 *  newer [`Self::recorded_at_ms`]): a dialog that follows is on screen
+	 *  45-70 ms before its own hook lands and replaces this one (CLI 2.1.312,
+	 *  probed).
+	 */
+	callEndedAtMs: number | null,
+};
 
 /**
  *  The detail panel payload for a selected PR: body, conversation, diff, checks.
@@ -3600,6 +4046,33 @@ export type PromptWorkItemSample = {
 	body: string | null,
 };
 
+export type Question = {
+	header: string | null,
+	question: string,
+	options: string[],
+	answer: string | null,
+};
+
+export type QueueStatus = 
+/**  In the queue: the agent hasn't taken it yet. */
+"Pending" | 
+/**
+ *  Delivered: as a turn of its own after the one it waited on, or into
+ *  that turn between two tool calls.
+ */
+"Delivered" | 
+/**
+ *  Taken out without a delivery the record shows: recalled into Claude's
+ *  input to edit (Up at its prompt), or removed for a reason this build
+ *  doesn't know.
+ */
+"Withdrawn";
+
+export type QueuedMessage = {
+	text: string,
+	status: QueueStatus,
+};
+
 /**
  *  `quit_summary`: what quitting the app would cost, so the quit guard warns
  *  only about work that really ends (terminals the server keeps do not count;
@@ -3631,6 +4104,11 @@ export type ReadingStep = {
 	role: ReadingRole,
 	/**  One line on why this file sits at this point in the order. */
 	why: string,
+};
+
+export type Reasoning = {
+	text: string,
+	durationMs: number | null,
 };
 
 /**  A connected repository / task-tracker pairing. */
@@ -4230,6 +4708,18 @@ export type SessionDetail = {
 	cwd: string | null,
 };
 
+/**
+ *  "The reply a session is drawing changed" — its `MessageDisplay` line
+ *  batches (`session_live_text`), or a state event that ended them. Fired once
+ *  per rendered line batch while Claude streams, so it is kept apart from
+ *  [`SessionStateChanged`] (which refetches every session row) and names its
+ *  session: only a Conversation view showing that session reads again.
+ *  `None` when the nudge named nothing usable — then every shown view reads.
+ */
+export type SessionLiveTextChanged = {
+	sessionId: string | null,
+};
+
 /**  Tokens attributed to one model inside a session, with its approximate cost. */
 export type SessionModelSpend = {
 	/**  Raw model id from the transcript; the frontend maps it to a family label. */
@@ -4279,8 +4769,28 @@ export type SessionState = {
 	agentKind: AgentKind | null,
 	/**  Claude session id (the one santree minted via `--session-id`). */
 	sessionId: string,
-	/**  Derived agent state. */
+	/**
+	 *  Derived agent state: [`Self::recorded_state`] reconciled against the
+	 *  transcript and the terminal's liveness. What the status dot and the
+	 *  header show. It may decay a prompt to idle on quiet alone, so it is
+	 *  never evidence that the agent is at its prompt.
+	 */
 	state: AgentState,
+	/**
+	 *  The state as the hook stored it, before any reconciliation. Idle here
+	 *  was written by a `Stop`, a `SessionStart`, or an `idle_prompt` /
+	 *  `agent_completed` notification, at [`Self::updated_at_ms`].
+	 */
+	recordedState: AgentState,
+	/**
+	 *  When Claude recorded the user's interrupt (Esc), epoch ms: set only
+	 *  while that marker is the newest main-chain record of the transcript
+	 *  and is newer than the stored event. Claude fires no hook for an
+	 *  interrupt, so this is the record's own evidence that the turn ended.
+	 *  `None` when the transcript was not read (a settled row) or says
+	 *  otherwise.
+	 */
+	interruptedAtMs: number | null,
 	/**
 	 *  Raw Claude hook event that last set `state` (e.g. "Stop"). Deliberately a
 	 *  free string, not an enum: it's Claude's vocabulary, not ours, and a new
@@ -4293,7 +4803,12 @@ export type SessionState = {
 	message: string | null,
 	/**  Transcript path on disk, when the payload carried one. */
 	transcriptPath: string | null,
-	/**  Epoch ms the state was last updated — raw, formatted live by the frontend. */
+	/**
+	 *  Epoch ms the hook last wrote the row — the time of
+	 *  [`Self::recorded_state`], as stored; reconciliation never moves it. A
+	 *  repeat of the same idle or working state advances it too (the hook's
+	 *  heartbeat), a repeat of a pending prompt does not.
+	 */
 	updatedAtMs: number | null,
 	/**
 	 *  Repo the session was launched for, joined from `terminal_sessions`.
@@ -4309,6 +4824,27 @@ export type SessionState = {
 	 *  silently collapses them.
 	 */
 	termKey: string | null,
+	/**
+	 *  The dialog Claude is showing, as its own hook described it. Present
+	 *  only while [`Self::recorded_state`] is the state that hook stored with
+	 *  it (`permission` for a [`DialogKind::Permission`], `waiting` for a
+	 *  [`DialogKind::Elicitation`]) and the row is still that write; any
+	 *  later write that takes the row out of the dialog clears it. A row the
+	 *  terminal join reads as exited carries none. Claude only.
+	 */
+	prompt: PendingPrompt | null,
+	/**
+	 *  The permission mode the latest hook payload that carried one named
+	 *  (`default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`, …).
+	 *  Claude fires no hook for a Shift+Tab mode change, so a change shows from
+	 *  the next event that carries the field (a prompt, a tool, a `Stop`).
+	 */
+	permissionMode: string | null,
+	/**
+	 *  The `effort.level` the latest hook payload or status-line render that
+	 *  carried one named (`low`, `medium`, `high`, …).
+	 */
+	effortLevel: string | null,
 };
 
 /**
@@ -4438,6 +4974,13 @@ export type SessionUsageLive = {
 	costUsd: number | null,
 	/**  Epoch ms this row was last written — raw, formatted live by the frontend. */
 	updatedAtMs: number | null,
+	/**  The status line's `output_style.name` (`default`, `Explanatory`, …). */
+	outputStyle: string | null,
+	/**
+	 *  The status line's `vim.mode` (`NORMAL`, `INSERT`, `VISUAL`,
+	 *  `VISUAL LINE`): present only while vim mode is on.
+	 */
+	vimMode: string | null,
 };
 
 /**
@@ -4466,6 +5009,12 @@ export type Settings = {
  *  to a terminal emulator verbatim. `Done` reports the exit status.
  */
 export type StreamEvent = { type: "chunk"; text: string } | { type: "done"; ok: boolean };
+
+export type SubagentLink = {
+	agentId: string,
+	agentType: string | null,
+	status: SubagentStatus,
+};
 
 /**
  *  How a Task subagent ended, read from the *parent* transcript (a subagent's own
@@ -4857,6 +5406,102 @@ export type TicketRef = {
 	projectMilestone: ProjectMilestoneRef | null,
 };
 
+export type TodoItem = {
+	text: string,
+	status: TodoStatus,
+};
+
+export type TodoStatus = "Pending" | "InProgress" | "Completed";
+
+export type TokenUsage = {
+	input: number | null,
+	output: number | null,
+	cacheRead: number | null,
+	cacheWrite: number | null,
+	/**  Codex's reasoning output tokens; Claude's thinking tokens when recorded. */
+	reasoning: number | null,
+};
+
+/**  A tool call and its result. */
+export type ToolCall = {
+	/**
+	 *  The agent's own id for the call (Claude's `tool_use.id`, Codex's
+	 *  `call_id`).
+	 */
+	callId: string,
+	/**
+	 *  The tool's name as the agent called it: `Bash`, `Edit`,
+	 *  `mcp__linear__get_issue`, `exec_command`, `apply_patch`.
+	 */
+	name: string,
+	input: ToolInput,
+	status: ToolStatus,
+	output: ToolOutput | null,
+	durationMs: number | null,
+	/**
+	 *  The subagent this call started (Claude's Agent tool). Its own
+	 *  conversation is read with the same target and this `agent_id`.
+	 */
+	subagent: SubagentLink | null,
+};
+
+/**
+ *  A tool call's arguments, normalized to what the view draws for that kind of
+ *  tool.
+ */
+export type ToolInput = 
+/**  A shell command. */
+{ kind: "command"; command: string; description: string | null } | 
+/**  File writes: Edit, MultiEdit, Write, NotebookEdit, apply_patch. */
+{ kind: "edit"; files: FileChange[] } | 
+/**
+ *  A file read; `lines` is a human range ("lines 40–120") when one was
+ *  asked for.
+ */
+{ kind: "read"; path: string; lines: string | null } | 
+/**  A content or file-name search. */
+{ kind: "search"; pattern: string; scope: string | null } | 
+/**  A page fetch. */
+{ kind: "fetch"; url: string; prompt: string | null } | { kind: "webSearch"; query: string } | 
+/**  A subagent started with a brief. */
+{ kind: "agent"; description: string | null; agentType: string | null; prompt: string } | 
+/**  A plan put to the user for approval. */
+{ kind: "plan"; markdown: string } | 
+/**  A todo list, as the agent last wrote it. */
+{ kind: "todos"; items: TodoItem[] } | 
+/**  Questions put to the user, with their answers once given. */
+{ kind: "questions"; questions: Question[] } | 
+/**
+ *  An MCP tool, or a tool this model does not know: its arguments as
+ *  pretty-printed JSON, bounded.
+ */
+{ kind: "other"; json: string };
+
+export type ToolOutput = {
+	/**
+	 *  What the tool returned, as text: a command's output, a subagent's final
+	 *  report, a fetch's summary. Bounded.
+	 */
+	text: string,
+	truncated: boolean,
+	/**  The tool reported failure. */
+	isError: boolean,
+	/**
+	 *  A failed command's exit code, when its result names one. Claude's Bash
+	 *  result has no field for it: it is read from the `Exit code N` line a
+	 *  failed call's result opens with, so a call that succeeded records none.
+	 */
+	exitCode: number | null,
+};
+
+/**
+ *  `Running` means only that no result is recorded yet; whether the session is
+ *  still live is the hooks' answer, not the record's.
+ */
+export type ToolStatus = "Running" | "Done" | "Failed" | 
+/**  Refused — by the user at a permission prompt, or by policy. */
+"Denied" | "Interrupted";
+
 /**  A comment on a triage issue (markdown body), with threaded replies. */
 export type TriageComment = {
 	/**  Linear comment id — used as the `parentId` when posting a reply. */
@@ -5008,6 +5653,12 @@ export type TriageTicket = {
 	mine: boolean,
 };
 
+export type TurnEnd = {
+	durationMs: number | null,
+	/**  What the turn's API messages cost in tokens, each counted once. */
+	usage: TokenUsage | null,
+};
+
 /**  What the Updates panel shows when a newer version exists. */
 export type UpdateInfo = {
 	/**  The version on offer. */
@@ -5075,6 +5726,29 @@ export type UsageTotals = {
 	cacheWriteTokens: number | null,
 	costUsd: number | null,
 };
+
+export type UserMessage = {
+	text: string,
+	/**
+	 *  Images attached to it. Counted, not carried: the bytes stay in the
+	 *  record.
+	 */
+	images: number,
+	origin: UserOrigin,
+};
+
+export type UserOrigin = 
+/**  Typed at the prompt. */
+"Typed" | 
+/**  Typed while the agent was busy and delivered when it was free. */
+"Queued" | 
+/**  A slash command or shell escape the user ran. */
+"Command" | 
+/**
+ *  Recorded as the user but not typed by them: a background task's
+ *  completion, hook-provided context, a compaction summary.
+ */
+"Injected";
 
 /**
  *  A PR's "Viewed" marks, and — load-bearing — *where they came from*, because the

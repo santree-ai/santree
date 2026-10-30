@@ -25,13 +25,18 @@ export interface StackedPr {
  * empty heading.
  */
 export function inboxOfProject(inbox: ReviewInbox, project: string | null): ReviewInbox {
-  const mine = (prs: ReviewPr[]) => prs.filter((pr) => pr.project === project);
+  return inboxWhere(inbox, (pr) => pr.project === project);
+}
+
+/** The same inbox, holding only the PRs `keep` keeps; a team left with nothing
+ *  drops out, as in {@link inboxOfProject}. */
+export function inboxWhere(inbox: ReviewInbox, keep: (pr: ReviewPr) => boolean): ReviewInbox {
   return {
     ...inbox,
-    mine: mine(inbox.mine),
-    requested: mine(inbox.requested),
+    mine: inbox.mine.filter(keep),
+    requested: inbox.requested.filter(keep),
     teams: inbox.teams
-      .map((team) => ({ ...team, prs: mine(team.prs) }))
+      .map((team) => ({ ...team, prs: team.prs.filter(keep) }))
       .filter((team) => team.prs.length > 0),
   };
 }

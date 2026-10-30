@@ -13,6 +13,11 @@ vi.mock("../../lib/queries", () => ({
   // RepoAvatar asks for a Daedalus project's icon; none here.
   useDaedalusIcon: () => ({ data: null, status: "success" }),
   useRepos: () => ({ data: [{ name: "acme/app", path: "/src/app" }] }),
+  useOfferedRepos: () => ({
+    data: [{ name: "acme/app", path: "/src/app" }],
+    isFetched: true,
+    hidden: () => false,
+  }),
   useDaedalusStatus: () => ({ data: { kind: "Connected" } }),
   useTriageRepo: () => ({
     repo: state.repo,

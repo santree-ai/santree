@@ -323,8 +323,22 @@ pub struct SessionState {
     pub agent_kind: Option<AgentKind>,
     /// Claude session id (the one santree minted via `--session-id`).
     pub session_id: String,
-    /// Derived agent state.
+    /// Derived agent state: [`Self::recorded_state`] reconciled against the
+    /// transcript and the terminal's liveness. What the status dot and the
+    /// header show. It may decay a prompt to idle on quiet alone, so it is
+    /// never evidence that the agent is at its prompt.
     pub state: AgentState,
+    /// The state as the hook stored it, before any reconciliation. Idle here
+    /// was written by a `Stop`, a `SessionStart`, or an `idle_prompt` /
+    /// `agent_completed` notification, at [`Self::updated_at_ms`].
+    pub recorded_state: AgentState,
+    /// When Claude recorded the user's interrupt (Esc), epoch ms: set only
+    /// while that marker is the newest main-chain record of the transcript
+    /// and is newer than the stored event. Claude fires no hook for an
+    /// interrupt, so this is the record's own evidence that the turn ended.
+    /// `None` when the transcript was not read (a settled row) or says
+    /// otherwise.
+    pub interrupted_at_ms: Option<f64>,
     /// Raw Claude hook event that last set `state` (e.g. "Stop"). Deliberately a
     /// free string, not an enum: it's Claude's vocabulary, not ours, and a new
     /// event name from a CLI upgrade must not fail to deserialize.
@@ -335,7 +349,10 @@ pub struct SessionState {
     pub message: Option<String>,
     /// Transcript path on disk, when the payload carried one.
     pub transcript_path: Option<String>,
-    /// Epoch ms the state was last updated — raw, formatted live by the frontend.
+    /// Epoch ms the hook last wrote the row — the time of
+    /// [`Self::recorded_state`], as stored; reconciliation never moves it. A
+    /// repeat of the same idle or working state advances it too (the hook's
+    /// heartbeat), a repeat of a pending prompt does not.
     pub updated_at_ms: f64,
     /// Repo the session was launched for, joined from `terminal_sessions`.
     /// `None` for a session santree didn't register a logical terminal for.
@@ -347,6 +364,221 @@ pub struct SessionState {
     /// investigation both running at the repo root), so a cwd-keyed correlation
     /// silently collapses them.
     pub term_key: Option<String>,
+    /// The dialog Claude is showing, as its own hook described it. Present
+    /// only while [`Self::recorded_state`] is the state that hook stored with
+    /// it (`permission` for a [`DialogKind::Permission`], `waiting` for a
+    /// [`DialogKind::Elicitation`]) and the row is still that write; any
+    /// later write that takes the row out of the dialog clears it. A row the
+    /// terminal join reads as exited carries none. Claude only.
+    pub prompt: Option<PendingPrompt>,
+    /// The permission mode the latest hook payload that carried one named
+    /// (`default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`, …).
+    /// Claude fires no hook for a Shift+Tab mode change, so a change shows from
+    /// the next event that carries the field (a prompt, a tool, a `Stop`).
+    pub permission_mode: Option<String>,
+    /// The `effort.level` the latest hook payload or status-line render that
+    /// carried one named (`low`, `medium`, `high`, …).
+    pub effort_level: Option<String>,
+}
+
+/// Which dialog a [`PendingPrompt`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum DialogKind {
+    /// Claude's `PermissionRequest`: a tool's permission prompt, a question
+    /// (`AskUserQuestion`) or a plan to approve (`ExitPlanMode`).
+    Permission,
+    /// An MCP server's `Elicitation`: a form to fill or a URL to open.
+    Elicitation,
+}
+
+impl DialogKind {
+    /// The wire form, in `session_state.pending_kind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Permission => "permission",
+            Self::Elicitation => "elicitation",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "permission" => Some(Self::Permission),
+            "elicitation" => Some(Self::Elicitation),
+            _ => None,
+        }
+    }
+
+    /// The state a row holds while this dialog is up.
+    pub fn state(self) -> AgentState {
+        match self {
+            Self::Permission => AgentState::Permission,
+            Self::Elicitation => AgentState::Waiting,
+        }
+    }
+}
+
+/// The dialog Claude is showing, from the hook that announced it: what a card
+/// can draw without reading the screen.
+///
+/// The JSON fields are JSON *text*, always valid JSON (parse them with
+/// `JSON.parse`): the payload's own shape varies per tool, so it is passed
+/// through as Claude sent it rather than modelled here. A string inside that
+/// would push the whole past the cap is cut short instead, and [`Self::truncated`]
+/// says so.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPrompt {
+    pub kind: DialogKind,
+    /// The tool asking: `Bash`, `Edit`, `Write`, `WebFetch`, `AskUserQuestion`,
+    /// `ExitPlanMode`, `mcp__<server>__<tool>`, … `None` for an elicitation.
+    pub tool_name: Option<String>,
+    /// For a permission request, its `tool_input` (`{command, description}`,
+    /// `{file_path, old_string, new_string, replace_all}`, `{questions}`,
+    /// `{plan, planFilePath}`, …). For an elicitation, its own fields:
+    /// `{message, mode, requested_schema}` for a form, `{message, mode, url,
+    /// elicitation_id}` for a URL.
+    pub tool_input: String,
+    /// `permission_suggestions`, a JSON array, when the payload carried one —
+    /// possibly `[]`, which Claude sends when it has no rule to offer (and then
+    /// the dialog has no "don't ask again" row). `None` for questions, plans
+    /// and elicitations, which carry none.
+    pub suggestions: Option<String>,
+    /// The MCP server behind the dialog: a permission request's
+    /// `mcp_server.name`, an elicitation's `mcp_server_name`.
+    pub mcp_server: Option<String>,
+    /// The subagent that asked (`agent_id`, `agent_type`); `None` when the
+    /// session's own thread did.
+    pub agent_id: Option<String>,
+    pub agent_type: Option<String>,
+    /// The permission mode the dialog was raised under.
+    pub permission_mode: Option<String>,
+    /// The turn's `prompt_id`; a background subagent's request carries the id
+    /// of the turn that launched it.
+    pub prompt_id: Option<String>,
+    /// When the hook recorded the dialog, epoch ms — the row's
+    /// [`SessionState::updated_at_ms`] as of that write. A new dialog (the
+    /// next of two parallel tool calls, a repeat) has a new one.
+    pub recorded_at_ms: f64,
+    /// Part of the input or the suggestions was cut to fit the cap.
+    pub truncated: bool,
+    /// The dialog was recorded while an earlier one was still open: parallel
+    /// tool calls (two `Read`s, two read-only commands) and a subagent asking
+    /// beside the main thread each fire their `PermissionRequest` at once,
+    /// Claude shows them one at a time (`1 of 2`), and the one on screen may
+    /// not be this one. The ones behind it fire nothing when they come
+    /// forward. A dialog that follows the previous one's close reads false;
+    /// one whose hook lands before any sign of that close reads true, which
+    /// costs only the card.
+    pub stacked: bool,
+    /// When the dialog left the screen, epoch ms on this Mac's clock (the one
+    /// the hook stamps with), by the latest of Claude's own signs
+    /// ([`DialogMarks::closed_at`]): a status-line render that started at
+    /// least 1 s after it was recorded, or, for one that isn't
+    /// [`Self::stacked`], its own tool call finishing (never on Daedalus by a
+    /// render). `None` while it is open. Answered in the view or in the
+    /// terminal alike. Never for an elicitation. The row keeps its state until
+    /// the next hook moves it, so this is what says the dialog is gone in the
+    /// meantime. For display (the card, the dot): a render's start is timing,
+    /// and one Claude launched just before this dialog drew can start late
+    /// under load and read as its close while it is still up. A reader that
+    /// would type goes by [`Self::call_ended_at_ms`].
+    pub closed_at_ms: Option<f64>,
+    /// When the dialog's own tool call finished (its `PostToolUse`,
+    /// `PostToolUseFailure`, or a `PostToolBatch` that lists it), epoch ms on
+    /// this Mac's clock, for a dialog that isn't [`Self::stacked`]: behind a
+    /// stack, the call that finished can be the one that was in front.
+    /// Evidence the dialog was answered, not timing — a status-line render
+    /// never sets it. `None` until then, and always for an elicitation. A
+    /// reader that would type still waits before trusting it (~250 ms with no
+    /// newer [`Self::recorded_at_ms`]): a dialog that follows is on screen
+    /// 45-70 ms before its own hook lands and replaces this one (CLI 2.1.312,
+    /// probed).
+    pub call_ended_at_ms: Option<f64>,
+}
+
+/// What has been seen of the dialog on record since it was recorded: the one
+/// reading of whether it left the screen. The hook decides a new dialog's
+/// `stacked` by it (stacked = the dialog on record is still open) and the app
+/// reads a dialog's [`PendingPrompt::closed_at_ms`] and the session's state by it,
+/// so the writer and the reader can't disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialogMarks {
+    pub kind: DialogKind,
+    /// [`PendingPrompt::stacked`], as stored with the dialog.
+    pub stacked: bool,
+    /// The start of the first status-line render well after the dialog was
+    /// recorded (santree-hook's `RENDER_MARGIN_MS`), epoch ms
+    /// (`session_state.pending_rendered_at_ms`).
+    pub rendered_at_ms: Option<i64>,
+    /// When the dialog's own tool call finished, epoch ms
+    /// (`session_state.pending_resolved_at_ms`).
+    pub resolved_at_ms: Option<i64>,
+}
+
+impl DialogMarks {
+    /// When the dialog left the screen, as far as Claude's signs say; `None`
+    /// while it is open. Only a permission dialog closes this way (a question
+    /// and a plan included):
+    ///
+    /// - by a status-line render: Claude renders none while any dialog is up
+    ///   (CLI 2.1.312: none in 35.8 s of stacked dialogs with a 15 s refresh,
+    ///   nor during a question or a plan) and renders 65-120 ms after an
+    ///   answer when no dialog follows;
+    /// - by its own call finishing, unless it is stacked: behind a stack, the
+    ///   call that finished can be the one that was in front, answered as this
+    ///   one came forward.
+    ///
+    /// An elicitation closes by neither (neither was probed for it, and a
+    /// wrong "closed" lets an Enter land on an open form): only its answer
+    /// (`ElicitationResult`) or another real transition takes the row out of
+    /// it.
+    pub fn closed_at(&self) -> Option<i64> {
+        if self.kind != DialogKind::Permission {
+            return None;
+        }
+        self.rendered_at_ms.max(self.call_ended_at())
+    }
+
+    /// When the dialog's own call finished, for a permission dialog that
+    /// isn't stacked: the half of [`Self::closed_at`] no timing can fake
+    /// ([`PendingPrompt::call_ended_at_ms`]).
+    pub fn call_ended_at(&self) -> Option<i64> {
+        self.resolved_at_ms
+            .filter(|_| self.kind == DialogKind::Permission && !self.stacked)
+    }
+}
+
+/// The reply Claude is drawing in a session's terminal right now, from its
+/// `MessageDisplay` hook: the newest assistant message of the session's own
+/// thread, line by line, a few seconds before the transcript records it.
+/// Display only. Registered only while Settings → Experimental →
+/// Conversation view is on, and never on Daedalus.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveText {
+    pub session_id: String,
+    /// The turn's `prompt_id`, as the hooks' other payloads carry it.
+    pub prompt_id: Option<String>,
+    /// Claude's `turn_id`: the same for every message of one turn.
+    pub turn_id: Option<String>,
+    /// Claude's id for the message. It is not the API message id and nothing
+    /// in the transcript names it.
+    pub message_id: String,
+    /// The message so far: its line batches joined in order, up to the first
+    /// one that has not landed yet. Whole lines, except the last batch's tail.
+    pub text: String,
+    /// The `index` of the last batch in `text`.
+    pub index: f64,
+    /// `text` ends with the message's final batch: the message is complete.
+    #[serde(rename = "final")]
+    pub complete: bool,
+    /// The start of the message was dropped to keep it under the cap.
+    pub truncated: bool,
+    /// When the message's first batch kept here fired, epoch ms.
+    pub started_at_ms: f64,
+    /// When its newest batch fired, epoch ms.
+    pub updated_at_ms: f64,
 }
 
 /// Live token/context usage for one Claude session, captured from Claude's own
@@ -373,6 +605,11 @@ pub struct SessionUsageLive {
     pub cost_usd: f64,
     /// Epoch ms this row was last written — raw, formatted live by the frontend.
     pub updated_at_ms: f64,
+    /// The status line's `output_style.name` (`default`, `Explanatory`, …).
+    pub output_style: Option<String>,
+    /// The status line's `vim.mode` (`NORMAL`, `INSERT`, `VISUAL`,
+    /// `VISUAL LINE`): present only while vim mode is on.
+    pub vim_mode: Option<String>,
 }
 
 /// One of Claude's subscription rate-limit windows, as its own status line last
@@ -581,6 +818,8 @@ impl RepoLocation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 #[serde(tag = "kind")]
 pub enum DaedalusLink {
+    /// Settings → Experimental → Daedalus is off: santree doesn't link.
+    Off,
     /// No Daedalus agent on this machine.
     AgentMissing,
     /// The agent here is older than santree's socket in it.
@@ -3175,6 +3414,20 @@ impl Default for Settings {
     }
 }
 
+/// A switch on Settings → Experimental: a feature santree ships turned off.
+/// While a switch is off its feature is off wherever it reaches, not only on
+/// its settings page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum ExperimentalFeature {
+    /// Daedalus projects, the link to the Daedalus agent on this Mac, and this
+    /// Mac's settings through it (docs/remote.md).
+    Daedalus,
+    /// The English tutor on the Claude sessions santree starts.
+    EnglishTutor,
+    /// A Claude tab's Conversation face (docs/conversation.md).
+    Conversation,
+}
+
 /// Aggregated Claude token counts for a bucket (a period, a model, or a session).
 /// Every count is a raw number the frontend formats; the four token classes are
 /// kept apart because they're priced differently. `cost_usd` is *derived* from a
@@ -3438,7 +3691,9 @@ pub struct TerminalUsage {
 /// slow, and a CLI launched through an interpreter is not recognisable by
 /// `argv[0]`. Nothing may read an absent entry as a claim that a pane is a plain
 /// shell, and nothing may substitute a default provider for one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
+///
+/// Only `PartialEq` (not `Eq`) because of the `f64` start time.
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentProcess {
     /// The `term_key` the pane's PTY was opened under.
@@ -3452,6 +3707,18 @@ pub struct AgentProcess {
     pub pane_agent_kind: Option<AgentKind>,
     /// Which agent the process table actually sees in the pane's foreground.
     pub agent_kind: AgentKind,
+    /// The pane this answer is about: the PTY session id `terminal_open` (or
+    /// an attach) returned for it. A pane that closed and reopened under the
+    /// same address is another pane, so an answer about the old one must not
+    /// be read for the new one. `None` for a Daedalus pane.
+    pub pane_id: Option<u32>,
+    /// When that foreground agent process started, epoch ms (this Mac's
+    /// clock, the one the hooks stamp rows with). Anything a session's hooks
+    /// or transcript recorded before it came from an earlier process. A
+    /// santree launch `exec`s the CLI, which keeps the pane root's process,
+    /// so for those it is when the pane was spawned. `None` for a Daedalus
+    /// pane, or when the kernel could not answer.
+    pub started_at_ms: Option<f64>,
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ mod commit_draft;
 #[cfg(test)]
 mod compliance;
 mod connection;
+mod conversation;
 mod daedalus;
 mod db;
 mod diagnostics;
@@ -45,6 +46,7 @@ mod pricing;
 mod proc_table;
 mod prompts;
 mod provider;
+mod record_file;
 mod repo;
 mod resources;
 mod review_ai;
@@ -99,6 +101,7 @@ fn specta_builder() -> AppBuilder {
             browser::BrowserOpened,
             browser::BrowserPointerDown,
             browser::BrowserShortcut,
+            conversation::ConversationChanged,
             daedalus::host::DaedalusLinkChanged,
             git_watch::WorktreeChanged,
             pr::WorktreeBasesChanged,
@@ -107,6 +110,7 @@ fn specta_builder() -> AppBuilder {
             session_signal::ReviewAiChanged,
             session_signal::SessionStateChanged,
             session_signal::SessionUsageChanged,
+            session_signal::SessionLiveTextChanged,
             usage::UsageChanged,
             usage::UsageProgress,
             update::UpdateProgress
@@ -154,6 +158,7 @@ fn specta_builder() -> AppBuilder {
             commands::worktree_sessions,
             commands::worktree_session_detail,
             commands::worktree_session_subagents,
+            commands::conversation_read,
             commands::reveal_worktree_session_transcript,
             commands::resume_worktree_session,
             commands::check_tab_resume,
@@ -254,6 +259,7 @@ fn specta_builder() -> AppBuilder {
             commands::run_english_analysis,
             commands::session_states,
             commands::session_usage_live,
+            commands::session_live_text,
             commands::claude_rate_limits,
             commands::claude_fetch_usage,
             commands::claude_global_capture_status,
@@ -270,6 +276,7 @@ fn specta_builder() -> AppBuilder {
             commands::claude_models,
             commands::get_setting,
             commands::set_setting,
+            commands::set_experimental,
             commands::resolve_setting,
             commands::list_prompts,
             commands::set_prompt,
@@ -772,30 +779,28 @@ pub fn run() {
             app.manage(keep_awake);
 
             // The link to Daedalus through the Daedalus agent on this machine,
-            // and the relay that applies the hooks agents fire there. It starts
-            // once the runtime is up, resuming the hook queue where the last
-            // run acked it; without an agent it just reads AgentMissing.
+            // and the relay that applies the hooks agents fire there. Only
+            // while Settings → Experimental → Daedalus is on: then it starts
+            // here, resuming the hook queue where the last run acked it, and
+            // without an agent it just reads AgentMissing. Off, nothing
+            // connects and the state reads Off. Settled before the first frame
+            // can ask, so neither is ever read as the other.
             let daedalus_link = daedalus::host::DaedalusHost::default();
             daedalus_link.start(
                 app.handle(),
                 db.clone(),
                 data_dir.join("santree.db").to_string_lossy().into_owned(),
             );
+            tauri::async_runtime::block_on(async {
+                let daedalus = santree_core::domain::ExperimentalFeature::Daedalus;
+                let on = settings::experimental(&db, daedalus).await;
+                daedalus_link.apply(&db, on).await;
+            });
             app.manage(daedalus_link);
             // Daedalus projects' app icons, kept beside the database.
             app.manage(daedalus::icons::Icons::new(data_dir.join("daedalus-icons")));
             // The agent's own socket, for this Mac's settings (Settings › Daedalus).
             app.manage(santree_remote_client::AgentControl::new());
-            {
-                let (app, db) = (app.handle().clone(), db.clone());
-                tauri::async_runtime::spawn(async move {
-                    let cursor = daedalus::host::saved_cursor(&db).await.unwrap_or_else(|e| {
-                        log::warn!("daedalus: reading the hook cursor failed: {e:#}");
-                        None
-                    });
-                    app.state::<daedalus::host::DaedalusHost>().resume(cursor);
-                });
-            }
 
             app.manage(db);
 
@@ -856,6 +861,10 @@ pub fn run() {
             let usage_watcher = usage::UsageWatcher::default();
             usage_watcher.start(app.handle());
             app.manage(usage_watcher);
+
+            // The Conversation view's reader: its warm parses, and the watch
+            // that keeps an open conversation live (started by the first read).
+            app.manage(conversation::Conversations::new(app.handle()));
 
             // Listen on a Unix socket that the `santree-hook` binary nudges after
             // each session-state write, so the frontend refreshes in realtime.

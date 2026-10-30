@@ -8,13 +8,43 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use santree_core::config;
-use santree_core::domain::{AgentAuth, AgentKind, BinaryStatus, Settings};
+use santree_core::domain::{AgentAuth, AgentKind, BinaryStatus, ExperimentalFeature, Settings};
 
 use crate::db::Db;
 
 /// The `settings` key under which the full [`Settings`] blob is persisted (scope `"app"`).
 const SETTINGS_KEY: &str = "settings";
 const HELPER_AGENTS_MIGRATION_KEY: &str = "migration.helper_agents_v1";
+
+/// What every Settings → Experimental switch's key starts with.
+const EXPERIMENTAL_PREFIX: &str = "experimental_";
+
+/// The app-scope row a Settings → Experimental switch is kept in. Every switch
+/// ships off: a fresh install has no row, and only `"true"` turns one on (see
+/// [`experimental`]). `EXPERIMENTAL_KEYS` in `src/lib/queries.ts` is the same
+/// table, so the two have to agree.
+pub fn experimental_key(feature: ExperimentalFeature) -> &'static str {
+    match feature {
+        ExperimentalFeature::Daedalus => "experimental_daedalus",
+        ExperimentalFeature::EnglishTutor => "experimental_english_tutor",
+        ExperimentalFeature::Conversation => "experimental_conversation",
+    }
+}
+
+/// Whether `feature`'s switch is on. A row that can't be read counts as off:
+/// an experimental feature never runs on a guess.
+pub async fn experimental(db: &Db, feature: ExperimentalFeature) -> bool {
+    matches!(
+        get(db, "app", experimental_key(feature)).await,
+        Ok(Some(v)) if v == "true"
+    )
+}
+
+/// Write `feature`'s switch. Only the row: whatever the switch has to start or
+/// stop right away (the Daedalus link) is the caller's to apply.
+pub async fn set_experimental(db: &Db, feature: ExperimentalFeature, on: bool) -> Result<()> {
+    set(db, "app", experimental_key(feature), Some(on.to_string())).await
+}
 
 /// Gate the *IPC* key-value surface (`get_setting` / `set_setting`), whose scope and
 /// key both arrive from the webview. Internal callers (`pricing`'s `price_cache`
@@ -51,6 +81,19 @@ pub fn validate_user_scope(scope: &str, key: &str) -> Result<()> {
     // command ([`set_keep_awake`]).
     if key == crate::awake::KEEP_AWAKE_KEY {
         anyhow::bail!("the keep-awake hold must be written through set_keep_awake");
+    }
+    Ok(())
+}
+
+/// What `set_setting` checks: [`validate_user_scope`], and that the key isn't a
+/// Settings → Experimental switch. The Daedalus switch starts and stops the link
+/// as it is written, so a row written here would only take effect at the next
+/// launch; every switch has one writer, `set_experimental`. Reading one stays
+/// open, because `get_setting` is how `useExperimental` reads it.
+pub fn validate_user_write(scope: &str, key: &str) -> Result<()> {
+    validate_user_scope(scope, key)?;
+    if key.starts_with(EXPERIMENTAL_PREFIX) {
+        anyhow::bail!("experimental switches must be written through set_experimental");
     }
     Ok(())
 }
@@ -758,6 +801,13 @@ mod tests {
         assert!(validate_user_scope("repo:acme/app", SETTINGS_KEY).is_err());
         assert!(validate_user_scope("app", &binary_path_key("gh")).is_err());
         assert!(validate_user_scope("app", "binary_path.claude").is_err());
+        // Nor is writing a Settings → Experimental switch: written here, the
+        // Daedalus one would leave the link as it was until the next launch.
+        // Reading one is allowed: refusing the read turned every switch off
+        // behind a red toast, since `useExperimental` reads through `get_setting`.
+        let daedalus = experimental_key(ExperimentalFeature::Daedalus);
+        assert!(validate_user_write("app", daedalus).is_err());
+        assert!(validate_user_scope("app", daedalus).is_ok());
         // Neighbouring keys are unaffected.
         assert!(validate_user_scope("app", "binary_pathological").is_ok());
     }

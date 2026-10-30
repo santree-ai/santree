@@ -443,11 +443,13 @@ async fn a_restarted_local_server_loses_the_pane_and_never_attaches_to_a_strange
         .iter()
         .all(|(a, _)| a.term_key != "tree:A:tab:1"));
 
-    // Typing goes nowhere; a view attaching later is told the same; closing it
-    // drops the pane without touching anyone's session.
-    terminals
+    // Typing is refused, not taken and dropped — a caller told it arrived would
+    // treat it as typed (the composer clears its draft); a view attaching later
+    // is told the same; closing it drops the pane without touching anyone's
+    // session.
+    assert!(terminals
         .write(id, crate::terminal::Keystrokes::typed("echo nope\n"))
-        .unwrap();
+        .is_err());
     let later = Screen::new();
     terminals
         .attach(id, Anchor::Unknown, later.sinks())

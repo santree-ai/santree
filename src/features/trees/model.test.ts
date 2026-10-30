@@ -74,6 +74,8 @@ describe("effectiveSessionState", () => {
     agentKind: "Claude",
     sessionId: "s1",
     state,
+    recordedState: state,
+    interruptedAtMs: null,
     event: "x",
     cwd: "/tmp/x",
     message: null,
@@ -81,6 +83,9 @@ describe("effectiveSessionState", () => {
     updatedAtMs: 0,
     repo: "canary",
     termKey: "tree:AK-1",
+    prompt: null,
+    permissionMode: null,
+    effortLevel: null,
   });
 
   it("shows the hook state for a live session", () => {

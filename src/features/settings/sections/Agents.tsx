@@ -449,9 +449,10 @@ function ClaudeVersionBlock() {
   );
 }
 
-/** Claude-only launch/terminal behavior toggles: Remote Control naming, launch
- *  with `--chrome` (browser control), and two usage switches that are not one
- *  setting in two halves. santree layers its own status line onto every
+/** Claude-only behavior: Remote Control naming, launch with `--chrome` (browser
+ *  control), and two usage switches that are not one setting in two halves.
+ *  (Which face its tabs open on lives with the Conversation view's switch, on
+ *  Settings → Experimental.) santree layers its own status line onto every
  *  session it launches (leaving the user's `~/.claude/settings.json` alone), so
  *  those sessions always report; "show inline context usage" only gates the
  *  status bar's segment for the focused one (see `SessionSegment`). The global

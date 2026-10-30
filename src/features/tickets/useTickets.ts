@@ -29,6 +29,7 @@ import {
 } from "../../lib/attention";
 import {
   useConnections,
+  useOfferedRepos,
   useRepos,
   useTasksByRepo,
   useWorktreePrsByRepo,
@@ -369,7 +370,9 @@ export function useTickets(
   teams: string[],
   source: string | null = null,
 ): TicketsData {
-  const { data: repoList } = useRepos();
+  // The projects santree offers: a Daedalus one's tickets are left out while
+  // Settings → Experimental hides it, since none of them could start there.
+  const { data: repoList } = useOfferedRepos();
   const repos = useMemo(() => (repoList ?? []).map((r) => r.name), [repoList]);
   // The connection the repo's queries actually go to is the fold's key. A repo
   // linked to none has no tickets, so it keeps a key of its own.

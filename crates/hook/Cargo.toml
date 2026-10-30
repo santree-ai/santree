@@ -23,3 +23,5 @@ santree-core = { path = "../core" }
 # A one-shot insert on a current-thread runtime.
 sqlx = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
+# A permission dialog's call identity (`call_id`): the app already links it.
+sha2 = "0.10"

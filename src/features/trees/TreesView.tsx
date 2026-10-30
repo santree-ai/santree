@@ -24,6 +24,7 @@ import { linkNotice, SANTREE_OFF } from "../../lib/daedalusLink";
 import { useDaedalusStatus, usePrSummary, useWorktreeTabs } from "../../lib/queries";
 import { useAppUi } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
+import { ConversationView } from "../conversation/ConversationView";
 import type { FileFocus } from "../reviews/model";
 import { PrPage, PrPageSkeleton, type PrTab } from "../reviews/PrPage";
 import { WebTabPane } from "../web/WebTabPane";
@@ -230,6 +231,7 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
     selectedFile,
     prViewOpen,
     issueViewOpen,
+    openConversation,
     split,
   } = useTrees();
 
@@ -240,10 +242,10 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
   // return. Terminal rows are plain login shells; agent rows (a started task's
   // included) and review rows carry their own resumable agent session.
   //
-  // The File / Setup / check log / PR / ticket views stay mounted while open —
-  // the workspace hides the ones not showing — so a running setup isn't
-  // restarted, and a long diff's or thread's scroll and expansions survive a
-  // switch.
+  // The File / Setup / check log / PR / ticket / past-conversation views stay
+  // mounted while open — the workspace hides the ones not showing — so a
+  // running setup isn't restarted, and a long diff's or thread's scroll and
+  // expansions survive a switch.
   const renderTab = (tab: MainTab, visible: boolean) => {
     if (tab.startsWith("tab:")) {
       const t = tabs.find((row) => extraTab(row.id) === tab);
@@ -276,6 +278,20 @@ function WorktreePane({ worktree }: { worktree: Worktree }) {
       case "issueView":
         return issueViewOpen ? (
           <IssuePage repo={repo} ticketId={worktree.ticketId ?? worktree.id} />
+        ) : null;
+      case "conversation":
+        // Read-only: a session from this worktree's history, by the same
+        // validated listing Session history reads — no live tab, no composer.
+        return openConversation ? (
+          <ConversationView
+            key={openConversation.sessionId}
+            target={{
+              kind: "session",
+              repo,
+              issueId: worktree.id,
+              sessionId: openConversation.sessionId,
+            }}
+          />
         ) : null;
     }
   };

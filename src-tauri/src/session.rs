@@ -37,18 +37,30 @@ use crate::sessions::{LiveTerminal, Liveness};
 /// directory by replacing every non-alphanumeric character with `-` (verified
 /// against real transcripts, e.g. `…/acme/.santree/worktrees/AK-1` becomes
 /// `…-acme--santree-worktrees-AK-1`, and `…/dev/my_repo` becomes
-/// `…-dev-my-repo`).
-fn transcript_path(home: &Path, cwd: &str, session_id: &str) -> PathBuf {
-    home.join(".claude/projects")
-        .join(project_slug(cwd))
-        .join(format!("{session_id}.jsonl"))
+/// `…-dev-my-repo`). `None` for an id that names no transcript ([`transcript_file`]).
+fn transcript_path(home: &Path, cwd: &str, session_id: &str) -> Option<PathBuf> {
+    transcript_file(&home.join(".claude/projects"), cwd, session_id)
+}
+
+/// `<projects>/<escaped cwd>/<session_id>.jsonl` under one of Claude's
+/// `projects` roots, or `None` when `session_id` is not a session id's shape.
+///
+/// The ids joined here are read from santree's database, and `santree-hook`
+/// stores whatever its payload said — any process running as the user can run
+/// it. Joined unchecked, a `../` or an absolute id names a file anywhere.
+pub(crate) fn transcript_file(projects: &Path, cwd: &str, session_id: &str) -> Option<PathBuf> {
+    is_session_id(session_id).then(|| {
+        projects
+            .join(project_slug(cwd))
+            .join(format!("{session_id}.jsonl"))
+    })
 }
 
 /// Whether `id` has the shape of a provider session id: a hyphenated UUID, which
 /// is what both providers use — the id santree mints for Claude's `--session-id`,
 /// and the thread id Codex mints for itself. An id from outside santree (a hook
-/// relayed from Daedalus) is checked against it before it is stored, since a
-/// stored id is later joined into transcript paths ([`transcript_path`]).
+/// relayed from Daedalus) is checked against it before it is stored, and every
+/// stored id again before it is joined into a transcript path ([`transcript_file`]).
 pub(crate) fn is_session_id(id: &str) -> bool {
     // 36 characters is the hyphenated form only: `try_parse` also takes the
     // braced, urn and bare-hex spellings, none of which a provider emits.
@@ -121,7 +133,9 @@ async fn transcript_presence(home: Option<&Path>, cwd: &str, session_id: &str) -
             "HOME is not set, so Claude's transcripts cannot be located".into(),
         );
     };
-    let path = transcript_path(home, cwd, session_id);
+    let Some(path) = transcript_path(home, cwd, session_id) else {
+        return RecordPresence::Unknown(format!("{session_id:?} is not a session id"));
+    };
     tokio::task::spawn_blocking(move || RecordPresence::of(&path))
         .await
         // A cancelled or panicked stat is another way of not knowing — the old
@@ -777,7 +791,7 @@ pub(crate) fn merge_history(
 ///
 /// `Ok(None)` when the session is a Codex one (no Claude transcript exists) or
 /// its transcript has since been pruned — an empty result, not an error.
-async fn listed_transcript(
+pub(crate) async fn listed_transcript(
     db: &Db,
     repo: &str,
     issue_id: &str,
@@ -1199,7 +1213,7 @@ pub async fn worktree_has_transcripts(
     // conversation over one the user still has (see [`RecordPresence`]).
     Ok(tokio::task::spawn_blocking(move || {
         rows.iter()
-            .any(|(sid, cwd, _)| transcript_path(&home, cwd, sid).exists())
+            .any(|(sid, cwd, _)| transcript_path(&home, cwd, sid).is_some_and(|path| path.exists()))
     })
     .await?)
 }
@@ -1258,9 +1272,9 @@ fn read_transcript(path: &Path) -> Option<String> {
 fn build_transcript_context(home: &Path, rows: &[(String, String, String)]) -> String {
     let mut sections = Vec::new();
     for (session_id, cwd, term_key) in rows {
-        let path = transcript_path(home, cwd, session_id);
-        let Some(raw) = read_transcript(&path) else {
-            continue; // pruned or unreadable transcript — skip it
+        let Some(raw) = transcript_path(home, cwd, session_id).and_then(|p| read_transcript(&p))
+        else {
+            continue; // no transcript by that id, pruned or unreadable — skip it
         };
         let turns: Vec<String> = raw.lines().filter_map(transcript_turn).collect();
         if turns.is_empty() {
@@ -1424,6 +1438,7 @@ mod tests {
 
         // Three aged-out Claude rows and one recent one. `keeps-transcript` still
         // has its transcript on disk; `recent` is young enough to be out of scope.
+        let kept = Uuid::new_v4().to_string();
         for (key, age) in [
             ("triage:AK-1", Some("-90 days")),
             ("triage:AK-2", Some("-31 days")),
@@ -1439,11 +1454,15 @@ mod tests {
                          VALUES (?, ?, ?, ?)"
                     .into(),
             };
+            let session_id = match key {
+                "keeps-transcript" => kept.clone(),
+                _ => Uuid::new_v4().to_string(),
+            };
             sqlx::query(&sql)
                 .bind("repo")
                 .bind(key)
                 .bind(cwd)
-                .bind(format!("sid-{key}"))
+                .bind(session_id)
                 .execute(&db)
                 .await
                 .unwrap();
@@ -1460,7 +1479,7 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        let live = transcript_path(&home, cwd, "sid-keeps-transcript");
+        let live = transcript_path(&home, cwd, &kept).unwrap();
         std::fs::create_dir_all(live.parent().unwrap()).unwrap();
         std::fs::write(&live, "{}").unwrap();
 
@@ -1696,7 +1715,7 @@ mod tests {
         );
 
         // Drop the transcript Claude would write, then a reopen resumes it.
-        let path = transcript_path(&home, cwd, &session_id);
+        let path = transcript_path(&home, cwd, &session_id).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{}").unwrap();
         assert_eq!(
@@ -1777,11 +1796,107 @@ mod tests {
         // not just '/' and '.' — a repo path like `.../dev/my_repo` must map to
         // `...-dev-my-repo`, matching what Claude actually writes to disk.
         let home = Path::new("/home/user");
-        let path = transcript_path(home, "/Users/x/dev/my_repo", "sess-id");
-        assert_eq!(
-            path,
-            Path::new("/home/user/.claude/projects/-Users-x-dev-my-repo/sess-id.jsonl")
-        );
+        let sid = "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f";
+        let path = transcript_path(home, "/Users/x/dev/my_repo", sid);
+        let dir = Path::new("/home/user/.claude/projects/-Users-x-dev-my-repo");
+        assert_eq!(path, Some(dir.join(format!("{sid}.jsonl"))));
+    }
+
+    /// The ids a transcript path is built from are read from santree's database,
+    /// where `santree-hook` stores whatever its payload said — and any process
+    /// running as the user can run it. One shaped like a path must reach no file
+    /// at any site that joins it, even with a transcript waiting where it points.
+    #[tokio::test]
+    async fn a_stored_session_id_shaped_like_a_path_reaches_no_file() {
+        let base =
+            std::env::temp_dir().join(format!("santree-session-hostile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let projects = home.join(".claude/projects");
+        let db = crate::db::init(base.join("test.db")).await.unwrap();
+        let worktree = base.join("work").join("AK-1");
+        let cwd = worktree.to_string_lossy().into_owned();
+        let own = projects.join(project_slug(&cwd));
+        std::fs::create_dir_all(&own).unwrap();
+
+        for (n, id) in [
+            // Another project's transcript.
+            "../-elsewhere/9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f".to_string(),
+            // Out of the transcript tree.
+            "../../../planted".to_string(),
+            // An absolute id replaces the path it is joined onto.
+            base.join("absolute").to_string_lossy().into_owned(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let target = own.join(format!("{id}.jsonl"));
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            let line =
+                format!(r#"{{"type":"user","cwd":"{cwd}","message":{{"content":"PLANTED"}}}}"#);
+            std::fs::write(&target, line + "\n").unwrap();
+            assert!(
+                target.is_file(),
+                "{id}: planted where an unchecked join lands"
+            );
+            let term_key = format!("tree:AK-1:tab:{n}");
+            sqlx::query(
+                "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id)
+                 VALUES ('repo', ?, ?, ?)",
+            )
+            .bind(&term_key)
+            .bind(&cwd)
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+
+            // A reopen would `--resume` it; adopting it would bind it to a tab.
+            let reopened = resolve(
+                &db,
+                "repo",
+                &term_key,
+                &cwd,
+                Some(&home),
+                "/bin/claude",
+                false,
+                None,
+            )
+            .await;
+            assert!(reopened.is_err(), "{id}: {reopened:?}");
+            let request = ResumeRequest {
+                repo: "repo",
+                term_key: "tree:AK-1:tab:new",
+                session_id: id,
+                agent_kind: AgentKind::Claude,
+                worktree: &worktree,
+                home: Some(&home),
+                sessions_root: None,
+            };
+            let listing = [listed(id, AgentKind::Claude, 1)];
+            assert!(adopt(&db, &listing, request).await.is_err(), "{id}");
+            // The PR dialog's transcripts checkbox, and the text a PR draft reads.
+            assert!(
+                !worktree_has_transcripts(&db, "repo", "AK-1", Some(&home))
+                    .await
+                    .unwrap(),
+                "{id}"
+            );
+            let drafted = worktree_transcripts(&db, "repo", "AK-1", Some(&home))
+                .await
+                .unwrap();
+            assert!(!drafted.contains("PLANTED"), "{id}: {drafted}");
+            // Session history's registered candidates.
+            let known = [(cwd.clone(), id.clone())];
+            let (paths, _) = crate::usage::candidate_transcripts(
+                std::slice::from_ref(&projects),
+                &worktree,
+                &known,
+            );
+            assert!(paths.is_empty(), "{id}: {paths:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Make `dir` unreadable and hand back a guard that puts it back — so a
@@ -1847,7 +1962,7 @@ mod tests {
         else {
             panic!("expected Fresh with a santree-minted id, got {fresh:?}");
         };
-        let path = transcript_path(&home, cwd, &session_id);
+        let path = transcript_path(&home, cwd, &session_id).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{}").unwrap();
 
@@ -1908,17 +2023,19 @@ mod tests {
         let db = crate::db::init(base.join("test.db")).await.unwrap();
         let cwd = "/tmp/santree/work";
 
+        let sid = Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, created_at)
-             VALUES ('repo', 'triage:AK-1', ?, 'sid-1',
+             VALUES ('repo', 'triage:AK-1', ?, ?,
                      strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days'))",
         )
         .bind(cwd)
+        .bind(&sid)
         .execute(&db)
         .await
         .unwrap();
 
-        let path = transcript_path(&home, cwd, "sid-1");
+        let path = transcript_path(&home, cwd, &sid).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let projects = home.join(".claude/projects");
         let Some(_guard) = deny_reads(&projects, &path) else {
@@ -2615,18 +2732,19 @@ mod tests {
         let worktree = base.join("work").join("AK-1");
         let cwd = worktree.to_string_lossy().into_owned();
 
-        let path = transcript_path(&home, &cwd, "sid-live");
+        let live = Uuid::new_v4().to_string();
+        let path = transcript_path(&home, &cwd, &live).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{}").unwrap();
 
-        let rows = vec![listed("sid-live", AgentKind::Claude, 7)];
+        let rows = vec![listed(&live, AgentKind::Claude, 7)];
         adopt(
             &db,
             &rows,
             ResumeRequest {
                 repo: "repo",
                 term_key: "tree:AK-1:tab:new",
-                session_id: "sid-live",
+                session_id: &live,
                 agent_kind: AgentKind::Claude,
                 worktree: &worktree,
                 home: Some(&home),
@@ -2641,7 +2759,7 @@ mod tests {
             vec![(
                 "tree:AK-1:tab:new".to_string(),
                 cwd.clone(),
-                "sid-live".to_string(),
+                live.clone(),
                 "Claude".to_string(),
             )],
             "a session found on disk with no row is stored at the worktree's own cwd"
@@ -2663,7 +2781,7 @@ mod tests {
             AgentSession::Resume {
                 agent_kind: AgentKind::Claude,
                 executable: "/bin/claude".into(),
-                session_id: "sid-live".into(),
+                session_id: live,
                 launch_flags: String::new(),
                 launch_env: Vec::new(),
                 account: None,
@@ -2688,17 +2806,18 @@ mod tests {
         let ran_in = worktree.join("packages").join("api");
         let ran_in = ran_in.to_string_lossy().into_owned();
 
-        let path = transcript_path(&home, &ran_in, "sid-sub");
+        let sub = Uuid::new_v4().to_string();
+        let path = transcript_path(&home, &ran_in, &sub).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{}").unwrap();
 
         let err = adopt(
             &db,
-            &[listed("sid-sub", AgentKind::Claude, 3)],
+            &[listed(&sub, AgentKind::Claude, 3)],
             ResumeRequest {
                 repo: "repo",
                 term_key: "tree:AK-1:tab:new",
-                session_id: "sid-sub",
+                session_id: &sub,
                 agent_kind: AgentKind::Claude,
                 worktree: &worktree,
                 home: Some(&home),
@@ -2726,27 +2845,29 @@ mod tests {
         let worktree = base.join("work").join("AK-1");
         let cwd = worktree.to_string_lossy().into_owned();
 
-        for sid in ["sid-taken", "sid-other"] {
-            let path = transcript_path(&home, &cwd, sid);
+        let (taken, other) = (Uuid::new_v4().to_string(), Uuid::new_v4().to_string());
+        for sid in [&taken, &other] {
+            let path = transcript_path(&home, &cwd, sid).unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "{}").unwrap();
         }
         sqlx::query(
             "INSERT INTO terminal_sessions (repo, term_key, cwd, session_id, agent_kind)
-             VALUES ('repo', 'tree:AK-1:tab:open', ?, 'sid-taken', 'Claude')",
+             VALUES ('repo', 'tree:AK-1:tab:open', ?, ?, 'Claude')",
         )
         .bind(&cwd)
+        .bind(&taken)
         .execute(&db)
         .await
         .unwrap();
 
         let err = adopt(
             &db,
-            &[listed("sid-other", AgentKind::Claude, 2)],
+            &[listed(&other, AgentKind::Claude, 2)],
             ResumeRequest {
                 repo: "repo",
                 term_key: "tree:AK-1:tab:open",
-                session_id: "sid-other",
+                session_id: &other,
                 agent_kind: AgentKind::Claude,
                 worktree: &worktree,
                 home: Some(&home),
@@ -2762,7 +2883,7 @@ mod tests {
             vec![(
                 "tree:AK-1:tab:open".to_string(),
                 cwd,
-                "sid-taken".to_string(),
+                taken,
                 "Claude".to_string(),
             )],
             "the tab keeps the conversation it had"
@@ -2785,17 +2906,20 @@ mod tests {
         let sessions = base.join("sessions");
         write_rollout(&sessions, "thread-live");
 
-        // On disk, and with turns — but only `sid-live` and `thread-live` are
-        // listed for this worktree.
-        for sid in ["sid-live", "sid-elsewhere"] {
-            let path = transcript_path(&home, &cwd, sid);
+        let ids: Vec<String> = (0..4).map(|_| Uuid::new_v4().to_string()).collect();
+        let [live, elsewhere, empty, pruned] =
+            [&ids[0], &ids[1], &ids[2], &ids[3]].map(String::as_str);
+        // On disk, and with turns — but only `live` and `thread-live` are listed
+        // for this worktree.
+        for sid in [live, elsewhere] {
+            let path = transcript_path(&home, &cwd, sid).unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "{}").unwrap();
         }
         let rows = vec![
-            listed("sid-live", AgentKind::Claude, 7),
-            listed("sid-empty", AgentKind::Claude, 0),
-            listed("sid-pruned", AgentKind::Claude, 4),
+            listed(live, AgentKind::Claude, 7),
+            listed(empty, AgentKind::Claude, 0),
+            listed(pruned, AgentKind::Claude, 4),
             listed("thread-live", AgentKind::Codex, 5),
             listed("thread-pruned", AgentKind::Codex, 5),
             listed("cursor-sid", AgentKind::Cursor, 5),
@@ -2817,23 +2941,23 @@ mod tests {
 
         // Not in the worktree's own listing — even though its transcript exists,
         // so an id-shaped guess can't reach another worktree's conversation.
-        let err = adopt(&db, &rows, request("sid-elsewhere", AgentKind::Claude))
+        let err = adopt(&db, &rows, request(elsewhere, AgentKind::Claude))
             .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("has run in this worktree"), "{err}");
         // Listed, but under the other provider.
-        assert!(adopt(&db, &rows, request("sid-live", AgentKind::Codex))
+        assert!(adopt(&db, &rows, request(live, AgentKind::Codex))
             .await
             .is_err());
         // Zero turns: resuming this lands the user in an empty session.
-        let err = adopt(&db, &rows, request("sid-empty", AgentKind::Claude))
+        let err = adopt(&db, &rows, request(empty, AgentKind::Claude))
             .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("no conversation"), "{err}");
         // Listed with turns, but the record has since been pruned.
-        let err = adopt(&db, &rows, request("sid-pruned", AgentKind::Claude))
+        let err = adopt(&db, &rows, request(pruned, AgentKind::Claude))
             .await
             .unwrap_err()
             .to_string();
@@ -2849,7 +2973,7 @@ mod tests {
             &rows,
             ResumeRequest {
                 home: None,
-                ..request("sid-live", AgentKind::Claude)
+                ..request(live, AgentKind::Claude)
             },
         )
         .await
@@ -2966,7 +3090,7 @@ mod tests {
         };
 
         let write = |sid: &str, lines: &[&str]| {
-            let path = transcript_path(&home, cwd, sid);
+            let path = transcript_path(&home, cwd, sid).unwrap();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, lines.join("\n")).unwrap();
         };

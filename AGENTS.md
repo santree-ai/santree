@@ -154,10 +154,17 @@ docs/web.md        the Web tab: its page as a native WKWebView laid over the
                    app's webview, placement, overlays, keys and focus, and the
                    Daedalus plan — the source of truth for src-tauri/src/browser/,
                    src/features/web/ and src/lib/overlays.ts
+docs/conversation.md  the Conversation view: a Claude tab's live session drawn
+                   from its own transcript, the reader, the journal and the
+                   composer's bounds — the source of truth for
+                   crates/core/src/conversation/, src-tauri/src/conversation* and
+                   src/features/conversation/
 crates/core/src/   domain.rs (types) · config.rs (static config/defaults) · linear.rs
                    + jira.rs (tracker → domain mapping) · layout.rs (dagre-free graph helpers) · diff_index.rs
                    (a PR's commentable hunk spans; written by the app, read by the
-                   AI review's MCP server) · lib.rs
+                   AI review's MCP server) · conversation/ (the Conversation
+                   view's journal: the contract, `journal.rs`, and `claude.rs`,
+                   Claude's transcript mapped into it) · lib.rs
 crates/pty/src/    lib.rs — PtyManager: spawn real process behind a PTY, stream bytes
                    · ring.rs (a session's recent output + the attach protocol, so
                    a reload costs the view and not the work)
@@ -221,6 +228,9 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    last-resort connection: `auth` sign-in + refresh, `client`
                    JSON-RPC, `tracker` the reads, `wire` the tool → domain
                    mapping; design and fallbacks in docs/linear-mcp.md)
+                   · conversation.rs + conversation/ (the Conversation view's
+                   reader: locate a tab's or a listed session's transcript,
+                   `cache` its parse, `watch` it — docs/conversation.md)
                    · db.rs (sqlx pool + migrations) · repo.rs · settings.rs · terminal.rs · stream.rs
                    (setup runs as panes on the terminal facade → read-only log
                    panes; on a server build a script outlives the app, untracked:
@@ -229,7 +239,8 @@ src-tauri/src/     lib.rs (builder + command registration) · commands.rs (thin 
                    agent_procs.rs (which agent owns each pane's foreground —
                    identity, never status; see COMPLIANCE.md)
                    · hooks.rs (the `--settings` file EVERY santree `claude` launch
-                   layers on: session-state hooks, statusLine, English tutor; plus
+                   layers on: session-state hooks, statusLine, English tutor,
+                   the Conversation view's live text while its switch is on; plus
                    the AI review's deny/allow variant and its `--mcp-config`)
                    · review_ai.rs (both review prompts + the AI-review launch)
                    · review_drafts.rs (the AI's drafts, and the ONE path that puts
@@ -304,6 +315,9 @@ src/
   lib/queries.ts   ALL data hooks (useUnwrappedQuery, useOptimisticMutation, …)
   lib/overlays.ts  the app's open overlays (menus, modals, toasts, drop previews),
                    which a Web tab's native page gives way to — docs/web.md
+  features/conversation/  a Claude tab's other face: the live session drawn as a
+                   conversation (turns, tool cards, diffs, subagents), its
+                   composer, and the per-tab choice of face (⌘J)
   features/web/    the Web tab: WebTabPane (toolbar + placeholder), useBrowserPage
                    (placement and overlays), the page-state store, the strips'
                    shared Web pieces, terminal links, the root event listeners
@@ -556,6 +570,24 @@ src/
   incomplete answer keeps agents as they were and refuses a resume. A lost agent
   tab's Resume is `useLostTabResume`, one path for every tab that is a row.
   docs/server.md, "Sessions".
+- **A Claude tab's Conversation face is built from its record, never from a
+  control channel.** It is experimental (Settings → Experimental → Conversation
+  view). `features/conversation` draws the live session from
+  Claude's own transcript (`conversation_read`, incremental by cursor) plus the
+  hooks and status line; santree runs no `claude -p`, SDK or other driver to
+  get it (docs/conversation.md). It types only what the user could type,
+  through the pane's own renderer and one queue per pane, on the user's click
+  or key in the view: their message (at the prompt or while Claude works,
+  never while a dialog on record is still open), the keys of an answer they
+  pick on a dialog's card (only sequences probed on Claude Code's dialogs,
+  once per dialog, never for a dialog that may not be the one on screen —
+  `stacked` — or has closed, and anything but a lone digit or Esc only while
+  nothing else has reached the pane), and Stop's one Esc. Every gate reads the hook record *as
+  stored* — never the reconciled state the dot reads — written after the
+  process now in the pane started. That is COMPLIANCE.md's bound;
+  `compliance.test.ts` pins what the view types and when. Anything it renders
+  as markdown loads nothing remote: transcript text and hook payloads are
+  attacker-influenceable.
 - **A Web tab's page is drawn above the app.** It is a native WKWebView, not
   DOM (docs/web.md), so anything floating that can cross it must register in
   `lib/overlays.ts` — `Dropdown`, `PositionedMenu`, `useModalA11y`, the toast
@@ -598,6 +630,20 @@ src/
   toasts with `toast.success(...)` from `state/toast.tsx`.
 - **Feature state:** ephemeral view state lives in `features/<view>/model.tsx` (a
   context); shared cross-view state in `AppContext`; server data only via query hooks.
+- **Experimental features sit behind Settings → Experimental.** Daedalus, the
+  English tutor and the Conversation view each have one switch, an app-scope row
+  (`experimental_<name>`) where no row, or anything but `"true"`, is off. The one
+  writer is `set_experimental` (the generic `set_setting` refuses those keys: the
+  Daedalus switch starts and stops the link as it is written). Readers are
+  `settings::experimental` and `useExperimental(feature)`, and each feature asks
+  in one place: the link (`DaedalusHost::apply`), the tutor
+  (`english_tutor::enabled`, with its own toggle), the Conversation face
+  (`useConversationOffer`). Lists, pickers and fallbacks that offer a project
+  read `useOfferedRepos()` (no Daedalus projects while that switch is off);
+  `useRepos()` stays the whole registry, because where a project lives (a pane's
+  trust, a launch's hooks) never depends on a switch. A new feature adds its key
+  to `ExperimentalFeature` and `EXPERIMENTAL_KEYS` (the two tables must agree)
+  and gates every surface through that one reader.
 - **Shared UI:** `primitives.tsx` (Badge, Dot, Toggle, Tabs, Segmented, EmptyState,
   ChevronSelect), `useEdgeResize` (panel resizers), `deriveIssueState` (the single
   source for a ticket's running/ready/blocked/chainable flags).

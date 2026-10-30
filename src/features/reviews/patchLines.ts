@@ -16,6 +16,30 @@
 /** `@@ -12,7 +14,9 @@ …` — the two line numbers a hunk starts at. */
 const HUNK = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
+/**
+ * GitHub's REST `patch` is only the hunk body (it starts at `@@`) — it omits the
+ * `diff --git` / `---` / `+++` header that `@git-diff-view` needs to locate the
+ * file and its hunks ("No hunks found" without it). Synthesize a minimal header,
+ * with `/dev/null` on the missing side for added/removed files. An agent's edit
+ * in the Conversation view carries the same hunk-only shape, and is drawn
+ * through this too.
+ *
+ * Both arrive without the newline that ends a diff's last line. The viewer then
+ * reads that line as running into whatever follows it on the shorter side, and
+ * warns of a "Mismatch … at line N" on any hunk that adds or removes lines.
+ */
+export function toUnifiedDiff(
+  path: string,
+  previousPath: string | null | undefined,
+  status: string,
+  patch: string,
+): string {
+  const oldPath = status === "added" ? "/dev/null" : `a/${previousPath ?? path}`;
+  const newPath = status === "removed" ? "/dev/null" : `b/${path}`;
+  const body = patch === "" || patch.endsWith("\n") ? patch : `${patch}\n`;
+  return `diff --git a/${path} b/${path}\n--- ${oldPath}\n+++ ${newPath}\n${body}`;
+}
+
 /** One side's line number → its text, for every line the patch carries. */
 export function patchLines(patch: string, onRight: boolean): Map<number, string> {
   const out = new Map<number, string>();

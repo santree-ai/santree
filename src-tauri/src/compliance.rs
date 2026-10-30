@@ -1297,7 +1297,7 @@ fn the_session_environment_builder_names_no_vendor_variable() {
 /// list of human-readable violations. Empty is the only acceptable answer, and
 /// the test below feeds it a deliberately broken builder to prove it can speak.
 fn hook_registration_violations(src: &str) -> Vec<String> {
-    const STATE_EVENTS: [&str; 8] = [
+    const STATE_EVENTS: [&str; 12] = [
         "SessionStart",
         "UserPromptSubmit",
         // The mid-turn heartbeats. Decision-capable (Claude documents
@@ -1306,9 +1306,18 @@ fn hook_registration_violations(src: &str) -> Vec<String> {
         // makes all of them observers, and it is asserted below.
         "PostToolUse",
         "PostToolUseFailure",
+        // Decision-capable too (a block stops the loop); async, it only reports
+        // which calls finished.
+        "PostToolBatch",
         "Notification",
         "PermissionRequest",
+        // A synchronous `Elicitation` could answer an MCP server's form for the
+        // user, and `ElicitationResult` could rewrite the answer; async, they
+        // only report it.
+        "Elicitation",
+        "ElicitationResult",
         "Stop",
+        "StopFailure",
         "SessionEnd",
     ];
     // The two santree must never inject, on their own merits rather than because
@@ -1413,8 +1422,17 @@ fn no_injected_hook_can_gate_claude_and_pretooluse_is_never_injected() {
         "'/Applications/santree.app/Contents/Resources/santree-hook' --db '/db'".to_string(),
         crate::hooks::box_prefix("/run/current-system/sw/bin/daedalus-session-host"),
     ] {
+        // With the Conversation view on, a local launch adds `MessageDisplay`:
+        // the same rules hold for it (a synchronous one would hold every line
+        // Claude draws, and could rewrite it).
+        let live = crate::hooks::hook_settings(&prefix, true);
+        assert!(live["hooks"]
+            .as_object()
+            .expect("a hooks map")
+            .contains_key("MessageDisplay"));
         for built in [
-            crate::hooks::hook_settings(&prefix),
+            crate::hooks::hook_settings(&prefix, false),
+            live,
             crate::hooks::hook_settings_no_git(&prefix),
         ] {
             let hooks = built["hooks"].as_object().expect("a hooks map");

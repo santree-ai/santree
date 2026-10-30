@@ -27,6 +27,7 @@ export function TriageTerminal({
   cwd,
   seed,
   agent,
+  attach = true,
   onExited,
   onResume,
 }: {
@@ -40,6 +41,9 @@ export function TriageTerminal({
   seed?: string;
   /** Who this pane runs, when it runs an agent — see {@link AgentTabIdentity}. */
   agent?: AgentTabIdentity;
+  /** False while the tab shows its conversation instead: the session is kept
+   *  and launched as ever, but the pane is not drawn here. */
+  attach?: boolean;
   /** Fired once when the process exits. */
   onExited?: () => void;
   /** The tab's own Resume, for a pane whose session is lost. */
@@ -48,8 +52,9 @@ export function TriageTerminal({
   const { hostRef } = useEmbeddedTerminal({
     spec: { title, cwd, source: "triage", refId, seed, agent },
     onExited,
+    attach,
     onResume,
   });
   // The TerminalLayer overlays this host with the ticket's live pane.
-  return <div ref={hostRef} className="h-full w-full" />;
+  return attach ? <div ref={hostRef} className="h-full w-full" /> : null;
 }

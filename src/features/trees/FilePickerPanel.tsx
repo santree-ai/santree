@@ -112,6 +112,7 @@ export function FilePickerPanel() {
     openSplit,
     splitOpen,
     closeSplit,
+    showConversation,
   } = useTrees();
   const { data: prSummary } = usePrSummary(activePr?.repo ?? null, activePr?.number ?? 0);
   const { data: workItems } = useReviewWorkItems(activePr?.repo ?? "", activePr?.number ?? 0);
@@ -270,6 +271,17 @@ export function FilePickerPanel() {
           branch={active?.branch ?? null}
           onResume={resumeSession.resume}
           resumingId={resumeSession.resumingId}
+          // A Daedalus project's records are on the box, which the
+          // Conversation view does not read.
+          onOpenConversation={
+            reach.remote
+              ? undefined
+              : (s) =>
+                  showConversation({
+                    sessionId: s.sessionId,
+                    title: s.title ?? "Untitled session",
+                  })
+          }
         />
       ),
   };

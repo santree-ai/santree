@@ -59,6 +59,16 @@ export interface Attached {
   mode: ReplayMode;
 }
 
+/** A digit key, as a dialog's numbered rows take them. */
+export type DigitKey = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+
+/** A key the user can press from outside the terminal (the Conversation view):
+ *  Enter after their paste, Esc for Stop, and `clear`, the keys that empty
+ *  Claude Code's input ahead of a send (Ctrl+K then Ctrl+U, sixteen of each,
+ *  as one write) — and, to answer a dialog the way its own keys do, Tab, Up
+ *  and the digits 1 to 9. */
+export type TerminalKey = "enter" | "escape" | "clear" | "tab" | "up" | DigitKey;
+
 /** The VT engine: renders the PTY byte stream and emits keystrokes. */
 export interface TerminalRenderer {
   /** Attach to the DOM and start rendering. */
@@ -68,8 +78,22 @@ export interface TerminalRenderer {
   /** Clear the screen and scrollback — for a view that replays a transcript from
    *  the start rather than appending to what's already there. */
   reset(): void;
-  /** Keystrokes → bytes for the PTY. */
-  onInput(cb: (data: string) => void): void;
+  /** Keystrokes → bytes for the PTY. `cb` answers whether the session took them
+   *  (the write's own answer), which is how {@link paste} and {@link press}
+   *  know their keystrokes arrived. */
+  onInput(cb: (data: string) => Promise<boolean>): void;
+  /** Paste text the user wrote, as their own paste into the terminal would send
+   *  it: the engine encodes it as the program asked (bracketed while the program
+   *  has bracketed paste on) and emits it through {@link onInput}, the one way
+   *  keystrokes leave a renderer. Control characters other than tab and newline
+   *  are dropped first, so nothing in the text can act as a key. Nothing else
+   *  may call it with anything but what a user typed. Resolves to whether the
+   *  session took all of it — false when nothing was emitted (a disposed pane)
+   *  or a write was refused. */
+  paste(text: string): Promise<boolean>;
+  /** Press one key, emitted through {@link onInput} as the engine encodes it
+   *  when typed. Resolves as {@link paste} does. */
+  press(key: TerminalKey): Promise<boolean>;
   /** The hosted program set the window title (OSC 0/2).
    *
    *  Read-only, and required to stay that way: santree renders it as a status
@@ -81,6 +105,8 @@ export interface TerminalRenderer {
   fit(): { cols: number; rows: number };
   /** Give the terminal keyboard focus. */
   focus(): void;
+  /** Let go of the keyboard, if the terminal has it. */
+  blur(): void;
   /** Tear down and release all resources. */
   dispose(): void;
 }
@@ -113,8 +139,10 @@ export interface TerminalBackend {
   /** Stop receiving a session's output without ending it. */
   detach(id: SessionId): void;
   /** Keystrokes, verbatim. A paste is keystrokes too, so nothing may reshape
-   *  what goes through here — see `seed` for the one line santree composes. */
-  write(id: SessionId, data: string): void;
+   *  what goes through here — see `seed` for the one line santree composes.
+   *  Resolves to whether the session took them: false when it is gone, or its
+   *  link is down and the bytes were dropped. */
+  write(id: SessionId, data: string): Promise<boolean>;
   /** Type the one human-initiated launch line, followed by Enter.
    *
    *  Separate from `write` precisely so the backend can tell them apart: a tty

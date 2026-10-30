@@ -31,9 +31,10 @@ what neither can judge.
 ## The rules
 
 **No output-parsing influences input.** Nothing derived from hook payloads,
-transcript reconciliation, or the status line is ever written back to a PTY.
-**The only bytes santree writes to a terminal are the user's keystrokes and the
-single human-initiated seed prompt.** Orchestration stops at: choose a cwd,
+transcript reconciliation, or the status line is ever written back to a PTY on
+its own. **The only bytes santree writes to a terminal are the user's
+keystrokes, the single human-initiated seed prompt, and what the Conversation
+view types on the user's click (below).** Orchestration stops at: choose a cwd,
 place the pane, send one seed.
 → Compiler-enforced. A terminal takes input only as `Keystrokes` or a
 `LaunchLine` (`terminal::input`). They have private fields and no constructor
@@ -49,6 +50,55 @@ everywhere but the facade's in-app write and a pane's writer. The exceptions are
 pinned by `the_lint_exceptions_are_exactly_the_sanctioned_sites`, the raw
 `call::<m::PtyWrite>` by `only_the_client_and_the_host_name_the_pty_write_method`,
 and four frontend tests pin that no PTY output is decoded and fed back.
+
+The Conversation view types into the same pane, through the pane's own
+renderer, on the user's action and at no other time: `compliance.test.ts` reads
+its source as a syntax tree and pins that only its key and click handlers reach
+the renderer's paste and key presses — never an effect, a timer or a hook
+result. Each of its three actions is a keystroke the user could type in the
+terminal; santree adds no channel to Claude.
+
+- **Send** types the draft the user wrote. It first clears what is left in
+  Claude's input (Ctrl+K and Ctrl+U — keys the user did not type, sent only as
+  part of their own Send), then hands the draft to the renderer as a paste
+  (bracketed when the program asked for it, and stripped of control characters
+  other than tab and newline, so a draft cannot close the paste early and run
+  the rest as keys), then presses Enter as a keypress of its own. It sends while
+  Claude is at its prompt or working (Claude queues a message typed while it
+  works), and never while the hooks record a dialog, unless an interrupt
+  marker came after it or the dialog's own call finished 2 s ago (a
+  status-line render alone never reopens it, and a dialog that follows is on
+  screen before its own hook lands), before the process in the
+  pane has reported its prompt (no hook runs under Claude's startup dialogs, so
+  a key sent earlier could answer one), or over a link that is not live. Right
+  before the Enter it reads the session's state again and drops the Enter if a
+  dialog has appeared since.
+- **An answer** to a dialog Claude is showing: a permission prompt, a question,
+  a plan to approve. The view draws the dialog from Claude's own
+  `PermissionRequest` payload, and the user's click types the keys that choice
+  has in Claude's dialog — a digit, a tab or arrow move, the text the user
+  wrote, Enter, or an Esc sent on its own — and only sequences probed on
+  Claude Code's own dialogs (docs/conversation.md, "Answer cards"). This is
+  the one place a hook payload chooses bytes (the position of the option the
+  user picked), and it is bounded: one answer per dialog, on the user's click,
+  only while that dialog is the one recorded as pending (read again before the
+  first key and the last), and never a default, a rule or a timer choosing
+  for the user. The card offers nothing for a dialog that may not be the one
+  on screen (recorded while an earlier one was still open: parallel calls
+  fire every `PermissionRequest` at once and Claude shows one at a time), one
+  Claude's own signs say has closed, or one that other input to the pane (any
+  but a card's own answer keys) may already have answered, or that this page
+  wasn't watching the pane for. A
+  sequence that depends on where the dialog's highlight is (anything but a
+  lone digit or Esc) also needs the pane untouched since before the dialog
+  appeared.
+- **Stop** sends one Esc on a click.
+
+santree cannot see Claude's screen and does not read it, so the view accepts
+one risk by design: a menu or dialog Claude shows without a hook (a
+slash-command picker the user opened in the terminal, history search) can
+receive what the view types. Nothing the view renders from the transcript
+reaches the draft or an answer.
 
 **No unattended loop.** No auto-responders, no retry or "keep going" loops, no
 always-on drivers. santree never starts, resumes, retries, or continues a
@@ -229,7 +279,7 @@ to come from the App Server's `config/read` handshake. **Any new headless call
 site must be justified against these same conditions before merging.**
 → `codex_helpers_disable_ambient_extensions_and_writes`
 
-**Transcript reads.** Three readers. `usage.rs` and `codex_rollouts.rs` are
+**Transcript reads.** Five readers. `usage.rs` and `codex_rollouts.rs` are
 display-only for *content* — a summary is shown, and no transcript text ever
 reaches a model. One field is not content: the session **id**, which
 `session::history` takes from those readers so the Session history pane can
@@ -257,26 +307,93 @@ it to the OS file browser (`open -R`, which selects the file rather than
 launching it). The webview names a session; it never supplies, or receives, a
 path.
 
+The fourth reader is the Conversation view (`conversation.rs`, mapping through
+`santree_core::conversation`). It renders a Claude session as a conversation
+beside the terminal that is still running it: the transcript of the session a
+tab's `terminal_sessions` row names, or of a session in the worktree's history,
+and its subagents' transcripts. It is display-only in the same sense as the
+first two: what it reads reaches a view and stops — no item becomes a prompt, a
+model's input or a byte in a PTY, and what the view types (above) is only the
+user's draft and the keys of the answer they pick. Its command takes a tab key, or the same `(repo, issue_id, session_id)`
+as Session history, and derives the file in Rust: from the tab's own row (an id
+santree minted, checked for that shape before it names a file), or by
+re-deriving the listing. A subagent id is matched against its session's
+`subagents/` listing, never joined from IPC. The watcher on the files views are
+reading only tells a view to read again.
+
+The fifth is the session-state reconciler (`hooks.rs`), which reads the end of
+a session's record to settle a state the hooks left stale: record times, and
+whether the newest record is Claude's interrupt marker, which Claude writes
+when the user stops a turn mid-way and no hook reports. What it reads sets the
+state shown and, as an interrupt, can make the composer's Send available
+(above); none of it reaches a model, a prompt, or a PTY. It reads the file
+the session's own id names: derived from the row, or the path the hook
+reported only when that path is `<session id>.jsonl` inside Claude's projects
+roots (a Codex thread's rollout, only inside Codex's sessions root). It reads an
+idle row's record too, but only while the session's pane is live and the file
+has changed since the idle was stored (a stat first; a file unchanged since a
+read that found nothing is not read again): a turn Claude starts from its own
+queue right after a `Stop` fires no hook, and a `promptSource: "queued"` user
+line with no turn end after it is the only sign of one. That sets the state
+shown; the stored row is never written.
+
+The reconciler and the Conversation view open a record without following a
+symlink and without blocking, take the file's identity from the open handle,
+and check the opened file's real path against the vendor's own root, so a
+swapped path, a symlinked directory or a FIFO cannot redirect a read or stall
+one (`record_file.rs`).
+
 **Session-state hooks + status line.** Every santree `claude` launch layers a
 `--settings` file, which is a key-level override — the user's other keys are
-untouched. It injects eight events, each running the bundled hook binary, which
-prints nothing on the hook path and always exits 0. (A write it could not perform
+untouched. It injects twelve events, each running the bundled hook binary, which
+prints nothing on the hook path and always exits 0: `SessionStart`,
+`UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`,
+`Notification`, `PermissionRequest`, `Elicitation`, `ElicitationResult`, `Stop`,
+`StopFailure` and `SessionEnd`. A thirteenth, `MessageDisplay` (Claude's reply as it renders, a
+few lines at a time), is in the file only when Settings → Experimental →
+Conversation view was on as it was built; never on a Daedalus launch, and the
+relay refuses it. (A write it could not perform
 appends one line to `<db_dir>/santree-hook-errors.log`, santree's own directory —
 never to a stream the CLI can see, so the "silent to the agent" property is
 unchanged; the file exists because a failure that leaves no trace anywhere is
 indistinguishable from a hook that never ran.) The decision-capable ones are
 `async: true` — the CLI's own schema defines that as "hook runs in background
 without blocking" — so they structurally cannot approve or deny; `SessionEnd` is
-synchronous only because it fires at teardown.
+synchronous only because it fires at teardown. The binary's silence matters past
+the terminal too: Claude delivers an async hook's JSON `additionalContext` and
+`systemMessage` to the model on the next turn, so a hook that printed them would
+be injecting text into the conversation.
 
 Most of the injected events are decision-capable and always were: Claude
 documents `decision: "block"` for `Stop`, `UserPromptSubmit` **and**
 `PostToolUse`, and `PermissionRequest` is a permission channel outright. `async`
 is the whole of what makes any of them safe, which is why it — not a list of
-event names — is the invariant under test. Two events stay out on their own
-merits: **`PreToolUse`**, the only one that can authorize or rewrite a tool call
-(`permissionDecision: allow|deny|ask`, `updatedInput`), and `PermissionDenied`.
-Captured state is display-only. `permissions.deny` appears in restricted flows
+event names — is the invariant under test. The newer ones decide too when
+synchronous: an `Elicitation` hook can answer an MCP server's form for the user
+(`hookSpecificOutput.action`; exit 2 declines it), an `ElicitationResult` hook
+can override the answer, a synchronous `MessageDisplay` holds each rendered
+batch until it returns and can replace the text shown, and a synchronous
+`PostToolBatch` can block, which stops the tool loop. Async, all four only
+report; probed, no event registered async changed any of Claude's dialogs.
+`PostToolBatch` sets no state: santree reads only which calls a finished batch
+held (thread, tool, input), to see a pending dialog's own call end, and a
+rejection with the user's feedback fires nothing else.
+Three events stay out on their own merits: **`PreToolUse`**, the only one that
+can authorize or rewrite a tool call (`permissionDecision: allow|deny|ask`,
+`updatedInput`), `PermissionDenied`, and `WorktreeCreate`, whose output Claude
+reads as the new worktree's path, so registering it at all replaces Claude's
+own worktree creation.
+Captured state includes a pending dialog's own payload (the tool and its input,
+`permission_suggestions`, the MCP server, the subagent that asked, the mode, the
+turn's id; an elicitation's message and its form schema or URL), stored with the
+row in the same statement and cleared by the write that leaves the dialog. With
+it the hook keeps what it has seen of the dialog since: whether it was stacked
+behind another, a hash identifying its call (never the input again), the start
+of the first status-line render after it, and when its own call finished. It is
+display-only, with two uses beyond display, both above: whether the
+Conversation view may type, and, for an answer the user clicks, which keys that
+choice has in Claude's dialog. It never types by itself, and the reply text
+`MessageDisplay` streams reaches a view and stops. `permissions.deny` appears in restricted flows
 and is **best-effort defence-in-depth, not a hard gate** — never build on it as a
 security boundary.
 → `no_injected_hook_can_gate_claude_and_pretooluse_is_never_injected`
@@ -300,9 +417,15 @@ command** — it is handed on as a single argument.
 → `the_status_line_passthrough_hands_the_users_command_on_as_one_argument`
 
 **The English tutor** is the one feature that injects text into the model's
-context on every turn, and it is off by default. When on, it adds a *second,
+context on every turn, and it is off by default: it rides along only while both
+its own switch ("Correct my English") and Settings → Experimental → English tutor
+are on (`english_tutor::enabled`); with either off, no launch's `--settings` file
+carries it.
+→ `the_tutor_needs_its_experimental_switch_on_as_well`
+When on, it adds a *second,
 synchronous* `UserPromptSubmit` hook — synchronous precisely so its stdout
-reaches the model, which an async hook discards — plus a `permissions.allow` for
+reaches the model with the prompt it belongs to (an async hook's plain output is
+dropped, and its JSON context arrives only a turn later) — plus a `permissions.allow` for
 `Edit` on the practice log. Its bound: the text is the user's own instruction
 file, never derived from the agent's output, and it grants nothing beyond that
 one file.
@@ -443,7 +566,9 @@ the same passive class as reading a pane's OSC title. It answers **identity,
 never status** — the state ladder is still the hooks, then the title — and
 nothing derived from it is written back into a PTY, gates a launch, chooses a
 prompt, or becomes an argument to a command. It reaches the sidebar as a provider
-mark and stops. The `ps` argv is a constant, so no IPC value reaches it. The
+mark, and the Conversation composer as the start of the process in a pane — the
+floor a hook record must be newer than before it may enable Send, which can
+only keep Send off — and stops. The `ps` argv is a constant, so no IPC value reaches it. The
 inability to write is structural rather than a promise: whatever handle it held,
 nothing outside `write_pty` can make the input a terminal accepts, and the raw
 writes beneath it are lint errors outside their sanctioned sites.

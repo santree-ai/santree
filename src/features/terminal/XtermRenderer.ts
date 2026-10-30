@@ -13,7 +13,41 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
 import { XTERM_ACCENT_FALLBACK } from "../../theme/colors";
-import type { TerminalRenderer } from "./types";
+import { withoutControls } from "./agentProvider";
+import type { TerminalKey, TerminalRenderer } from "./types";
+
+/** What xterm sends for each key when it is typed: Enter is CR, Esc is ESC,
+ *  Tab is HT, Up is CSI A (Claude Code leaves cursor-key mode off), a digit is
+ *  itself. `clear` is Ctrl+K then Ctrl+U, sixteen of each: what empties
+ *  Claude Code's input wherever its cursor is, over a draft of any length, a
+ *  collapsed paste, an open `/` or `@` menu and vim mode alike, without
+ *  interrupting a turn or writing the draft to its history (Esc does both). */
+const KEY_INPUT: Record<TerminalKey, string> = {
+  enter: "\r",
+  escape: "\x1b",
+  clear: "\x0b".repeat(16) + "\x15".repeat(16),
+  tab: "\t",
+  up: "\x1b[A",
+  "1": "1",
+  "2": "2",
+  "3": "3",
+  "4": "4",
+  "5": "5",
+  "6": "6",
+  "7": "7",
+  "8": "8",
+  "9": "9",
+};
+
+/** Text as a paste may carry it: line breaks as newlines (xterm sends each one
+ *  as the CR a pasted line ends with), tabs kept, every other control character
+ *  dropped — as the seed's quoting drops them. xterm brackets a paste verbatim,
+ *  so an ESC inside one could close the bracket early (`ESC [201~`) and whatever
+ *  followed would reach the program as typed keys: a Ctrl-C, a `!` shell
+ *  escape, an Enter. Exported for testing. */
+export function pasteable(text: string): string {
+  return withoutControls(text.replace(/\r\n?/g, "\n"), "\t\n");
+}
 
 const DARK_THEME = {
   background: "#0c0d10",
@@ -125,6 +159,9 @@ export class XtermRenderer implements TerminalRenderer {
   private mounted = false;
   private disposed = false;
   private contextLosses = 0;
+  /** The writes the paste or press running right now caused, as the input
+   *  callback answered them; null the rest of the time (see `typed`). */
+  private typing: Promise<boolean>[] | null = null;
 
   /** `readOnly` is for panes that only ever *show* a process's output (the build
    *  and setup logs): no keystrokes are wired to anything, so a blinking cursor and
@@ -237,8 +274,39 @@ export class XtermRenderer implements TerminalRenderer {
     this.term.clear();
   }
 
-  onInput(cb: (data: string) => void) {
-    this.term.onData(cb);
+  onInput(cb: (data: string) => Promise<boolean>) {
+    this.term.onData((data) => {
+      const sent = cb(data);
+      this.typing?.push(sent);
+    });
+  }
+
+  // xterm's own paste and input, not a write of ours: they fire `onData`, so the
+  // bytes take the path a typed key takes, encoded as the program asked for.
+  paste(text: string): Promise<boolean> {
+    return this.typed(() => this.term.paste(pasteable(text)));
+  }
+
+  press(key: TerminalKey): Promise<boolean> {
+    return this.typed(() => this.term.input(KEY_INPUT[key], true));
+  }
+
+  /** Run one paste or press and answer whether the session took everything it
+   *  typed. xterm emits through `onData` before `paste`/`input` return, so the
+   *  writes made while `type` runs are exactly the ones it caused. A disposed
+   *  pane has no session to type into (and its terminal would throw): nothing
+   *  typed is nothing taken. */
+  private typed(type: () => void): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
+    const writes: Promise<boolean>[] = [];
+    this.typing = writes;
+    try {
+      type();
+    } finally {
+      this.typing = null;
+    }
+    if (writes.length === 0) return Promise.resolve(false);
+    return Promise.all(writes).then((taken) => taken.every(Boolean));
   }
 
   onTitle(cb: (title: string) => void) {
@@ -260,6 +328,10 @@ export class XtermRenderer implements TerminalRenderer {
     // terminal earns its GPU renderer back.
     this.acquireWebgl();
     this.term.focus();
+  }
+
+  blur() {
+    this.term.blur();
   }
 
   dispose() {

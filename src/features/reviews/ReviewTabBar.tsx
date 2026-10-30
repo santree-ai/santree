@@ -17,7 +17,7 @@
  *  it. */
 import { type ReactNode, useCallback } from "react";
 
-import type { AgentKind, ReviewPr } from "../../bindings";
+import type { AgentKind, ReviewPr, WorktreeTab } from "../../bindings";
 import {
   AgentIcon,
   BranchIcon,
@@ -40,11 +40,17 @@ import {
 import { useDigitShortcuts } from "../../lib/useKeyboardShortcuts";
 import { palette } from "../../theme/colors";
 import { liveTabFor } from "../agents/registry";
+import {
+  useAgentTabViews,
+  useConversationOffer,
+  ViewSwitch,
+  withViewRow,
+} from "../conversation/viewMode";
 import { agentProvider } from "../terminal/agentProvider";
 import { useTerminals } from "../terminal/TerminalsContext";
 import type { NewTabOpts } from "../trees/model";
 import { useTabAccounts } from "../trees/useTabAccounts";
-import { useTabSessions } from "../trees/useTabSessions";
+import { tabRefId, useTabSessions } from "../trees/useTabSessions";
 import { useWebOff } from "../web/availability";
 import { usePageLabels } from "../web/pageState";
 import { useStripWebHost, WebMenuRow, webStripTab } from "../web/strip";
@@ -72,13 +78,18 @@ export function ReviewTabBar({
     tabs.checkout.worktreeId,
     tabs.rows,
   );
+  // A Claude tab's Terminal/Conversation switch: in its menu and on its strip.
+  const viewOf = useAgentTabViews();
+  const offer = useConversationOffer(tabs.checkout.repo);
+  const conversationKey = (row: WorktreeTab) =>
+    offer.row(row) && tabs.checkout.worktreeId ? tabRefId(tabs.checkout.worktreeId, row.id) : null;
   // The AI review tabs' half of the same rule: a tab is its process, so the ✕
   // ends the PTY before the row is forgotten. Their sessions hang off the PR's
   // own surface rather than a `worktree_tabs` row, which is the only reason
   // `useTabSessions` can't do it for them too.
   const { tabs: sessions, close: endSession } = useTerminals();
   const closeReview = (agent: AgentKind) => {
-    const live = liveTabFor(aiReviewTermKey(pr), agent, sessions);
+    const live = liveTabFor(repo, aiReviewTermKey(pr), agent, sessions);
     if (live) endSession(live.key);
     tabs.closeReview(agent);
   };
@@ -115,7 +126,7 @@ export function ReviewTabBar({
               ),
             onClose: () => closeWithSession(t),
             onRename: (title: string) => tabs.renameTab(t.id, title),
-            menu: menuFor(t),
+            menu: withViewRow(conversationKey(t), viewOf(conversationKey(t) ?? ""), menuFor(t)),
             detail: detailFor(t),
           },
     ),
@@ -163,6 +174,11 @@ export function ReviewTabBar({
       renderTab={renderTab}
       ariaLabel="Pull request tabs"
       newTabMenu={(close) => <NewTabMenu tabs={tabs} close={close} />}
+      groupTrailing={(tab) => {
+        const row = tabs.rows.find((t) => checkoutTab(t.id) === tab);
+        const key = row ? conversationKey(row) : null;
+        return key ? <ViewSwitch termKey={key} /> : null;
+      }}
       trailing={infoCollapsed ? <PanelToggle collapsed onToggle={toggleInfo} /> : null}
     />
   );

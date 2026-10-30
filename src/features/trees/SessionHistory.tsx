@@ -51,6 +51,7 @@ import {
 import type { AgentEntry } from "../agents/registry";
 import { useAgentEntries } from "../agents/useAgents";
 import { useOpenAgent } from "../agents/useOpenAgent";
+import { useConversationOffer } from "../conversation/viewMode";
 import { resumeInvocation } from "../terminal/agentSeed";
 import {
   buildSubagentTree,
@@ -88,6 +89,7 @@ export function SessionHistory({
   branch,
   onResume,
   resumingId = null,
+  onOpenConversation,
 }: {
   repo: string;
   worktreeId: string;
@@ -102,6 +104,10 @@ export function SessionHistory({
   /** The session a resume is in flight for, so its button reads busy. Owned by
    *  whoever owns {@link SessionHistory.onResume}. */
   resumingId?: string | null;
+  /** Read one of them in the Conversation view, read-only, in a main-area tab —
+   *  offered for the providers whose record that view draws. Optional for the
+   *  same reason as {@link SessionHistory.onResume}. */
+  onOpenConversation?: (session: WorktreeSession) => void;
 }) {
   const { data: sessions, refetch, isFetching } = useWorktreeSessions(repo, worktreeId);
   const entries = useAgentEntries([repo], [repo]);
@@ -165,6 +171,7 @@ export function SessionHistory({
               openAgent={openAgent}
               onResume={onResume}
               resumingId={resumingId}
+              onOpenConversation={onOpenConversation}
               expanded={expanded.has(s.sessionId)}
               onToggle={toggle}
             />
@@ -184,6 +191,7 @@ function SessionRow({
   openAgent,
   onResume,
   resumingId,
+  onOpenConversation,
   expanded,
   onToggle,
 }: {
@@ -195,6 +203,7 @@ function SessionRow({
   openAgent: (entry: AgentEntry) => void;
   onResume?: (session: WorktreeSession) => void;
   resumingId: string | null;
+  onOpenConversation?: (session: WorktreeSession) => void;
   expanded: boolean;
   onToggle: (sessionId: string) => void;
 }) {
@@ -295,6 +304,7 @@ function SessionRow({
           openAgent={openAgent}
           onResume={onResume}
           resumingId={resumingId}
+          onOpenConversation={onOpenConversation}
         />
       )}
     </div>
@@ -354,6 +364,7 @@ function SessionDetails({
   openAgent,
   onResume,
   resumingId,
+  onOpenConversation,
 }: {
   id: string;
   repo: string;
@@ -364,6 +375,7 @@ function SessionDetails({
   openAgent: (entry: AgentEntry) => void;
   onResume?: (session: WorktreeSession) => void;
   resumingId: string | null;
+  onOpenConversation?: (session: WorktreeSession) => void;
 }) {
   const detail = useWorktreeSessionDetail(repo, worktreeId, s.sessionId, true);
   // A session with no subagents reads nothing from disk at all.
@@ -371,6 +383,9 @@ function SessionDetails({
   const reveal = useRevealSessionTranscript(repo, worktreeId);
   // A Daedalus project's transcripts are on the box: nothing to reveal here.
   const { remote } = useRepoReach(repo);
+  // The Conversation view's own gate: its provider, where the project lives,
+  // and Settings → Experimental.
+  const conversation = useConversationOffer(repo);
 
   const openable = !!live?.live && live.openable;
   const blocked = openable
@@ -433,6 +448,16 @@ function SessionDetails({
               {busy ? "Resuming…" : "Resume"}
             </Button>
           )
+        )}
+        {onOpenConversation && conversation.agent(s.agentKind) && s.messageCount > 0 && (
+          <Button
+            variant="outline"
+            size="sm"
+            title="Read this session as a conversation, in a tab of its own"
+            onClick={() => onOpenConversation(s)}
+          >
+            <MessageSquareIcon size={11} /> Open conversation
+          </Button>
         )}
         {command && (
           <Button

@@ -11,6 +11,8 @@ import type { DaedalusLink, Repo } from "../../bindings";
 const state = vi.hoisted(() => ({
   repos: undefined as Repo[] | undefined,
   link: undefined as DaedalusLink | undefined,
+  /** Settings → Experimental → Daedalus. */
+  daedalus: true,
   navigate: vi.fn(),
   /** The props the section handed its tree on the last render. */
   tree: null as { location: string; emptyLabel: string; actionsDisabled?: string } | null,
@@ -24,6 +26,7 @@ vi.mock("../../lib/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/queries")>()),
   useRepos: () => ({ data: state.repos }),
   useDaedalusStatus: () => ({ data: state.link }),
+  useExperimental: (feature: string) => feature !== "Daedalus" || state.daedalus,
 }));
 // The tree is its own component with its own test; here it is only what the
 // section hands it.
@@ -55,6 +58,7 @@ const header = () => screen.queryByText("Daedalus");
 beforeEach(() => {
   state.repos = [repo("acme/app", "Local")];
   state.link = CONNECTED;
+  state.daedalus = true;
   state.navigate.mockClear();
   state.tree = null;
   localStorage.clear();
@@ -84,13 +88,18 @@ describe("DaedalusSection visibility", () => {
     expect(state.tree?.actionsDisabled).toBeUndefined();
   });
 
-  /** A registered Daedalus project keeps its section whatever the link says. */
-  it("stays while a Daedalus project is registered, linked or not", () => {
+  /** A registered Daedalus project keeps its section whatever the link says,
+   *  and none is drawn while Settings → Experimental → Daedalus is off. */
+  it("stays while a Daedalus project is registered, linked or not, and the switch is on", () => {
     state.link = { kind: "AgentMissing" };
     state.repos = [repo("home/web", "Daedalus")];
-    render(<DaedalusSection />);
+    const { container, rerender } = render(<DaedalusSection />);
     expect(header()).toBeInTheDocument();
     expect(screen.getByTestId("daedalus-tree")).toBeInTheDocument();
+
+    state.daedalus = false;
+    rerender(<DaedalusSection />);
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

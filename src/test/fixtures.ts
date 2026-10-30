@@ -107,6 +107,9 @@ export function session(over: Partial<SessionState> & { sessionId: string }): Se
   return {
     agentKind: "Claude",
     state: "active",
+    // As stored, unless a test says the reconciler moved `state` off it.
+    recordedState: over.state ?? "active",
+    interruptedAtMs: null,
     event: "UserPromptSubmit",
     cwd: "/repo",
     message: null,
@@ -114,6 +117,9 @@ export function session(over: Partial<SessionState> & { sessionId: string }): Se
     updatedAtMs: NOW,
     repo: null,
     termKey: null,
+    prompt: null,
+    permissionMode: null,
+    effortLevel: null,
     ...over,
   };
 }

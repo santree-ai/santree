@@ -13,6 +13,12 @@ vi.mock("../../lib/queries", () => ({
   useCheckTabResume: (repo: string) => ({
     mutateAsync: (vars: unknown) => check(repo, vars),
   }),
+  useRepos: () => ({ data: [] }),
+  // Which face a Claude tab opens on: never set, so its terminal.
+  CLAUDE_TAB_FACE_KEY: "claude_tab_face",
+  useSetting: () => ({ data: null }),
+  // Settings → Experimental: every switch on.
+  useExperimental: () => true,
 }));
 const terminals = vi.hoisted(() => ({
   heldRows: new Set<string>(),

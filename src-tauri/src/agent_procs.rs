@@ -75,11 +75,13 @@ fn catalog() -> Vec<(&'static str, AgentKind)> {
 /// all land here — which is exactly why this supplements santree's launch record
 /// instead of replacing it. The caller must treat a missing answer as no
 /// information.
+///
+/// The answer carries the agent process's pid, for [`started_at_ms`].
 pub fn foreground_agent(
     tree: &ProcTree,
     root: u32,
     catalog: &[(&str, AgentKind)],
-) -> Option<AgentKind> {
+) -> Option<(AgentKind, u32)> {
     // Nothing is accounted for elsewhere here — unlike the resource sums, panes
     // don't nest — so no subtree is pruned.
     tree.descend(root, &HashSet::new())
@@ -88,15 +90,32 @@ pub fn foreground_agent(
         .find_map(|(_, p)| {
             catalog
                 .iter()
-                .find(|(binary, _)| *binary == p.name)
-                .map(|(_, kind)| *kind)
+                .find(|(binary, _)| *binary == cli_name(&p.name))
+                .map(|(_, kind)| (*kind, p.pid))
         })
 }
 
-/// Scan every live pane. `panes` is `(pane address, root pid)` — see
-/// [`crate::terminal::pane_roots`]. The address is the pair, not the `term_key`
-/// alone: one surface can host a pane per provider, and a result keyed by the
-/// key alone would attribute one of them to the other.
+/// The name a process goes by in the catalog: its `argv[0]` basename, less an
+/// `.exe`. Claude Code's npm install links `claude` to its native binary,
+/// `bin/claude.exe` (on macOS too), and santree launches the canonical path
+/// ([`crate::settings::agent_executable`]), so that is what its own panes show.
+fn cli_name(name: &str) -> &str {
+    name.strip_suffix(".exe").unwrap_or(name)
+}
+
+/// One live pane to scan: its address, the pid its process tree hangs from,
+/// and its PTY session id ([`AgentProcess::pane_id`]). The address is the
+/// pair, not the `term_key` alone: one surface can host a pane per provider,
+/// and a result keyed by the key alone would attribute one of them to the
+/// other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneRoot {
+    pub pane: crate::terminal::LiveTerminal,
+    pub pid: u32,
+    pub id: Option<u32>,
+}
+
+/// Scan every live pane on this Mac ([`crate::terminal::pane_roots`]).
 ///
 /// A pane that cannot be attributed is simply absent from the result. That
 /// includes an unreadable process table: `ps` is a process spawn and it can be
@@ -105,7 +124,7 @@ pub fn foreground_agent(
 /// whose failure is itself cached so the next caller is answered immediately.
 /// The failure mode is "we don't know yet", which the frontend already has to
 /// handle for every pane the walk finds nothing in.
-pub async fn detect(panes: &[(crate::terminal::LiveTerminal, u32)]) -> Vec<AgentProcess> {
+pub async fn detect(panes: &[PaneRoot]) -> Vec<AgentProcess> {
     if panes.is_empty() {
         return Vec::new();
     }
@@ -116,27 +135,66 @@ pub async fn detect(panes: &[(crate::terminal::LiveTerminal, u32)]) -> Vec<Agent
             return Vec::new();
         }
     };
-    attribute(&tree, panes)
+    attribute(&tree, panes, started_at_ms)
 }
 
 /// The agent in each pane's foreground, in a process table already read — this
 /// Mac's ([`detect`]), or the box's for the panes of a Daedalus project
-/// (`daedalus::agents`), whose root pids are the box's.
+/// (`daedalus::agents`), whose root pids are the box's. `started` answers
+/// when a pid of that table started, which only this Mac's kernel can do for
+/// its own processes; a Daedalus caller passes one that never answers.
 pub(crate) fn attribute(
     tree: &ProcTree,
-    panes: &[(crate::terminal::LiveTerminal, u32)],
+    panes: &[PaneRoot],
+    started: impl Fn(u32) -> Option<f64>,
 ) -> Vec<AgentProcess> {
     let catalog = catalog();
     panes
         .iter()
-        .filter_map(|(pane, pid)| {
-            foreground_agent(tree, *pid, &catalog).map(|agent_kind| AgentProcess {
-                term_key: pane.term_key.clone(),
-                pane_agent_kind: pane.agent_kind,
+        .filter_map(|root| {
+            foreground_agent(tree, root.pid, &catalog).map(|(agent_kind, pid)| AgentProcess {
+                term_key: root.pane.term_key.clone(),
+                pane_agent_kind: root.pane.agent_kind,
                 agent_kind,
+                pane_id: root.id,
+                started_at_ms: started(pid),
             })
         })
         .collect()
+}
+
+/// When process `pid` of this Mac started, epoch ms, from the kernel's own
+/// record of it (`proc_pidinfo`). The fork time: a process that `exec`s
+/// another program keeps it, which is why a pane santree launched as
+/// `exec claude` reports when the pane was spawned.
+///
+/// Identity, like the rest of this module: the start time is read and nothing
+/// else of the process (`pbi_start_tv*` out of the BSD info). A pid that has
+/// gone, or one the kernel won't describe, is `None`.
+pub(crate) fn started_at_ms(pid: u32) -> Option<f64> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    // SAFETY: an all-zero `proc_bsdinfo` is a valid value of that plain C
+    // struct, and the kernel writes at most `size` bytes into it.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: `info` is a live, writable `proc_bsdinfo` of exactly `size` bytes.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    let ms = info
+        .pbi_start_tvsec
+        .checked_mul(1_000)?
+        .checked_add(info.pbi_start_tvusec / 1_000)?;
+    Some(ms as f64)
 }
 
 #[cfg(test)]
@@ -144,7 +202,7 @@ mod tests {
     use super::*;
     use crate::proc_table::parse_ps;
 
-    /// One host with four panes:
+    /// One host with five panes:
     ///
     /// * 200 — a shell whose foreground is `claude` (santree's own `exec` launch
     ///   leaves the CLI as the pane root; this is the shape where a shell is
@@ -153,7 +211,9 @@ mod tests {
     ///   a `vim` open on a file called `codex`;
     /// * 400 — a plain shell running a build;
     /// * 500 — `codex` as the pane root, unprompted, exactly as santree launches
-    ///   it, with a `claude -p` helper it shelled out to.
+    ///   it, with a `claude -p` helper it shelled out to;
+    /// * 700 — `claude` as santree launches it on a real npm install: the
+    ///   canonical path, whose native binary is `bin/claude.exe`.
     const LISTING: &str = "\
     1     0   0.0  24688 Ss   /sbin/launchd
   100     1   1.5  50000 S    /Applications/santree.app/Contents/MacOS/santree
@@ -168,6 +228,7 @@ mod tests {
   500   100   1.0  70000 Ss+  /opt/homebrew/bin/codex
   501   500   0.5  60000 S+   /opt/homebrew/bin/claude -p summarize
   600   100   0.0   3000 Z    /bin/zsh
+  700   100  12.5 300000 Ss+  /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --settings /tmp/h.json
 ";
 
     fn tree() -> ProcTree {
@@ -175,7 +236,7 @@ mod tests {
     }
 
     fn agent(root: u32) -> Option<AgentKind> {
-        foreground_agent(&tree(), root, &catalog())
+        foreground_agent(&tree(), root, &catalog()).map(|(kind, _)| kind)
     }
 
     /// Each pane is named by the agent in its foreground, or by nothing:
@@ -200,6 +261,11 @@ mod tests {
                 200,
                 Some(AgentKind::Claude),
                 "an agent started inside a shell",
+            ),
+            (
+                700,
+                Some(AgentKind::Claude),
+                "claude.exe, the canonical path santree launches",
             ),
             (300, None, "a backgrounded agent"),
             (400, None, "a build is not an agent"),
@@ -227,26 +293,39 @@ mod tests {
   270   150   0.0   4000 Ss+  /bin/zsh -l
 ";
         let tree = ProcTree::new(parse_ps(listing));
-        let pane = |key: &str| crate::terminal::LiveTerminal {
-            term_key: key.to_string(),
-            agent_kind: None,
+        let pane = |key: &str, pid: u32| PaneRoot {
+            pane: crate::terminal::LiveTerminal {
+                term_key: key.to_string(),
+                agent_kind: None,
+            },
+            pid,
+            id: Some(pid),
         };
+        // The start time asked for is the agent's own process, not the pane
+        // root's: here a shell (250) is between them.
         let found = attribute(
             &tree,
             &[
-                (pane("tree:A"), 250),
-                (pane("tree:B"), 260),
-                (pane("tree:C"), 270),
+                pane("tree:A", 250),
+                pane("tree:B", 260),
+                pane("tree:C", 270),
             ],
+            |pid| Some(f64::from(pid)),
         );
         let by_key = |key: &str| {
             found
                 .iter()
                 .find(|p| p.term_key == key)
-                .map(|p| p.agent_kind)
+                .map(|p| (p.agent_kind, p.pane_id, p.started_at_ms))
         };
-        assert_eq!(by_key("tree:A"), Some(AgentKind::Claude));
-        assert_eq!(by_key("tree:B"), Some(AgentKind::Codex));
+        assert_eq!(
+            by_key("tree:A"),
+            Some((AgentKind::Claude, Some(250), Some(251.0)))
+        );
+        assert_eq!(
+            by_key("tree:B"),
+            Some((AgentKind::Codex, Some(260), Some(260.0)))
+        );
         assert_eq!(
             by_key("tree:C"),
             None,
@@ -254,7 +333,10 @@ mod tests {
         );
         // …and the walk stays inside each pane: the server above it, whose
         // other children are other panes, claims nothing for this one.
-        assert_eq!(attribute(&tree, &[(pane("tree:C"), 270)]), Vec::new());
+        assert_eq!(
+            attribute(&tree, &[pane("tree:C", 270)], |_| None),
+            Vec::new()
+        );
     }
 
     /// The scan over the real thing: no panes means no `ps` at all, and this
@@ -263,13 +345,14 @@ mod tests {
     async fn detect_reports_only_what_it_can_attribute() {
         assert!(detect(&[]).await.is_empty());
         let mine = std::process::id();
-        let found = detect(&[(
-            crate::terminal::LiveTerminal {
+        let found = detect(&[PaneRoot {
+            pane: crate::terminal::LiveTerminal {
                 term_key: "term:test".to_string(),
                 agent_kind: None,
             },
-            mine,
-        )])
+            pid: mine,
+            id: None,
+        }])
         .await;
         assert!(
             found.iter().all(|p| p.term_key == "term:test"),

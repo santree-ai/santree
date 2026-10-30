@@ -16,6 +16,7 @@ vi.mock("../lib/queries", () => ({
   // RepoAvatar asks for a Daedalus project's icon; none here.
   useDaedalusIcon: () => ({ data: null, status: "success" }),
   useRepos: () => ({ data: registry.repos }),
+  useOfferedRepos: () => ({ data: registry.repos, isFetched: true, hidden: () => false }),
   useDaedalusStatus: () => ({ data: { kind: "Connected" } }),
 }));
 

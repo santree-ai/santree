@@ -2,6 +2,7 @@ import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import type { PaneHandle } from "./orchestrator";
 import { resetSessionTitles, sessionTitles } from "./sessionTitles";
 import { TerminalView, UNANSWERED_MS } from "./TerminalView";
 import type {
@@ -18,7 +19,7 @@ class FakeRenderer implements TerminalRenderer {
   mounted = false;
   disposed = false;
   written: (Uint8Array | string)[] = [];
-  inputCb?: (data: string) => void;
+  inputCb?: (data: string) => Promise<boolean>;
   /** How the tests play a program setting its OSC window title. */
   titleCb?: (title: string) => void;
   /** Mutable so a test can simulate the host being re-laid-out. */
@@ -32,8 +33,14 @@ class FakeRenderer implements TerminalRenderer {
   write(d: Uint8Array | string) {
     this.written.push(d);
   }
-  onInput(cb: (data: string) => void) {
+  onInput(cb: (data: string) => Promise<boolean>) {
     this.inputCb = cb;
+  }
+  paste(text: string) {
+    return this.inputCb?.(text) ?? Promise.resolve(false);
+  }
+  press(key: "enter" | "escape") {
+    return this.inputCb?.(key === "enter" ? "\r" : "\x1b") ?? Promise.resolve(false);
   }
   onTitle(cb: (title: string) => void) {
     this.titleCb = cb;
@@ -47,6 +54,7 @@ class FakeRenderer implements TerminalRenderer {
     return this.size;
   }
   focus() {}
+  blur() {}
   dispose() {
     this.disposed = true;
   }
@@ -97,6 +105,7 @@ class FakeBackend implements TerminalBackend {
   }
   write(id: SessionId, data: string) {
     this.writes.push([id, data]);
+    return Promise.resolve(true);
   }
   seed(id: SessionId, seed: string) {
     this.seeded.push([id, seed]);
@@ -121,6 +130,7 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
   const renderer = new FakeRenderer();
   const backend = new FakeBackend();
   const long = `exec env SANTREE_TERM_KEY='tree:AK-1' '/opt/homebrew/bin/codex' ${"-c 'hooks.X=[]' ".repeat(200)}`;
+  let handle: PaneHandle | undefined;
 
   const { unmount } = render(
     <TerminalView
@@ -130,6 +140,10 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
       seed={long}
       backend={backend}
       createRenderer={() => renderer}
+      onReady={(ready) => {
+        handle = ready;
+        return undefined;
+      }}
     />,
   );
 
@@ -143,6 +157,9 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
   await waitFor(() => expect(backend.seeded).toEqual([[7, long]]));
   expect(backend.writes).toEqual([]);
 
+  // The handle names the session the pane is attached to.
+  expect(handle?.id).toBe(7);
+
   // PTY output → renderer.
   backend.handlers?.onOutput(new Uint8Array([104, 105]));
   expect(renderer.written.length).toBeGreaterThan(0);
@@ -150,6 +167,18 @@ test("TerminalView wires the renderer to the backend and cleans up", async () =>
   // Keystrokes → PTY.
   renderer.inputCb?.("x");
   expect(backend.writes).toContainEqual([7, "x"]);
+
+  // Typing from outside the pane (the Conversation view's composer, while the
+  // terminal is hidden) is the pane's own renderer pasting and pressing a key,
+  // so it reaches the one writer above as the keystrokes it is — never a
+  // second way into the session.
+  handle?.input?.paste("from the composer");
+  handle?.input?.press("enter");
+  expect(backend.writes).toEqual([
+    [7, "x"],
+    [7, "from the composer"],
+    [7, "\r"],
+  ]);
 
   // Unmount releases the pane but NOT the session: a pane going away says
   // nothing about whether the work in it should stop.

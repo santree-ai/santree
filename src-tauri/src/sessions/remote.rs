@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use futures::future::BoxFuture;
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -777,17 +777,19 @@ impl RemoteTerminals {
     }
 
     /// The user's keystrokes, in order, to the attach they were typed at.
-    /// Dropped while the pane can't reach its session.
+    ///
+    /// Refused while the pane can't reach its session — a link that dropped and
+    /// hasn't come back, or a session that is lost — rather than taken and
+    /// dropped: the writer keeps only keys typed at the attach that is live, so
+    /// an `Ok` here would tell the caller its input arrived (the conversation
+    /// composer would clear a draft the session never saw). A launch line is
+    /// different and waits for the link ([`Self::seed`]).
     pub fn write(&self, id: PaneId, keys: Keystrokes) -> Result<()> {
         let pane = self.inner.pane(id)?;
         let gen = {
             let st = pane.lock();
             if !st.live() {
-                log::debug!(
-                    "{}: pane {id} can't reach its session; input dropped",
-                    self.inner.profile.name
-                );
-                return Ok(());
+                bail!("terminal session {id} can't be reached right now; nothing was typed");
             }
             st.gen
         };

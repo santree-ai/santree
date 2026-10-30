@@ -12,6 +12,8 @@
  *  session is *lost* resumes in place instead, on the click (`useLostTabResume`). */
 import type { WorktreeTab } from "../../bindings";
 import { EmptyState } from "../../components/primitives";
+import { ConversationFace } from "../conversation/ConversationFace";
+import { useConversationFace } from "../conversation/viewMode";
 import { agentProvider } from "../terminal/agentProvider";
 import { useAgentTab } from "../trees/useAgentTab";
 import { ResumingState, useLostTabResume } from "../trees/useLostTabResume";
@@ -52,6 +54,7 @@ export function TriageTabPane({
     ended,
     resume,
   });
+  const conversation = useConversationFace(refId, agent?.kind, repo);
 
   if (resuming) return <ResumingState />;
   if (preparing) {
@@ -64,14 +67,22 @@ export function TriageTabPane({
     );
   }
   return (
-    <TriageTerminal
-      refId={refId}
-      title={tab.title}
-      cwd={cwd}
-      seed={seed}
-      agent={agent}
-      onExited={onExited}
+    <ConversationFace
+      face={conversation}
+      live={{ repo, termKey: refId }}
       onResume={agent ? onResume : undefined}
-    />
+    >
+      {/* Kept mounted with the conversation up, holding no slot: see AgentTabPane. */}
+      <TriageTerminal
+        refId={refId}
+        title={tab.title}
+        cwd={cwd}
+        seed={seed}
+        agent={agent}
+        attach={!conversation.shown}
+        onExited={onExited}
+        onResume={agent ? onResume : undefined}
+      />
+    </ConversationFace>
   );
 }

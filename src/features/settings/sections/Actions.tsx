@@ -31,7 +31,7 @@ import {
   useClaudeModels,
   useCodexModels,
   useLinearTeams,
-  useRepos,
+  useOfferedRepos,
   useSetSetting,
   useSetting,
   useTrackerFeatures,
@@ -531,7 +531,9 @@ export function DefaultProjectField({
   hint: string;
   disabled?: boolean;
 }) {
-  const { data: repos = [] } = useRepos();
+  // A project Settings → Experimental hides isn't offered as a default; one
+  // already stored shows as itself, like any name the list no longer has.
+  const { data: repos = [] } = useOfferedRepos();
   const { data: value } = useSetting("app", settingKey);
   const setSetting = useSetSetting();
   // A stored name the registry no longer has still shows, as itself: reading

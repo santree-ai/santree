@@ -179,6 +179,14 @@ const SETTING_OVERRIDES: Record<string, string> = {
   trees_stage_all: "false",
   trees_auto_push: "true",
   trees_auto_pr: "true",
+  // Settings → Experimental, every switch on: the demo shows Daedalus, the
+  // English tutor's page and the Conversation view. `EXPERIMENTAL_KEYS` in
+  // `lib/queries`, spelled out because that module imports the bindings this
+  // world stands in for. Daedalus is real, so its switch is turned on in the
+  // backend too (`install.ts`).
+  experimental_daedalus: "true",
+  experimental_english_tutor: "true",
+  experimental_conversation: "true",
 };
 
 const settingOverride = (key: string) =>
@@ -332,6 +340,10 @@ export function buildDemoCommands(real: Commands): Partial<Commands> {
       const override = settingOverride(key);
       return override === undefined ? real.resolveSetting(repo, key) : ok(override);
     },
+    // The switches read on whatever is written, and the real Daedalus one is
+    // the boot's to turn on (`install.ts`): a click on the page writes nothing,
+    // so a recording can't stop the link it is showing.
+    setExperimental: async () => ok(null),
 
     // ── Trackers ───────────────────────────────────────────────────────────
     jiraSites: async () => ok([]),

@@ -312,7 +312,7 @@ async fn prepare(
     db: &Db,
     repo: &str,
     target: &ReviewTarget,
-    tutor: Option<&str>,
+    extras: &hooks::LaunchExtras,
     body: impl FnOnce(&PromptInputs, &[ReviewDraft]) -> Result<String>,
 ) -> Result<AiReviewLaunch> {
     let (owner, name) = github::split_slug(&target.pr_repo)?;
@@ -341,11 +341,11 @@ async fn prepare(
     // The three capability files are functions of the PR, not of the prompt, so
     // they are written *beside* the render-and-write rather than behind it.
     let (app2, owner, name) = (app.clone(), owner.to_string(), name.to_string());
-    let tutor = tutor.map(str::to_string);
+    let extras = extras.clone();
     let number = target.number;
     let capabilities = tokio::task::spawn_blocking(move || -> Result<(String, String)> {
         let index_path = write_diff_index(&app2, &owner, &name, number, &index)?;
-        let settings_path = hooks::claude_settings_ai_review(&app2, tutor.as_deref())
+        let settings_path = hooks::claude_settings_ai_review(&app2, &extras)
             .ok_or_else(|| anyhow!("santree's Claude settings file couldn't be written"))?;
         let mcp_config_path =
             hooks::mcp_config_ai_review(&app2, &owner, &name, number, &head_sha, &index_path)?;
@@ -376,9 +376,9 @@ pub async fn launch(
     db: &Db,
     repo: &str,
     target: &ReviewTarget,
-    tutor: Option<&str>,
+    extras: &hooks::LaunchExtras,
 ) -> Result<AiReviewLaunch> {
-    prepare(app, db, repo, target, tutor, |inputs, drafts| {
+    prepare(app, db, repo, target, extras, |inputs, drafts| {
         ai_review_prompt(target, inputs, drafts)
     })
     .await
@@ -432,11 +432,11 @@ fn diff_index_of(head_sha: &str, detail: &PrDetail) -> DiffIndex {
 pub fn tab_launch(
     app: &AppHandle,
     tab: &WorktreeTab,
-    tutor: Option<&str>,
+    extras: &hooks::LaunchExtras,
 ) -> Result<Option<TabLaunch>> {
     resolve_tab_launch(
         tab,
-        || hooks::claude_settings_ai_review(app, tutor),
+        || hooks::claude_settings_ai_review(app, extras),
         |owner, name, number| hooks::mcp_config_path(app, owner, name, number),
     )
 }
@@ -486,7 +486,7 @@ pub async fn fix_launch(
     db: &Db,
     repo: &str,
     target: &ReviewTarget,
-    tutor: Option<&str>,
+    extras: &hooks::LaunchExtras,
 ) -> Result<AiReviewLaunch> {
     // Checked before anything is fetched: "nothing to fix" is a one-row answer, and
     // it used to be reached only after a full launch had already been built.
@@ -498,7 +498,7 @@ pub async fn fix_launch(
     if items.is_empty() {
         return Err(anyhow!("there are no open review improvements to fix"));
     }
-    prepare(app, db, repo, target, tutor, |inputs, drafts| {
+    prepare(app, db, repo, target, extras, |inputs, drafts| {
         fix_prompt(target, inputs, &items, drafts)
     })
     .await

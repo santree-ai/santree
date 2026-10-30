@@ -53,26 +53,77 @@ pub struct ReviewAiChanged {}
 #[derive(Clone, Serialize, Type, Event)]
 pub struct ClaudeRateLimitsChanged {}
 
+/// "The reply a session is drawing changed" — its `MessageDisplay` line
+/// batches (`session_live_text`), or a state event that ended them. Fired once
+/// per rendered line batch while Claude streams, so it is kept apart from
+/// [`SessionStateChanged`] (which refetches every session row) and names its
+/// session: only a Conversation view showing that session reads again.
+/// `None` when the nudge named nothing usable — then every shown view reads.
+#[derive(Clone, Serialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLiveTextChanged {
+    pub session_id: Option<String>,
+}
+
 /// Which table a nudge is about, from the tag byte the sender wrote first.
 ///
 /// An unknown byte means session state: that was the original, untagged signal, so
 /// treating it as the default keeps an older `santree-hook` (one left in a stale
 /// bundle) working instead of silently doing nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signal {
     Usage,
     ReviewAi,
     RateLimits,
     State,
+    /// `t` and the session id after it (`None` if it isn't one).
+    LiveText(Option<String>),
 }
 
-fn kind_for_tag(tag: Option<u8>) -> Signal {
-    match tag {
+/// The signal a nudge's bytes name: its first byte, and for `t` the session
+/// id that follows. Any local process can connect to the socket, so the id is
+/// only passed on when it has the shape of one santree minted.
+fn kind_for(nudge: &[u8]) -> Signal {
+    match nudge.first() {
         Some(b'u') => Signal::Usage,
         Some(b'r') => Signal::ReviewAi,
         Some(b'l') => Signal::RateLimits,
+        Some(b't') => Signal::LiveText(
+            std::str::from_utf8(&nudge[1..])
+                .ok()
+                .filter(|id| crate::session::is_session_id(id))
+                .map(str::to_string),
+        ),
         _ => Signal::State,
     }
+}
+
+/// The most of a nudge read: a tag byte and a session id.
+const MAX_NUDGE: usize = 128;
+
+/// A nudge's bytes: its tag, and for `t` what follows it up to the sender's
+/// hang-up — all within one [`READ_TIMEOUT`], however the sender paces them
+/// (the accept loop serves one connection at a time).
+fn read_nudge(stream: &mut std::os::unix::net::UnixStream) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + READ_TIMEOUT;
+    let mut nudge = Vec::with_capacity(MAX_NUDGE);
+    let mut chunk = [0u8; MAX_NUDGE];
+    while nudge.len() < MAX_NUDGE && !(nudge.len() == 1 && nudge[0] != b't') {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        let want = if nudge.is_empty() {
+            1
+        } else {
+            MAX_NUDGE - nudge.len()
+        };
+        match stream.read(&mut chunk[..want]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => nudge.extend_from_slice(&chunk[..n]),
+        }
+    }
+    nudge
 }
 
 /// A nudge is a single byte written straight after connecting, so a client that
@@ -112,13 +163,11 @@ pub fn start(app: &AppHandle, socket_path: &Path) -> Result<()> {
                     continue;
                 }
             };
-            let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
             // The nudge's arrival is the whole signal; its first byte tags which
             // table changed — `u` = live usage, `r` = review drafts, `l` = rate
-            // limits, anything else = session state.
-            let mut buf = [0u8; 8];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            emit(&app, kind_for_tag((n > 0).then(|| buf[0])));
+            // limits, `t` = a session's live text (its id follows), anything
+            // else = session state.
+            emit(&app, kind_for(&read_nudge(&mut stream)));
         }
     });
     Ok(())
@@ -133,6 +182,7 @@ pub fn emit(app: &AppHandle, signal: Signal) {
         Signal::ReviewAi => ReviewAiChanged {}.emit(app),
         Signal::RateLimits => ClaudeRateLimitsChanged {}.emit(app),
         Signal::State => SessionStateChanged {}.emit(app),
+        Signal::LiveText(session_id) => SessionLiveTextChanged { session_id }.emit(app),
     };
 }
 
@@ -142,12 +192,22 @@ mod tests {
 
     #[test]
     fn the_tag_byte_picks_the_table() {
-        assert_eq!(kind_for_tag(Some(b'u')), Signal::Usage);
-        assert_eq!(kind_for_tag(Some(b'r')), Signal::ReviewAi);
-        assert_eq!(kind_for_tag(Some(b'l')), Signal::RateLimits);
-        assert_eq!(kind_for_tag(Some(b's')), Signal::State);
+        assert_eq!(kind_for(b"u"), Signal::Usage);
+        assert_eq!(kind_for(b"r"), Signal::ReviewAi);
+        assert_eq!(kind_for(b"l"), Signal::RateLimits);
+        assert_eq!(kind_for(b"s"), Signal::State);
         // An empty or unrecognised nudge is the original, untagged signal.
-        assert_eq!(kind_for_tag(None), Signal::State);
-        assert_eq!(kind_for_tag(Some(b'?')), Signal::State);
+        assert_eq!(kind_for(b""), Signal::State);
+        assert_eq!(kind_for(b"?"), Signal::State);
+        // The live-text nudge carries its session, passed on only in the shape
+        // santree mints (the socket takes any local process's bytes).
+        let sid = "9f1c0e2a-4b7d-4c81-9d2e-0a1b2c3d4e5f";
+        assert_eq!(
+            kind_for(format!("t{sid}").as_bytes()),
+            Signal::LiveText(Some(sid.to_string()))
+        );
+        for junk in [&b"t"[..], b"t../../etc", b"t\xff\xfe"] {
+            assert_eq!(kind_for(junk), Signal::LiveText(None), "{junk:?}");
+        }
     }
 }

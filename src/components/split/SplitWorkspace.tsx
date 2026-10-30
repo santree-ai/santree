@@ -69,6 +69,10 @@ export interface SplitWorkspaceProps<T extends string> {
   /** The host's whole-area controls, drawn at the end of the top-right group's
    *  strip — next to the right panel they mostly act on. */
   trailing?: ReactNode;
+  /** Controls for what one group shows, given that group's active tab — an
+   *  agent tab's Terminal/Conversation switch. Drawn at the end of that group's
+   *  own strip, before the whole-area ones. */
+  groupTrailing?: (active: T | null) => ReactNode;
   /** Drawn in place of content when nothing at all is open. */
   empty?: ReactNode;
 }
@@ -117,6 +121,7 @@ export function SplitWorkspace<T extends string>({
   newTabMenuClassName,
   newTabDisabled,
   trailing,
+  groupTrailing,
   empty,
 }: SplitWorkspaceProps<T>) {
   const { layout } = split;
@@ -309,7 +314,12 @@ export function SplitWorkspace<T extends string>({
               newTabMenu={newTabMenu}
               newTabMenuClassName={newTabMenuClassName}
               newTabDisabled={newTabDisabled}
-              trailing={id === corner ? trailing : undefined}
+              trailing={
+                <>
+                  {groupTrailing?.(g.active)}
+                  {id === corner ? trailing : null}
+                </>
+              }
               muted={isSplit && !focused}
               shortcut={focused}
               dragging={drag?.tab ?? null}

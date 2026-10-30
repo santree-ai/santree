@@ -45,6 +45,14 @@ vi.mock("../../../lib/queries", () => ({
       { name: "acme/web", path: "/src/web" },
     ],
   }),
+  useOfferedRepos: () => ({
+    data: [
+      { name: "acme/app", path: "/src/app" },
+      { name: "acme/web", path: "/src/web" },
+    ],
+    isFetched: true,
+    hidden: () => false,
+  }),
   COMMIT_MESSAGE_AGENT_KEY: "commit.agent",
   COMMIT_MESSAGE_MODEL_KEY: "commit.model",
   DEFAULT_HELPER_MODEL: "haiku",

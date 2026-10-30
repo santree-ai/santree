@@ -33,6 +33,8 @@ import { EmptyState } from "../../components/primitives";
 import { useWorktreeTabLaunch } from "../../lib/queries";
 import { useAgentRuns } from "../../state/AgentRuns";
 import type { FixCiLaunch } from "../../state/AppContext";
+import { ConversationFace } from "../conversation/ConversationFace";
+import { useConversationFace } from "../conversation/viewMode";
 import { agentProvider } from "../terminal/agentProvider";
 import { remoteControlTab } from "./model";
 import { useAgentTab } from "./useAgentTab";
@@ -109,6 +111,7 @@ export function AgentTabPane({
     ended,
     resume,
   });
+  const conversation = useConversationFace(refId, agent?.kind, repo);
 
   if (work.initialSetup) {
     return (
@@ -148,15 +151,26 @@ export function AgentTabPane({
     return <EmptyState className="h-full" title={phase.title} subtitle={phase.subtitle} />;
   }
   return (
-    <WorktreeTerminal
-      id={`${worktree.id}:tab:${tab.id}`}
-      branch={tab.title}
-      cwd={worktree.path}
-      seed={seed}
-      agent={agent}
-      onLaunched={() => clearAgentLaunch(worktree.id)}
-      onExited={onExited}
+    <ConversationFace
+      face={conversation}
+      live={{ repo, termKey: refId }}
       onResume={agent ? onResume : undefined}
-    />
+    >
+      {/* Mounted either way, and never remounted by the switch: it is what
+          launches and keeps the session, and its launch is not to be run
+          twice. With the conversation up it holds no slot, so the pane stays
+          hidden at the size it had. */}
+      <WorktreeTerminal
+        id={`${worktree.id}:tab:${tab.id}`}
+        branch={tab.title}
+        cwd={worktree.path}
+        seed={seed}
+        agent={agent}
+        attach={!conversation.shown}
+        onLaunched={() => clearAgentLaunch(worktree.id)}
+        onExited={onExited}
+        onResume={agent ? onResume : undefined}
+      />
+    </ConversationFace>
   );
 }

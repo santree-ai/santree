@@ -9,8 +9,8 @@
 
 import { useCanGoBack, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
-import { useEffect, useState } from "react";
-import type { Repo } from "../../bindings";
+import { useEffect, useMemo, useState } from "react";
+import type { ExperimentalFeature, Repo } from "../../bindings";
 import { RepoAvatar } from "../../components/chrome/RepoAvatar";
 import {
   AgentIcon,
@@ -19,6 +19,7 @@ import {
   ChevronDownIcon,
   DaedalusLogo,
   DocsIcon,
+  FlaskIcon,
   GearIcon,
   GitHubLogo,
   GlobeIcon,
@@ -37,7 +38,7 @@ import { Dropdown, Tabs } from "../../components/primitives";
 import { RemoveProjectDialog } from "../../components/shell/RemoveProjectDialog";
 import { ServerBanner } from "../../components/shell/ServerBanner";
 import { TRAFFIC_LIGHTS_INSET } from "../../components/shell/Sidebar";
-import { useRepos } from "../../lib/queries";
+import { useExperimental, useOfferedRepos } from "../../lib/queries";
 import { useApp } from "../../state/AppContext";
 import { alpha } from "../../theme/colors";
 import { ReviewActionSection, TriageActionSection } from "./sections/Actions";
@@ -45,6 +46,7 @@ import { ClaudeAgentSection, CodexAgentSection } from "./sections/Agents";
 import { DaedalusSection } from "./sections/Daedalus";
 import { EnglishTutorSection } from "./sections/EnglishTutor";
 import { EnvironmentSection } from "./sections/Environment";
+import { ExperimentalSection } from "./sections/Experimental";
 import { GeneralSection } from "./sections/General";
 import { GitHubSection } from "./sections/GitHub";
 import { JiraSection } from "./sections/Jira";
@@ -137,6 +139,13 @@ const terminalEntry: SectionDef = {
   label: "Terminal",
   icon: <TerminalIcon size={ICON_SIZE} />,
   render: () => <TerminalSection />,
+};
+
+/** The sections a Settings → Experimental switch hides while it is off: the
+ *  page of each feature still being built. */
+const EXPERIMENTAL_SECTIONS: Record<string, ExperimentalFeature> = {
+  daedalus: "Daedalus",
+  "english-tutor": "EnglishTutor",
 };
 
 const APP_NAV: NavNode[] = [
@@ -239,7 +248,34 @@ const APP_NAV: NavNode[] = [
     sections: [triageEntry(false), workEntry(false), reviewEntry(false)],
   },
   promptsEntry(false),
+  // Last, and always there: it is where the features above it that are still
+  // being built are turned on.
+  {
+    group: "Experimental",
+    sections: [
+      {
+        key: "experimental",
+        label: "Experimental",
+        icon: <FlaskIcon size={ICON_SIZE} />,
+        render: () => <ExperimentalSection />,
+      },
+    ],
+  },
 ];
+
+/** The user scope's nav, less the sections whose Settings → Experimental switch
+ *  is off. A group left with nothing in it goes too. */
+function appNav(on: Partial<Record<ExperimentalFeature, boolean>>): NavNode[] {
+  const shown = (s: SectionDef) => {
+    const feature = EXPERIMENTAL_SECTIONS[s.key];
+    return feature === undefined || on[feature] === true;
+  };
+  return APP_NAV.flatMap((node): NavNode[] => {
+    if (!isGroup(node)) return shown(node) ? [node] : [];
+    const sections = node.sections.filter(shown);
+    return sections.length > 0 ? [{ ...node, sections }] : [];
+  });
+}
 
 const REPO_NAV: NavNode[] = [
   {
@@ -281,10 +317,19 @@ function resolveSection(nodes: NavNode[], key: string | undefined): SectionDef {
 }
 
 export function SettingsView() {
-  const { data: repos = [], isSuccess: reposKnown } = useRepos();
+  // A project Settings → Experimental hides has no settings to edit here either.
+  const { data: offered } = useOfferedRepos();
+  const repos = offered ?? [];
+  const reposKnown = offered !== undefined;
   const router = useRouter();
   const canGoBack = useCanGoBack();
   const navigate = useNavigate();
+  const daedalus = useExperimental("Daedalus");
+  const englishTutor = useExperimental("EnglishTutor");
+  const appSections = useMemo(
+    () => appNav({ Daedalus: daedalus, EnglishTutor: englishTutor }),
+    [daedalus, englishTutor],
+  );
 
   // Land on a deep-linked section (e.g. `/settings?section=actions`) when given.
   const {
@@ -295,9 +340,10 @@ export function SettingsView() {
   const [pickedScope, setScope] = useState<Scope>(initialScope ?? "app");
   // The last project removed takes the Repo scope with it.
   const scope: Scope = reposKnown && repos.length === 0 ? "app" : pickedScope;
-  const [section, setSection] = useState<string>(
-    () => resolveSection(initialScope === "repo" ? REPO_NAV : APP_NAV, initialSection).key,
-  );
+  // The key asked for, resolved against the nav on every render: a deep link to
+  // a page whose switch is still being read lands there once the switch says
+  // it is on, rather than on whatever stood in for it in the first frame.
+  const [section, setSection] = useState<string | undefined>(initialSection);
 
   // Which repo we're *editing* under the Repo scope. Its own state, with its own
   // picker: Settings is a page, reached from anywhere, and "whose settings am I
@@ -314,10 +360,10 @@ export function SettingsView() {
   const goBack = () => (canGoBack ? router.history.back() : navigate({ to: "/" }));
   const switchScope = (next: Scope) => {
     setScope(next);
-    setSection(defaultSection(next === "app" ? APP_NAV : REPO_NAV));
+    setSection(defaultSection(next === "app" ? appSections : REPO_NAV));
   };
 
-  const nav = scope === "app" ? APP_NAV : REPO_NAV;
+  const nav = scope === "app" ? appSections : REPO_NAV;
   const active = resolveSection(nav, section);
 
   const back = (

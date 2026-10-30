@@ -9,15 +9,20 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TriageTicket, WorktreeTab } from "../../bindings";
-import { useTestSplit } from "../../components/split/testing";
+import { seedSplit, useTestSplit } from "../../components/split/testing";
 import { triageTicket } from "../../test/fixtures";
 import type { TerminalTabs } from "../terminal/orchestrator";
 import { TerminalsProvider, useTerminals } from "../terminal/TerminalsContext";
 
+/** Settings → Experimental → Conversation view, dialled per test. */
+const conversation = vi.hoisted(() => ({ on: true }));
+
 vi.mock("../../lib/queries", () => ({
   useTicketProvider: () => "Linear",
+  // A project on this Mac, so a Claude tab can offer its conversation.
+  useRepos: () => ({ data: [{ name: "acme/app", location: "Local" }] }),
+  useExperimental: (feature: string) => feature !== "Conversation" || conversation.on,
   // "Continue on account": no extra logins, so no tab menu.
-  useRepos: () => ({ data: [] }),
   useAgentAccounts: () => ({ data: [] }),
   useTabSessionAccounts: () => new Map(),
   useSetTerminalSessionAccount: () => ({ mutateAsync: vi.fn() }),
@@ -26,6 +31,9 @@ vi.mock("../../lib/queries", () => ({
   useCodexAccount: () => ({ data: { connected: true } }),
   useCodexHealth: () => ({ data: { available: true } }),
   useBrowserSupported: () => ({ data: true }),
+  // Which face a Claude tab opens on: never set, so its terminal.
+  CLAUDE_TAB_FACE_KEY: "claude_tab_face",
+  useSetting: () => ({ data: null }),
 }));
 
 import { TriageTabBar } from "./TriageTabBar";
@@ -106,18 +114,25 @@ function mount(tabs: TabsModel, rightCollapsed = false) {
 
 const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent);
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  conversation.on = true;
+});
 
 describe("TriageTabBar", () => {
   /** The ticket tab is not a stored row — it is what the workspace *is*, so
-   *  there is nothing for a ✕ to close it to. */
+   *  there is nothing for a ✕ to close it to. A Claude tab carries the
+   *  Terminal/Conversation switch, and only while Settings → Experimental has
+   *  the Conversation view on. */
   it("leads with the unclosable ticket, then a closable tab per provider, then the rows", () => {
-    mount(
-      tabsModel({
-        providers: ["Codex", "Claude"],
-        rows: [row("a", "agent", "Codex 2"), row("b", "terminal", "Terminal")],
-      }),
-    );
+    const tabs = tabsModel({
+      providers: ["Codex", "Claude"],
+      rows: [row("a", "agent", "Codex 2"), row("b", "terminal", "Terminal")],
+    });
+    // Showing the Claude investigation, whose group carries the switch.
+    const open: TriageMainTab[] = ["linear", agentTab("Codex"), agentTab("Claude")];
+    seedSplit([...open, rowTab("a"), rowTab("b")], agentTab("Claude"));
+    const { rerender } = mount(tabs);
 
     expect(tabNames()).toEqual(["Linear", "Codex", "Claude Code", "Codex 2", "Terminal"]);
     expect(screen.getByRole("button", { name: "Close Codex" })).toBeVisible();
@@ -125,6 +140,23 @@ describe("TriageTabBar", () => {
     expect(screen.getByRole("button", { name: "Close Codex 2" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Close Terminal" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Close Linear" })).not.toBeInTheDocument();
+
+    const faceSwitch = () => screen.queryByRole("radiogroup", { name: "Show this agent as" });
+    expect(faceSwitch()).toBeInTheDocument();
+    // Its two faces, named: the terminal (never switched, the default), and the
+    // conversation a click away.
+    const toConversation = screen.getByRole("radio", { name: "Conversation" });
+    expect(screen.getByRole("radio", { name: "Terminal" })).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toConversation);
+    expect(toConversation).toHaveAttribute("aria-checked", "true");
+    conversation.on = false;
+    rerender(
+      <TerminalsProvider>
+        <Bar tabs={tabs} rightCollapsed={false} />
+        <Probe />
+      </TerminalsProvider>,
+    );
+    expect(faceSwitch()).not.toBeInTheDocument();
   });
 
   /** A tab is its process: the ✕ ends the PTY and then forgets the session. Only

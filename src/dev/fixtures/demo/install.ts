@@ -8,6 +8,7 @@
  */
 import type { QueryClient } from "@tanstack/react-query";
 
+import { commands } from "../../../bindings";
 import type { TerminalSpec } from "../../../features/terminal/orchestrator";
 import { resetDemo, saveStartingPoint, snapshotOnce } from "./reset";
 import {
@@ -121,6 +122,12 @@ export async function installDemo(queryClient: QueryClient): Promise<void> {
   globalThis.__santreeFixtureTerminals = terminalSpecs();
   applyScene();
   window.addEventListener("keydown", onKeyDown, { capture: true });
+  // Daedalus is real here, and the backend links only while its Settings →
+  // Experimental switch is on: turn it on, as the views are told it is
+  // (`handlers.ts`). The one real setting the demo writes; dev:alt keeps it.
+  void commands
+    .setExperimental("Daedalus", true)
+    .catch((e: unknown) => console.warn("[santree] demo: turning Daedalus on failed", e));
   // The first boot is what ⌃⌥⌘R returns to, until ⌃⌥⌘S saves another.
   await snapshotOnce();
   console.info(

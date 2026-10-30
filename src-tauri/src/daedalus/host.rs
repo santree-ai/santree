@@ -8,6 +8,7 @@
 //! turns [`NotConnected`] into its own disabled state: a Daedalus project never
 //! falls back to running locally.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -60,6 +61,7 @@ impl std::error::Error for NotConnected {}
 /// A link state as one sentence, for an action that needed the link.
 pub fn describe(link: &DaedalusLink) -> String {
     match link {
+        DaedalusLink::Off => "Daedalus is off. Turn it on in Settings › Experimental.".into(),
         DaedalusLink::AgentMissing => {
             "Install the Daedalus agent on this machine to reach Daedalus.".into()
         }
@@ -84,8 +86,12 @@ pub fn describe(link: &DaedalusLink) -> String {
 /// The app's one link to Daedalus.
 pub struct DaedalusHost {
     host: Arc<RemoteHost>,
-    /// What [`DaedalusHost::resume`] configured, for [`DaedalusHost::retry_now`].
+    /// What [`DaedalusHost::resume`] configured, for [`DaedalusHost::retry_now`];
+    /// `None` again once [`DaedalusHost::stop`] has dropped the link.
     applied: Mutex<Option<HostConfig>>,
+    /// Settings → Experimental → Daedalus is on: the link is wanted. Off, the
+    /// state is [`DaedalusLink::Off`] whatever the host last reported.
+    on: AtomicBool,
     /// `hello`'s `owner`: this app process. Minted per launch — the link
     /// outlives page reloads, so it can't be the webview's page owner (which
     /// is what a remote PTY session is tagged with, like a local one).
@@ -136,8 +142,25 @@ impl DaedalusHost {
             agents: BoxAgents::default(),
             host,
             applied: Mutex::new(None),
+            on: AtomicBool::new(true),
             owner: uuid::Uuid::new_v4().to_string(),
         }
+    }
+
+    /// Settings → Experimental → Daedalus, applied now: on links, resuming the
+    /// hook queue after the cursor saved in `db`; off drops the link
+    /// ([`DaedalusHost::stop`]). What launch does with the stored switch, and
+    /// what turning it does at once. Call from inside the runtime.
+    pub async fn apply(&self, db: &Db, on: bool) {
+        if !on {
+            self.stop();
+            return;
+        }
+        let cursor = saved_cursor(db).await.unwrap_or_else(|e| {
+            log::warn!("daedalus: reading the hook cursor failed: {e:#}");
+            None
+        });
+        self.resume(cursor);
     }
 
     /// Start linking, resuming the hook queue after `cursor` (`(boot_id,
@@ -150,13 +173,15 @@ impl DaedalusHost {
             hook_cursor,
             boot_id,
         };
+        self.on.store(true, Ordering::SeqCst);
+        self.terminals.refuse_unbound(false);
         *self.applied.lock().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
         self.host.configure(Some(config));
         self.terminals.watch();
     }
 
     /// Skip the backoff: a link that isn't up tries again now. What a health
-    /// check does before it asks how the link is.
+    /// check does before it asks how the link is. Nothing while the link is off.
     pub fn retry_now(&self) {
         if matches!(self.host.current_status(), HostStatus::Connected { .. }) {
             return;
@@ -167,15 +192,37 @@ impl DaedalusHost {
         }
     }
 
-    /// Drop the link and stop reconnecting — santree quitting, as far as the box
-    /// can tell.
-    #[cfg(test)]
+    /// Drop the link and stop reconnecting: santree quitting, as far as the box
+    /// can tell, and Settings → Experimental → Daedalus turned off. The
+    /// connection is ended, not only let go of: a pane attached over it holds
+    /// its client, and would carry on over a link nothing manages. A pane with
+    /// a session on the box waits, reconnecting, and attaches again once the
+    /// link is resumed. A pane that never reached a session is lost, and so is
+    /// any pane opened while the link is off, so a later resume starts nothing
+    /// that was asked for in between. Nothing stored goes: projects, the hook
+    /// cursor and the sessions' rows stay as they are.
     pub fn stop(&self) {
+        self.on.store(false, Ordering::SeqCst);
+        *self.applied.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.terminals.refuse_unbound(true);
+        self.terminals.lose_unbound();
+        let live = self.host.client();
         self.host.stop();
+        if let Some(client) = live {
+            client.shutdown();
+        }
+    }
+
+    /// Whether Settings → Experimental → Daedalus is on (as last applied).
+    pub fn enabled(&self) -> bool {
+        self.on.load(Ordering::SeqCst)
     }
 
     /// The link's state now.
     pub fn state(&self) -> DaedalusLink {
+        if !self.enabled() {
+            return DaedalusLink::Off;
+        }
         link_of(self.host.current_status())
     }
 
@@ -572,6 +619,7 @@ mod tests {
     use crate::sessions::testkit::fast;
     use std::future::Future;
     use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
 
     use santree_remote_client::fake::FakeDaemon;
     use santree_remote_client::transport::BoxFuture;
@@ -827,6 +875,55 @@ mod tests {
         );
 
         link.host.stop();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Settings → Experimental → Daedalus. Off, santree never connects: the
+    /// state is `Off`, a call that needs the box is refused as off at once, and
+    /// "Run check" doesn't link either. On links; off again ends the live
+    /// connection itself, so a pane still holding its client sees it closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_link_runs_only_while_its_experimental_switch_is_on() {
+        let base =
+            std::env::temp_dir().join(format!("santree-daedalus-switch-{}", std::process::id()));
+        let (db, _) = app_db(&base).await;
+        let daemon = FakeDaemon::new();
+        let connects = Arc::new(AtomicUsize::new(0));
+        let connector: Arc<dyn Connector> = {
+            let (daemon, connects) = (daemon.clone(), connects.clone());
+            Arc::new(move || -> BoxFuture<'static, Result<Link, ConnectError>> {
+                connects.fetch_add(1, Ordering::SeqCst);
+                let link = daemon.connect();
+                Box::pin(async move { Ok(link) })
+            })
+        };
+        let link = DaedalusHost::with_connector(connector, fast());
+
+        link.apply(&db, false).await;
+        link.retry_now();
+        assert_eq!(link.state(), DaedalusLink::Off);
+        let refused = link.client_within(WAIT).await.unwrap_err();
+        assert_eq!(refused.link, DaedalusLink::Off);
+        assert_eq!(
+            connects.load(Ordering::SeqCst),
+            0,
+            "nothing tried to connect"
+        );
+
+        link.apply(&db, true).await;
+        let client = link
+            .client_within(WAIT)
+            .await
+            .expect("on, the link comes up");
+        assert!(matches!(link.state(), DaedalusLink::Connected { .. }));
+
+        link.apply(&db, false).await;
+        assert!(
+            client.is_closed(),
+            "the connection ended, not only let go of"
+        );
+        assert_eq!(link.state(), DaedalusLink::Off);
+        assert!(link.client().is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -33,6 +33,8 @@ import {
   useResolvedSetting,
 } from "../../lib/queries";
 import { ticketHandle } from "../../lib/tracker";
+import { ConversationFace } from "../conversation/ConversationFace";
+import { useConversationFace } from "../conversation/viewMode";
 import { sessionAgent } from "../terminal/agentProvider";
 import { agentSessionSeed } from "../terminal/agentSeed";
 import type { AgentTabIdentity } from "../terminal/orchestrator";
@@ -205,6 +207,7 @@ export function InvestigatePane({
     setResumeRequested(true);
     setLiveSeen(false);
   }, [dropCachedSession]);
+  const conversation = useConversationFace(termKey, resolvedAgent, repo);
 
   if (ended) {
     return (
@@ -223,19 +226,24 @@ export function InvestigatePane({
   }
 
   return (
-    <div className="min-h-0 flex-1">
+    <div className="flex min-h-0 flex-1 flex-col">
       {ready ? (
-        <InvestigateTerminal
-          ticketId={ticketId}
-          termKey={termKey}
-          cwd={cwd}
-          seed={seed}
-          agent={{ kind: resolvedAgent, repo, termKey }}
-          onExited={handleExited}
-          // A lost pane's Resume is this one, already clicked: the ended offer
-          // it would otherwise land on does not ask again.
-          onResume={resumeNow}
-        />
+        <ConversationFace face={conversation} live={{ repo, termKey }} onResume={resumeNow}>
+          {/* Kept mounted with the conversation up, holding no slot: see
+              AgentTabPane. */}
+          <InvestigateTerminal
+            ticketId={ticketId}
+            termKey={termKey}
+            cwd={cwd}
+            seed={seed}
+            agent={{ kind: resolvedAgent, repo, termKey }}
+            attach={!conversation.shown}
+            onExited={handleExited}
+            // A lost pane's Resume is this one, already clicked: the ended offer
+            // it would otherwise land on does not ask again.
+            onResume={resumeNow}
+          />
+        </ConversationFace>
       ) : (
         <div className="flex h-full items-center justify-center">
           <TerminalActivity label="Preparing investigation…" />
@@ -254,6 +262,7 @@ function InvestigateTerminal({
   cwd,
   seed,
   agent,
+  attach,
   onExited,
   onResume,
 }: {
@@ -264,14 +273,17 @@ function InvestigateTerminal({
   cwd?: string;
   seed?: string;
   agent: AgentTabIdentity;
+  /** False while the conversation shows instead: launched and kept, not drawn. */
+  attach: boolean;
   onExited: () => void;
   onResume: () => void;
 }) {
   const { hostRef } = useEmbeddedTerminal({
     spec: { title: ticketId, cwd, source: "triage", refId: termKey, seed, agent },
     onExited,
+    attach,
     onResume,
   });
   // The TerminalLayer overlays this host with the ticket's live session.
-  return <div ref={hostRef} className="h-full w-full" />;
+  return attach ? <div ref={hostRef} className="h-full w-full" /> : null;
 }

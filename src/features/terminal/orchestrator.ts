@@ -7,6 +7,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import type { AgentKind } from "../../bindings";
+import type { PaneLink, SessionId, TerminalRenderer } from "./types";
 
 /** Where a terminal was opened from — a grouping, not an identity. A pane is
  *  identified by its `refId` (the surface's `term_key`) and the provider in it;
@@ -81,6 +82,11 @@ const withKey = (spec: TerminalSpec): TerminalTab => ({
 export interface TerminalEmbed {
   host: HTMLElement;
   key: string;
+  /** Whether this host is where the user is working: in a split main area, its
+   *  group is the focused one. Only such a claim takes the keyboard (see
+   *  {@link TerminalTabs.embed}). Absent counts as yes — outside a split there
+   *  is nowhere else to be working. */
+  focused?: boolean;
   /** Called when the user presses inside the session. The terminal is drawn by
    *  the layer, not inside its host, so a host that cares where the user is
    *  working (a split group taking focus) can't see that press itself. */
@@ -98,8 +104,20 @@ export interface TerminalEmbed {
  *  has a tab key — a closing tab bar, a worktree being deleted — can reach the
  *  session behind it. */
 export interface PaneHandle {
+  /** The PTY session the pane is attached to: what the backend's answers about
+   *  a pane name it by (`AgentProcess.paneId`). A resumed tab gets a new pane,
+   *  and with it a new id. */
+  id: SessionId;
   end: () => void;
+  /** How the user types into the pane from outside it — the Conversation view's
+   *  composer, while the terminal is hidden. Its renderer's own paste and key
+   *  press, so the bytes leave by the one writer the pane wires
+   *  (`renderer.onInput → backend.write`), encoded as the program asked. */
+  input?: PaneInput;
 }
+
+/** The renderer's input half, as {@link PaneHandle.input} hands it out. */
+export type PaneInput = Pick<TerminalRenderer, "paste" | "press">;
 
 /** One claim on the inline slot, tagged with an identity so releasing it can't
  *  drop somebody else's claim. */
@@ -136,7 +154,12 @@ export interface TerminalTabs {
   /** Every session embedded inline right now — one per session, its newest
    *  claim, oldest claim first. Several at once when the main area is split. */
   embeds: TerminalEmbed[];
-  /** The newest live claim: the session that takes the keyboard. */
+  /** The session that takes the keyboard: the newest claim whose host is where
+   *  the user is working ({@link TerminalEmbed.focused}). A claim in a split
+   *  group that isn't focused never takes it — so when the focused group's
+   *  terminal lets go of its slot (hidden behind the Conversation view, say),
+   *  the keyboard stays where the user is, rather than passing to whichever
+   *  other group's terminal claimed before it. */
   embed: TerminalEmbed | null;
   /** Claim a session's inline slot. Returns a release fn that hands the slot back
    *  to whoever held it before, rather than blanking it: claims overlap (a route
@@ -150,15 +173,46 @@ export interface TerminalTabs {
   /** Register a live pane's imperative handle. Called by the render layer once
    *  the PTY is open; returns an unregister fn. */
   registerPane: (key: string, handle: PaneHandle) => () => void;
+  /** The input half of a live pane's handle, or null while it has none (still
+   *  opening, or gone). Read at the moment of the user's action, never held. */
+  inputFor: (key: string) => PaneInput | null;
+  /** The PTY session a tab's pane is attached to now ({@link PaneHandle.id}),
+   *  or null while it has none. Live, unlike the handles: a view matching it
+   *  against what the backend says of that pane redraws when the tab gets a
+   *  new one, rather than going on with an answer about the old one. */
+  paneIdOf: (key: string) => SessionId | null;
+  /** Whether a pane reaches its session right now (`PaneLink`): `reconnecting`
+   *  while a remote session's link is down, `lost` once the session is gone,
+   *  `live` otherwise. For a view that types into a pane it doesn't show — the
+   *  Conversation view's composer — which can neither reach a session through
+   *  such a pane nor see the pane's own overlay saying so. */
+  linkOf: (key: string) => PaneLink;
+  /** The render layer reports each change of a pane's link here. */
+  reportLink: (key: string, link: PaneLink) => void;
+}
+
+/** `links` with `key`'s link set to `link`; `live` is the absence of an entry. */
+function withLink(
+  links: ReadonlyMap<string, PaneLink>,
+  key: string,
+  link: PaneLink,
+): ReadonlyMap<string, PaneLink> {
+  if ((links.get(key) ?? "live") === link) return links;
+  const next = new Map(links);
+  if (link === "live") next.delete(key);
+  else next.set(key, link);
+  return next;
 }
 
 export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
   const [tabs, setTabs] = useState<TerminalTab[]>(() => initial.map(withKey));
   const [activeKey, setActiveKey] = useState<string | null>(tabs[0]?.key ?? null);
   const [claims, setClaims] = useState<EmbedClaim[]>([]);
-  const embed = claims.length > 0 ? claims[claims.length - 1].embed : null;
-  // Per session, the newest claim wins — the same hand-back rule as `embed`, one
-  // slot per session instead of one for the app.
+  // The newest claim where the user is working (see `embed` in the interface).
+  let embed: TerminalEmbed | null = null;
+  for (const c of claims) if (c.embed.focused !== false) embed = c.embed;
+  // Per session, the newest claim wins, so a release hands the session's slot
+  // back to whoever held it before.
   const embeds = useMemo(() => {
     const newest = new Map<string, TerminalEmbed>();
     for (const c of claims) {
@@ -226,6 +280,14 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
     [releaseRow],
   );
 
+  // Each pane's link, by tab, while it is anything but `live`. State, unlike the
+  // handles below: a view showing a pane as offline has to redraw when it is.
+  const [links, setLinks] = useState<ReadonlyMap<string, PaneLink>>(new Map());
+  const reportLink = useCallback((key: string, link: PaneLink) => {
+    setLinks((prev) => withLink(prev, key, link));
+  }, []);
+  const linkOf = useCallback((key: string) => links.get(key) ?? "live", [links]);
+
   // Closing the active tab falls back to the tab before it.
   const close = useCallback((key: string) => {
     const prev = tabsRef.current;
@@ -239,6 +301,7 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
     tabsRef.current = next;
     setTabs(next);
     setActiveKey((cur) => (cur === key ? (next[Math.max(0, idx - 1)]?.key ?? null) : cur));
+    setLinks((current) => withLink(current, key, "live"));
   }, []);
 
   // Handles of the live panes, keyed by tab. A ref, not state: this is a
@@ -246,14 +309,33 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
   // churn every consumer of the context for no visual change.
   const panes = useRef(new Map<string, PaneHandle>());
 
+  // Each live pane's session id, by tab — state, for `paneIdOf`.
+  const [paneIds, setPaneIds] = useState<ReadonlyMap<string, SessionId>>(new Map());
+
   const registerPane = useCallback((key: string, handle: PaneHandle) => {
     panes.current.set(key, handle);
+    setPaneIds((current) =>
+      current.get(key) === handle.id ? current : new Map(current).set(key, handle.id),
+    );
+    // A pane registers once its session has answered, so it reaches it: a
+    // `lost` left by the pane it replaced no longer stands.
+    setLinks((current) => withLink(current, key, "live"));
     return () => {
       // Only drop our own registration — a remounting pane can register the next
       // handle before the previous one's cleanup runs.
-      if (panes.current.get(key) === handle) panes.current.delete(key);
+      if (panes.current.get(key) !== handle) return;
+      panes.current.delete(key);
+      setPaneIds((current) => {
+        if (!current.has(key)) return current;
+        const next = new Map(current);
+        next.delete(key);
+        return next;
+      });
     };
   }, []);
+
+  const inputFor = useCallback((key: string) => panes.current.get(key)?.input ?? null, []);
+  const paneIdOf = useCallback((key: string) => paneIds.get(key) ?? null, [paneIds]);
 
   const attachEmbed = useCallback((next: TerminalEmbed) => {
     const id = embedSeq++;
@@ -283,6 +365,10 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
       attachEmbed,
       detachEmbeds,
       registerPane,
+      inputFor,
+      paneIdOf,
+      linkOf,
+      reportLink,
     }),
     [
       tabs,
@@ -298,6 +384,10 @@ export function useTerminalTabs(initial: TerminalSpec[] = []): TerminalTabs {
       attachEmbed,
       detachEmbeds,
       registerPane,
+      inputFor,
+      paneIdOf,
+      linkOf,
+      reportLink,
     ],
   );
 }

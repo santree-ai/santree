@@ -110,8 +110,11 @@ export class TauriBackend implements TerminalBackend {
     return result.data;
   }
 
-  write(id: SessionId, data: string) {
-    void commands.terminalWrite(id, data);
+  write(id: SessionId, data: string): Promise<boolean> {
+    return commands.terminalWrite(id, data).then(
+      (result) => result.status === "ok",
+      () => false,
+    );
   }
 
   seed(id: SessionId, seed: string) {

@@ -314,6 +314,8 @@ describe("UsageSegment — Claude windows", () => {
         model: "claude-opus-5",
         costUsd: 3,
         updatedAtMs: Date.now(),
+        outputStyle: null,
+        vimMode: null,
       },
     ];
     render(<UsageSegment />);

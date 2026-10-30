@@ -182,7 +182,7 @@ export function EnglishTutorSection() {
                 )}
               </div>
               <div className="rounded-xl border border-line-2 bg-raised px-4 py-3">
-                <Markdown>{analysis.text}</Markdown>
+                <Markdown noRemote>{analysis.text}</Markdown>
               </div>
             </>
           ) : (
