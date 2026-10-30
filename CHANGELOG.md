@@ -7,6 +7,15 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.10 — 2026-10-30
+
+- A visual refresh across the whole app. santree now uses the Mac's own system font, with a monospace face kept for code, paths, branches and commands only.
+- One consistent set of text sizes, corner radii and shadows everywhere, so lists, menus, dialogs and settings line up with each other.
+- The accent is santree's emerald, used for the things you act on: the main button, switches that are on, links and keyboard focus.
+- Selected rows are a quiet highlight instead of a bar down the side, and text fields no longer draw a box around themselves when you click into them.
+- Badges are softer, section labels are no longer all caps, and Settings, Appearance is now a single card.
+- A worktree's right-click menu no longer starts with an empty separator.
+
 ## 0.1.19-beta.9 — 2026-10-29
 
 - New and experimental: read a Claude tab as a conversation. Turn on Settings, Experimental, Conversation view, open a new Claude tab, and press ⌘J or use the switch at the top to flip between the conversation and the terminal. Claude keeps running in its terminal the whole time.
