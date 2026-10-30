@@ -82,7 +82,7 @@ export function Scroller({
         <button
           type="button"
           onClick={jump}
-          className="absolute bottom-3 left-1/2 flex -translate-x-1/2 cursor-pointer items-center gap-1.5 rounded-full border border-line-2 bg-popover px-3 py-1 text-[11.5px] font-medium text-fg-2 shadow-[0_6px_20px_-8px_rgba(0,0,0,.6)] hover:border-line-strong"
+          className="absolute bottom-3 left-1/2 flex -translate-x-1/2 cursor-pointer items-center gap-1.5 rounded-full border border-line-2 bg-popover px-3 py-1 text-sm font-medium text-fg-2 shadow-[0_6px_20px_-8px_rgba(0,0,0,.6)] hover:border-line-strong"
         >
           <ChevronDownIcon size={11} />
           Jump to latest

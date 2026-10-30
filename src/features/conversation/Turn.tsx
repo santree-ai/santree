@@ -79,7 +79,7 @@ export function TurnList({
             onShowEarlier?.();
             setShown((n) => n + TURN_PAGE);
           }}
-          className="cursor-pointer self-center rounded-full border border-line-2 px-3 py-1 text-[11.5px] font-medium text-muted-3 transition-colors hover:border-line-strong hover:text-fg-2"
+          className="cursor-pointer self-center rounded-full border border-line-2 px-3 py-1 text-sm font-medium text-muted-3 transition-colors hover:border-line-strong hover:text-fg-2"
         >
           Show {Math.min(hidden, TURN_PAGE)} earlier {hidden === 1 ? "turn" : "turns"}
         </button>
@@ -260,7 +260,7 @@ function RunRow({
       {rows.length > 0 && (
         <div className="mt-0.5 mb-1 ml-[7px] flex flex-col border-l border-line pl-4">
           {earlier > 0 && (
-            <div className="py-[3px] pl-6 text-[11.5px] text-muted-4">
+            <div className="py-[3px] pl-6 text-sm text-muted-4">
               {earlier} earlier {earlier === 1 ? "step" : "steps"}
             </div>
           )}
@@ -325,7 +325,7 @@ function TurnFooter({
         <DiffStat
           additions={stats.files.added}
           deletions={stats.files.removed}
-          className="text-[11px]"
+          className="text-xs"
         />
       </span>,
     );
@@ -344,7 +344,7 @@ function TurnFooter({
   }
   if (parts.length === 0) return null;
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-muted-4 tabular-nums">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-4 tabular-nums">
       {parts.flatMap((part, i) => (i === 0 ? [part] : [<Dot key={`dot-${i}`} />, part]))}
     </div>
   );

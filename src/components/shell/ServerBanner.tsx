@@ -31,7 +31,7 @@ export function ServerBanner() {
         className="flex flex-none items-center gap-3 border-b border-hairline bg-raised px-4 py-2"
       >
         <span aria-hidden className={`h-1.5 w-1.5 flex-none rounded-full ${TONE_DOT[view.tone]}`} />
-        <div className="min-w-0 flex-1 text-[11.5px] leading-[1.5] text-muted-2">
+        <div className="min-w-0 flex-1 text-sm leading-[1.5] text-muted-2">
           <span className="font-medium text-fg-2">{view.sentence}</span> New terminals can't open,
           and the ones it held read as lost. {state.reason}
         </div>
@@ -53,7 +53,7 @@ export function ServerBanner() {
     <div
       role="status"
       aria-live="polite"
-      className="flex flex-none items-center gap-2 border-b border-hairline bg-raised px-4 py-1.5 text-[11.5px] text-muted-3"
+      className="flex flex-none items-center gap-2 border-b border-hairline bg-raised px-4 py-1.5 text-sm text-muted-3"
     >
       <Spinner size={11} />
       {view.sentence}

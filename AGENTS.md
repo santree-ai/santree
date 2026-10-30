@@ -662,6 +662,20 @@ src/
 - **Colors:** never hardcode hex in components — use `theme/colors.ts` (`successColor`,
   `LINEAR_BRAND`, `JIRA_BRAND`, `alpha()`, `statusColor`) or a CSS token. Tinted-text/on-accent have
   dedicated tokens (`--accent-text`, `--on-accent`) so they flip in light mode.
+- **Design system (`src/styles.css`) — the scales are closed.** Type: the system
+  faces (SF Pro, SF Mono) on one scale, `text-2xs`…`text-3xl` (10 · 11 · 12 · 13 ·
+  14 · 15 · 18 · 22 · 26px; 13 is body) — no `text-[Npx]`. Radius: `rounded-xs`…
+  `rounded-2xl` (3 · 4 · 6 · 8 · 10 · 12) — controls `md`, cards `xl`, menus and
+  popovers `xl`, dialogs `2xl`. Elevation: `shadow-popover` / `shadow-dialog`,
+  nothing else. Buttons are `primitives` `Button` at fixed heights (24 · 28 · 32).
+  The accent is the brand emerald and means *interaction* (primary action, a
+  switch that's on, focus, links); selection is a neutral fill
+  (`--selection-fill`), status keeps its own hues. Mono is only for what a person
+  would copy as code (paths, branches, SHAs, commands, logs) — never labels,
+  counts, times or ticket keys. Section labels are sentence case, `text-xs
+  font-semibold` — no uppercase tracked eyebrows. No colored stripe down one side
+  of a card or selected row, no outline on a chip, no ring around a text field:
+  a field tints its own border, and a container that holds one is a `.field`.
 
 ## Security & validation invariants (load-bearing)
 

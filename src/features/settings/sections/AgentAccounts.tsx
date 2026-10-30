@@ -148,7 +148,7 @@ export function AgentAccountsBlock({
             aria-label={`New ${cli} account name`}
             maxLength={64}
             spellCheck={false}
-            className="w-full flex-1 rounded-lg border border-line-3 bg-input px-[11px] py-2 text-[12px] text-fg-3 placeholder:text-muted-4"
+            className="w-full flex-1 rounded-lg border border-line-3 bg-input px-[11px] py-2 text-sm text-fg-3 placeholder:text-muted-4"
           />
           <Button type="submit" disabled={!draft.trim() || create.isPending}>
             {create.isPending ? "Adding…" : "Add"}
@@ -213,8 +213,8 @@ function AccountRow({
       />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex min-w-0 items-baseline gap-2">
-          <span className="flex-none text-[12px] font-medium text-fg-2">{label}</span>
-          <span className="min-w-0 truncate text-[11.5px] text-muted-3" title={detail}>
+          <span className="flex-none text-sm font-medium text-fg-2">{label}</span>
+          <span className="min-w-0 truncate text-sm text-muted-3" title={detail}>
             {detail}
           </span>
         </div>

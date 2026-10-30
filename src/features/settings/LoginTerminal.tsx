@@ -42,7 +42,7 @@ export function LoginTerminal({
   return (
     <div className={`overflow-hidden rounded-lg border border-line-3 ${className}`}>
       <div className="flex items-center justify-between bg-input px-3 py-2">
-        <span className="text-[11.5px] text-muted-2">
+        <span className="text-sm text-muted-2">
           Running <span className="font-mono text-fg-3">{command}</span>
         </span>
         <button

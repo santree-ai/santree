@@ -328,7 +328,7 @@ export function AnswerCard({
         />
       </div>
       {prompt.truncated && (
-        <p className="mt-1.5 text-[11px] text-muted-3">
+        <p className="mt-1.5 text-xs text-muted-3">
           Part of this was cut to fit here, so it can only be turned down from here. The terminal
           shows all of it.
         </p>
@@ -346,11 +346,11 @@ export function AnswerCard({
                 aria-pressed={row.opens !== undefined ? mode === row.opens : undefined}
                 aria-disabled={!armed}
                 onClick={() => (row.choice ? answer(row.choice) : row.opens && setMode(row.opens))}
-                className={`flex w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-md border border-line-2 bg-raised px-3 py-2 text-left text-[12.5px] text-fg-2 transition-colors hover:border-line-strong ${
+                className={`flex w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-md border border-line-2 bg-raised px-3 py-2 text-left text-base text-fg-2 transition-colors hover:border-line-strong ${
                   armed ? "" : "opacity-50"
                 }`}
               >
-                <span className="flex h-4 min-w-4 flex-none items-center justify-center font-mono text-[10px] text-muted-3">
+                <span className="flex h-4 min-w-4 flex-none items-center justify-center text-2xs text-muted-3 tabular-nums">
                   {row.digit !== undefined && (
                     <span className="flex h-4 min-w-4 items-center justify-center rounded border border-line-2">
                       {row.digit}
@@ -359,11 +359,11 @@ export function AnswerCard({
                 </span>
                 <span className="min-w-0 flex-1 truncate">{row.label}</span>
                 {row.hint && (
-                  <span className="min-w-0 truncate text-[11px] text-muted-4">{row.hint}</span>
+                  <span className="min-w-0 truncate text-xs text-muted-4">{row.hint}</span>
                 )}
               </button>
               {row.grants && row.grants.length > 0 && (
-                <ul className="mt-1 mb-0.5 ml-[30px] space-y-0.5 text-[11px] leading-[1.45] text-muted-3">
+                <ul className="mt-1 mb-0.5 ml-[30px] space-y-0.5 text-xs leading-[1.45] text-muted-3">
                   {row.grants.map((grant, g) => (
                     // One per thing granted, in the payload's order.
                     <li key={g} className="min-w-0 break-words">
@@ -389,7 +389,7 @@ export function AnswerCard({
                 ? answer({ kind: "picks", options: picks.map((p) => p ?? -1) })
                 : answer({ kind: "toggles", options: toggles })
             }
-            className="cursor-pointer rounded-md bg-accent-fill px-3 py-1.5 text-[12px] font-medium disabled:cursor-default disabled:opacity-40"
+            className="cursor-pointer rounded-md bg-accent-fill px-3 py-1.5 text-sm font-medium disabled:cursor-default disabled:opacity-40"
             style={{ color: "var(--on-accent)" }}
           >
             Submit answers
@@ -398,7 +398,7 @@ export function AnswerCard({
             type="button"
             aria-disabled={!armed}
             onClick={() => answer({ kind: "cancel" })}
-            className="cursor-pointer rounded-md border border-line-2 px-3 py-1.5 text-[12px] text-fg-2 hover:border-line-strong"
+            className="cursor-pointer rounded-md border border-line-2 px-3 py-1.5 text-sm text-fg-2 hover:border-line-strong"
           >
             Cancel
           </button>
@@ -406,7 +406,7 @@ export function AnswerCard({
       )}
 
       {mode && offered.includes(mode) && (
-        <div className="mt-2.5 flex items-end gap-2 rounded-lg border border-line-2 bg-input py-2 pr-2 pl-3.5 transition-colors focus-within:border-line-strong">
+        <div className="mt-2.5 flex items-end gap-2 rounded-lg field bg-input py-2 pr-2 pl-3.5">
           <textarea
             // biome-ignore lint/a11y/noAutofocus: the field the user just asked for.
             autoFocus
@@ -426,13 +426,13 @@ export function AnswerCard({
             }}
             aria-label={TEXT_PLACEHOLDER[mode]}
             placeholder={TEXT_PLACEHOLDER[mode]}
-            className="max-h-[160px] min-h-[22px] flex-1 resize-none bg-transparent py-0.5 text-[13px] leading-[1.55] text-fg placeholder:text-muted-4 focus:outline-none"
+            className="max-h-[160px] min-h-[22px] flex-1 resize-none bg-transparent py-0.5 text-base leading-[1.55] text-fg placeholder:text-muted-4"
           />
           <button
             type="button"
             disabled={!textReady}
             onClick={() => answer({ kind: mode, text })}
-            className="flex-none cursor-pointer rounded-md bg-accent-fill px-2.5 py-1 text-[12px] font-medium disabled:cursor-default disabled:opacity-40"
+            className="flex-none cursor-pointer rounded-md bg-accent-fill px-2.5 py-1 text-sm font-medium disabled:cursor-default disabled:opacity-40"
             style={{ color: "var(--on-accent)" }}
           >
             Send
@@ -469,13 +469,13 @@ function CardHead({ card, renewed }: { card: DialogCard; renewed: boolean }) {
         <WarningIcon size={12} className="flex-none text-status-red" />
       )}
       {renewed && (
-        <span className="flex-none rounded-sm border border-line-2 px-1.5 text-[10.5px] font-medium text-fg-3">
+        <span className="flex-none rounded-sm border border-line-2 px-1.5 text-xs font-medium text-fg-3">
           New request
         </span>
       )}
-      <span className="min-w-0 truncate text-[13px] font-medium text-fg-2">{title}</span>
+      <span className="min-w-0 truncate text-base font-medium text-fg-2">{title}</span>
       {prompt.agentType && (
-        <span className="min-w-0 flex-none truncate text-[11px] text-muted-3">
+        <span className="min-w-0 flex-none truncate text-xs text-muted-3">
           from the {shownText(prompt.agentType)} agent
         </span>
       )}
@@ -542,17 +542,17 @@ function CardStatus({
   return (
     <>
       {line && (
-        <p role="status" className="mt-2 text-[11px] leading-[1.5] text-muted-3">
+        <p role="status" className="mt-2 text-xs leading-[1.5] text-muted-3">
           {line}
         </p>
       )}
       {auto && (
-        <p className="mt-1.5 text-[11.5px] leading-[1.5] text-muted-3">
+        <p className="mt-1.5 text-sm leading-[1.5] text-muted-3">
           To approve into auto mode, use the terminal.
         </p>
       )}
       {terminal && (
-        <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] leading-[1.5] text-muted-3">
+        <p className="mt-1.5 flex items-center gap-1.5 text-sm leading-[1.5] text-muted-3">
           <TerminalIcon size={11} className="flex-none" />
           Answer it in the terminal: switch to Terminal above, or press {VIEW_SHORTCUT}.
         </p>
@@ -584,7 +584,7 @@ function creationPatch(content: string): string {
 }
 
 const WELL =
-  "selectable rounded-md border border-line-2 bg-input px-2.5 py-2 font-mono text-[11px] leading-[1.55] whitespace-pre-wrap break-words";
+  "selectable rounded-md border border-line-2 bg-input px-2.5 py-2 font-mono text-xs leading-[1.55] whitespace-pre-wrap break-words";
 
 function ToolBody({ view }: { view: ToolView }) {
   switch (view.kind) {
@@ -593,14 +593,14 @@ function ToolBody({ view }: { view: ToolView }) {
         <div className="space-y-1.5">
           <pre className={WELL}>{view.command}</pre>
           {view.description && (
-            <p className="text-[12px] leading-[1.5] text-fg-3">{view.description}</p>
+            <p className="text-sm leading-[1.5] text-fg-3">{view.description}</p>
           )}
         </div>
       );
     case "edit":
       return (
         <div className="space-y-1.5">
-          <p className="selectable font-mono text-[11px] break-all text-fg-3">
+          <p className="selectable font-mono text-xs break-all text-fg-3">
             {view.path}
             {view.all && <span className="ml-2 text-muted-4">every occurrence</span>}
           </p>
@@ -610,15 +610,15 @@ function ToolBody({ view }: { view: ToolView }) {
     case "write":
       return (
         <div className="space-y-1.5">
-          <p className="selectable font-mono text-[11px] break-all text-fg-3">{view.path}</p>
+          <p className="selectable font-mono text-xs break-all text-fg-3">{view.path}</p>
           <PatchDiff path={view.path} op="Add" patch={creationPatch(view.content)} />
         </div>
       );
     case "fetch":
       return (
         <div className="space-y-1.5">
-          <p className="selectable font-mono text-[11px] break-all text-fg-3">{view.url}</p>
-          {view.prompt && <p className="text-[12px] leading-[1.5] text-fg-3">{view.prompt}</p>}
+          <p className="selectable font-mono text-xs break-all text-fg-3">{view.url}</p>
+          {view.prompt && <p className="text-sm leading-[1.5] text-fg-3">{view.prompt}</p>}
         </div>
       );
     case "json":
@@ -651,23 +651,23 @@ function DialogBody({
       return <ToolBody view={dialog.view} />;
     case "plan":
       return (
-        <MarkdownDocument noRemote className="text-[12.5px] leading-[1.65] text-fg-2">
+        <MarkdownDocument noRemote className="text-base leading-[1.65] text-fg-2">
           {dialog.plan}
         </MarkdownDocument>
       );
     case "elicitation":
       return (
-        <div className="space-y-1.5 text-[12px] leading-[1.5] text-fg-3">
+        <div className="space-y-1.5 text-sm leading-[1.5] text-fg-3">
           {dialog.message && <p className="selectable">{dialog.message}</p>}
           {dialog.url !== null && (
-            <p className="selectable font-mono text-[11px] break-all text-muted-2">{dialog.url}</p>
+            <p className="selectable font-mono text-xs break-all text-muted-2">{dialog.url}</p>
           )}
           {dialog.fields.length > 0 && (
             <ul className="space-y-1">
               {dialog.fields.map((field) => (
-                <li key={field.name} className="text-[11.5px]">
+                <li key={field.name} className="text-sm">
                   <span className="font-medium text-fg-2">{field.title}</span>
-                  <span className="ml-1.5 font-mono text-[10.5px] text-muted-4">
+                  <span className="ml-1.5 text-xs text-muted-4">
                     {field.choices.length > 0 ? field.choices.join(" · ") : field.type}
                     {field.required ? " · required" : ""}
                   </span>
@@ -726,25 +726,25 @@ function QuestionBlock({
 }) {
   return (
     <fieldset className="min-w-0">
-      <legend className="text-[12.5px] leading-[1.5] text-fg-2">
+      <legend className="text-base leading-[1.5] text-fg-2">
         {question.header && (
-          <span className="mr-1.5 rounded border border-line-2 px-1 font-mono text-[10px] text-muted-3">
+          <span className="mr-1.5 rounded border border-line-2 px-1 text-2xs text-muted-3">
             {question.header}
           </span>
         )}
         {question.question}
-        {question.multiSelect && <span className="ml-1.5 text-[11px] text-muted-4">Pick any</span>}
+        {question.multiSelect && <span className="ml-1.5 text-xs text-muted-4">Pick any</span>}
       </legend>
       <div className="mt-1.5 space-y-1">
         {question.options.map((option, i) =>
           rows && option.preview === null ? null : (
             <div key={`${i}:${option.label}`} className="min-w-0">
               {rows ? (
-                <p className="text-[11px] text-muted-3">
+                <p className="text-xs text-muted-3">
                   {i + 1}. {option.label}
                 </p>
               ) : choose ? (
-                <label className="flex min-w-0 cursor-pointer items-baseline gap-2 text-[12px] text-fg-2">
+                <label className="flex min-w-0 cursor-pointer items-baseline gap-2 text-sm text-fg-2">
                   <input
                     type={choose.kind === "pick" ? "radio" : "checkbox"}
                     checked={choose.chosen.includes(i)}
@@ -755,15 +755,15 @@ function QuestionBlock({
                   <span className="min-w-0">
                     {option.label}
                     {option.description && (
-                      <span className="ml-1.5 text-[11px] text-muted-3">{option.description}</span>
+                      <span className="ml-1.5 text-xs text-muted-3">{option.description}</span>
                     )}
                   </span>
                 </label>
               ) : (
-                <p className="text-[12px] text-fg-3">
+                <p className="text-sm text-fg-3">
                   {option.label}
                   {option.description && (
-                    <span className="ml-1.5 text-[11px] text-muted-4">{option.description}</span>
+                    <span className="ml-1.5 text-xs text-muted-4">{option.description}</span>
                   )}
                 </p>
               )}

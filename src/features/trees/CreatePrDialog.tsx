@@ -133,13 +133,13 @@ export function CreatePrDialog() {
         role="dialog"
         aria-modal
         aria-label="Create pull request"
-        className="relative flex w-[560px] max-w-full flex-col rounded-xl border border-line-3 bg-panel p-4 shadow-2xl"
+        className="relative flex w-[560px] max-w-full flex-col rounded-2xl border border-line-2 bg-popover p-4 shadow-dialog"
         style={{ animation: "toastIn .16s ease-out" }}
       >
         <div className="flex min-w-0 flex-col items-start gap-1">
-          <span className="text-[13px] font-semibold text-fg-bright">Create pull request</span>
+          <span className="text-base font-semibold text-fg-bright">Create pull request</span>
           {base ? (
-            <div className="flex w-full min-w-0 items-center gap-1.5 font-mono text-[10.5px] text-muted-3">
+            <div className="flex w-full min-w-0 items-center gap-1.5 font-mono text-xs text-muted-3">
               <span className="min-w-0 flex-1 truncate" title={branch}>
                 {branch}
               </span>
@@ -153,7 +153,7 @@ export function CreatePrDialog() {
           )}
         </div>
 
-        <label className="mt-3 mb-1 flex flex-col gap-1 text-[11px] font-medium text-muted-2">
+        <label className="mt-3 mb-1 flex flex-col gap-1 text-xs font-medium text-muted-2">
           Title
           <input
             value={title}
@@ -162,17 +162,17 @@ export function CreatePrDialog() {
               setTitle(e.target.value);
             }}
             placeholder="Pull request title"
-            className="w-full rounded-lg border border-line-3 bg-input px-2.5 py-2 text-[12.5px] text-fg-2 outline-none placeholder:text-muted-4 focus:border-line-strong"
+            className="w-full rounded-lg border border-line-3 bg-input px-2.5 py-2 text-base text-fg-2 placeholder:text-muted-4"
           />
         </label>
 
         <div className="mt-3 mb-1 flex items-center justify-between">
-          <span className="text-[11px] font-medium text-muted-2">Description</span>
+          <span className="text-xs font-medium text-muted-2">Description</span>
           <div className="flex items-center gap-2.5">
             {hasTranscripts && (
               <label
                 title="Let AI read this worktree's Claude session(s) for the decisions and rationale the diff doesn't show"
-                className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-2 hover:text-fg-2"
+                className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-2 hover:text-fg-2"
               >
                 <input
                   type="checkbox"
@@ -189,7 +189,7 @@ export function CreatePrDialog() {
               onClick={onFill}
               disabled={drafting}
               title="Draft title + description with AI (from the PR template & diff)"
-              className="flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
+              className="flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-2 hover:bg-hover hover:text-accent disabled:opacity-40"
             >
               {aiDrafting ? <Spinner size={11} /> : <AgentIcon kind={draftAgent} size={11} />}
               {aiDrafting ? "Drafting…" : "AI fill"}
@@ -204,18 +204,18 @@ export function CreatePrDialog() {
           }}
           placeholder="Pull request description (Markdown)"
           rows={10}
-          className="w-full resize-none rounded-lg border border-line-3 bg-input px-2.5 py-2 font-mono text-[11.5px] leading-[1.5] text-fg-3 outline-none placeholder:text-muted-4 focus:border-line-strong"
+          className="w-full resize-none rounded-lg border border-line-3 bg-input px-2.5 py-2 text-sm leading-[1.5] text-fg-3 placeholder:text-muted-4"
         />
 
         {candidates.length > 0 && (
           <div className="mt-3">
-            <span className="text-[11px] font-medium text-muted-2">Reviewers</span>
+            <span className="text-xs font-medium text-muted-2">Reviewers</span>
             <ReviewerPicker candidates={candidates} selected={reviewers} onChange={setReviewers} />
           </div>
         )}
 
         {openPr && (
-          <div className="mt-2.5 flex items-center gap-2 rounded-md border border-line-2 bg-raised px-2.5 py-1.5 text-[11.5px] text-muted-2">
+          <div className="mt-2.5 flex items-center gap-2 rounded-md border border-line-2 bg-raised px-2.5 py-1.5 text-sm text-muted-2">
             <span>A pull request is already open for this branch (#{openPr.number}).</span>
             <button
               type="button"
@@ -229,7 +229,7 @@ export function CreatePrDialog() {
 
         {error && (
           <div
-            className="selectable mt-2.5 rounded-md px-2.5 py-1.5 text-[11px] leading-[1.45]"
+            className="selectable mt-2.5 rounded-md px-2.5 py-1.5 text-xs leading-[1.45]"
             style={{
               color: "var(--color-status-red)",
               background: alpha(10, "var(--color-status-red)"),
@@ -241,7 +241,7 @@ export function CreatePrDialog() {
         )}
 
         <div className="mt-4 flex items-center gap-2">
-          <label className="flex cursor-pointer select-none items-center gap-2 text-[12px] text-muted-2 hover:text-fg-2">
+          <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-muted-2 hover:text-fg-2">
             <input
               type="checkbox"
               checked={draftPr}
@@ -313,13 +313,13 @@ function ReviewerPicker({
 
   return (
     <div ref={boxRef} className="relative mt-1">
-      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-line-3 bg-input px-2 py-1.5 focus-within:border-line-strong">
+      <div className="flex flex-wrap items-center gap-1.5 rounded-lg field bg-input px-2 py-1.5">
         {selected.map((login) => {
           const c = candidates.find((x) => x.name === login);
           return (
             <span
               key={login}
-              className="flex items-center gap-1.5 rounded-full border border-line-2 bg-raised py-0.5 pr-1 pl-1 text-[11.5px] text-fg-2"
+              className="flex items-center gap-1.5 rounded-full border border-line-2 bg-raised py-0.5 pr-1 pl-1 text-sm text-fg-2"
             >
               <Avatar name={login} src={c?.avatarUrl} size={16} />
               {login}
@@ -339,18 +339,18 @@ function ReviewerPicker({
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => setOpen(true)}
           placeholder={selected.length ? "" : "Add reviewers…"}
-          className="min-w-[100px] flex-1 bg-transparent py-0.5 text-[12px] text-fg-2 outline-none placeholder:text-muted-4"
+          className="min-w-[100px] flex-1 bg-transparent py-0.5 text-sm text-fg-2 outline-none placeholder:text-muted-4"
         />
       </div>
 
       {open && matches.length > 0 && (
-        <div className="absolute z-10 mt-1 max-h-44 w-full overflow-auto rounded-lg border border-line-3 bg-panel py-1 shadow-xl">
+        <div className="absolute z-10 mt-1 max-h-44 w-full overflow-auto rounded-lg border border-line-3 bg-popover py-1 shadow-popover">
           {matches.slice(0, 30).map((c) => (
             <button
               key={c.name}
               type="button"
               onClick={() => add(c.name)}
-              className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-fg-2 hover:bg-hover"
+              className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-sm text-fg-2 hover:bg-hover"
             >
               <Avatar name={c.name} src={c.avatarUrl} size={18} />
               {c.name}

@@ -70,19 +70,19 @@ export function SidebarNav() {
             type="button"
             onClick={onClick}
             aria-current={active ? "page" : undefined}
-            className={`flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors ${
+            className={`flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-base font-medium transition-colors ${
               active ? "bg-hover-2 text-fg" : "text-muted-4 hover:bg-hover hover:text-fg-2"
             }`}
           >
             {item.icon}
             {item.label}
             {item.hint && (
-              <kbd className="ml-auto rounded border border-line px-1 py-px font-sans text-[10px] text-muted-5">
+              <kbd className="ml-auto rounded border border-line px-1 py-px font-sans text-2xs text-muted-5">
                 {item.hint}
               </kbd>
             )}
             {item.count !== undefined && item.count > 0 && (
-              <span className="ml-auto min-w-4 rounded-full bg-hover-2 px-1.5 text-center text-[10px] leading-4 text-muted-4">
+              <span className="ml-auto min-w-4 rounded-full bg-hover-2 px-1.5 text-center text-2xs leading-4 text-muted-4">
                 {item.count}
               </span>
             )}

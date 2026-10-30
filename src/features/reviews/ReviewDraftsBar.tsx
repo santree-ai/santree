@@ -53,7 +53,7 @@ export function ReviewDraftsBar({
 
   return (
     <div
-      className="flex flex-none items-center gap-2.5 border-t px-3 py-2 text-[11.5px]"
+      className="flex flex-none items-center gap-2.5 border-t px-3 py-2 text-sm"
       style={{ borderColor: alpha(34, palette.purple), background: alpha(10, palette.purple) }}
     >
       <span className="flex flex-none items-center -space-x-1">
@@ -89,7 +89,7 @@ export function ReviewDraftsBar({
         message={
           <>
             {n} comment{n === 1 ? "" : "s"} will be added to your pending review on{" "}
-            <span className="font-mono text-fg-3">
+            <span className="text-fg-3 tabular-nums">
               {target.prRepo}#{target.number}
             </span>
             . Nobody else can see them until you finish the review.
@@ -110,10 +110,10 @@ export function ReviewDraftsBar({
                 key={d.id}
                 className="flex gap-2 border-b border-line-2 px-2.5 py-1.5 last:border-b-0"
               >
-                <span className="flex-none font-mono text-[10px] text-muted-4">
+                <span className="flex-none font-mono text-2xs text-muted-4">
                   {d.path}:{d.line}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-[11px] text-fg-3">
+                <span className="min-w-0 flex-1 truncate text-xs text-fg-3">
                   {firstLine(d.body)}
                 </span>
               </div>

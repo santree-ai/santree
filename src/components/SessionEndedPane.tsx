@@ -22,8 +22,8 @@ export function SessionEndedPane({
     <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center">
       <TerminalIcon size={20} className="text-muted-3" />
       <div>
-        <div className="text-[13px] font-medium text-fg-2">{title}</div>
-        <div className="mx-auto mt-1 max-w-[360px] text-[11.5px] leading-[1.6] text-muted-3">
+        <div className="text-base font-medium text-fg-2">{title}</div>
+        <div className="mx-auto mt-1 max-w-[360px] text-sm leading-[1.6] text-muted-3">
           {subtitle}
         </div>
       </div>

@@ -125,7 +125,7 @@ export function QuitGuard() {
       confirmLabel="Quit"
       busyLabel="Quitting…"
       extra={
-        <label className="flex cursor-pointer select-none items-center gap-2 text-[12px] text-muted-2 hover:text-fg-2">
+        <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-muted-2 hover:text-fg-2">
           <input
             type="checkbox"
             checked={dontAsk}

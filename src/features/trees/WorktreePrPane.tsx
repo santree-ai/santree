@@ -101,11 +101,11 @@ function PrHeader({ pr, onExpand }: { pr: ReviewPr; onExpand?: () => void }) {
         type="button"
         onClick={() => openUrl(pr.url)}
         title="Open this pull request on GitHub"
-        className="flex-none cursor-pointer font-mono text-[11.5px] text-fg-2 hover:underline"
+        className="flex-none cursor-pointer text-sm text-fg-2 hover:underline tabular-nums"
       >
         #{pr.number}
       </button>
-      <Pill color={state.color} className="px-1.5 py-px text-[9px] font-semibold uppercase">
+      <Pill color={state.color} className="px-1.5 py-px text-2xs font-semibold capitalize">
         {state.label}
       </Pill>
       {pr.isDraft && <DraftTag />}
@@ -206,12 +206,12 @@ function PrDescription({ pr }: { pr: ReviewPr }) {
           size={11}
           className={`mt-[3px] flex-none text-muted-4 transition-transform ${open ? "" : "-rotate-90"}`}
         />
-        <MarkdownTitle className="min-w-0 flex-1 text-[12px] leading-[1.45] text-fg-2">
+        <MarkdownTitle className="min-w-0 flex-1 text-sm leading-[1.45] text-fg-2">
           {pr.title}
         </MarkdownTitle>
       </button>
       {open && (
-        <div className="selectable px-3 pb-2.5 pl-[26px] text-[11.5px]">
+        <div className="selectable px-3 pb-2.5 pl-[26px] text-sm">
           {body ? <Markdown>{body}</Markdown> : <p className="text-muted-4">No description.</p>}
         </div>
       )}

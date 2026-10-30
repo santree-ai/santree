@@ -57,19 +57,17 @@ export function MermaidDiagram({ code }: { code: string }) {
   if (failed !== null) {
     return (
       <div className="mb-2.5 overflow-hidden rounded-lg border border-line-2 bg-input">
-        <div className="border-b border-line-2 px-3 py-1.5 text-[11px] text-status-amber">
+        <div className="border-b border-line-2 px-3 py-1.5 text-xs text-status-amber">
           This diagram didn't parse: {failed}
         </div>
-        <pre className="overflow-x-auto p-3 font-mono text-[11.5px] leading-[1.55] text-fg-3">
-          {code}
-        </pre>
+        <pre className="overflow-x-auto p-3 font-mono text-sm leading-[1.55] text-fg-3">{code}</pre>
       </div>
     );
   }
 
   if (svg === null) {
     return (
-      <div className="mb-2.5 rounded-lg border border-line-2 bg-input px-3 py-6 text-center text-[11.5px] text-muted-4">
+      <div className="mb-2.5 rounded-lg border border-line-2 bg-input px-3 py-6 text-center text-sm text-muted-4">
         Rendering diagram…
       </div>
     );

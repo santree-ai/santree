@@ -76,12 +76,12 @@ export function QueuePane() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-none items-center gap-1.5 border-b border-hairline px-4 py-2">
-        <span className="font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">Queue</span>
-        <span className="font-mono text-[10px] text-muted-3">{count}</span>
+        <span className="text-xs font-semibold text-muted-4">Queue</span>
+        <span className="text-2xs text-muted-3 tabular-nums">{count}</span>
         <button
           type="button"
           onClick={clearSelection}
-          className="ml-auto cursor-pointer text-[10.5px] text-muted-4 hover:text-muted"
+          className="ml-auto cursor-pointer text-xs text-muted-4 hover:text-muted"
         >
           clear
         </button>
@@ -110,12 +110,12 @@ export function QueuePane() {
 
       <div className="flex-none border-t border-line bg-well px-4 pt-3 pb-3.5">
         {chained > 0 && (
-          <div className="mb-2.5 font-mono text-[10px]" style={{ color: "var(--accent)" }}>
+          <div className="mb-2.5 text-2xs tabular-nums" style={{ color: "var(--accent)" }}>
             ⛓ {chained} will stack on a running worktree
           </div>
         )}
         <Button variant="primary" size="lg" onClick={launch} className="w-full">
-          <span className="text-[10px]">▶</span>
+          <span className="text-2xs">▶</span>
           <span>
             Launch {count} {count === 1 ? "agent" : "agents"}
           </span>
@@ -158,8 +158,8 @@ function QueueCard({
           className="flex min-w-0 flex-1 cursor-pointer flex-col gap-1 text-left"
         >
           <span className="flex items-center gap-2">
-            <span className="font-mono text-[11px] text-muted-2">{ticketHandle(task.id)}</span>
-            <span className="flex items-center gap-1.5 text-[10.5px] text-muted-3">
+            <span className="text-xs text-muted-2 tabular-nums">{ticketHandle(task.id)}</span>
+            <span className="flex items-center gap-1.5 text-xs text-muted-3">
               <StatusGlyph status={task.status} size={11} />
               {statusLabel[task.status]}
             </span>
@@ -168,7 +168,7 @@ function QueueCard({
             {task.cycle && <CycleTag cycle={task.cycle} />}
             <IssueDueDate date={task.dueDate} />
           </span>
-          <MarkdownTitle className="block text-[12.5px] leading-[1.35] text-fg-2">
+          <MarkdownTitle className="block text-base leading-[1.35] text-fg-2">
             {task.title}
           </MarkdownTitle>
         </button>
@@ -183,17 +183,17 @@ function QueueCard({
         </button>
       </div>
       {chainBase && (
-        <div className="px-3 pt-1.5 font-mono text-[10.5px] text-muted-3">
+        <div className="px-3 pt-1.5 text-xs text-muted-3 tabular-nums">
           ⛓ branches off {ticketHandle(chainBase)}
         </div>
       )}
       <div className="flex items-center gap-2 px-3 pt-2">
-        <span className="font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">Agent</span>
+        <span className="text-xs font-semibold text-muted-4">Agent</span>
         <ChevronSelect
           value={agent}
           onChange={(v) => onAgent(v as AgentKind)}
           aria-label={`Agent for ${ticketHandle(task.id)}`}
-          className="h-6 rounded-md border border-line-2 bg-raised pr-7 pl-2 font-mono text-[11px] text-fg-2"
+          className="h-6 rounded-md border border-line-2 bg-raised pr-7 pl-2 text-xs text-fg-2"
           wrapperClassName="flex-none"
         >
           {options.map((a) => (
@@ -203,7 +203,7 @@ function QueueCard({
           ))}
         </ChevronSelect>
         <span
-          className="min-w-0 truncate font-mono text-[10px] text-muted-3"
+          className="min-w-0 truncate text-2xs text-muted-3"
           title="Configured in Settings → Actions → Work"
         >
           {model || "default model"}

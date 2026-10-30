@@ -69,7 +69,7 @@ export function PrChecksSection({ pr }: { pr: ReviewPr }) {
   const checks = detail?.checks ?? [];
   if (checks.length === 0) {
     return (
-      <div className="border-b border-hairline px-3 py-2 text-[11px] text-muted-4">
+      <div className="border-b border-hairline px-3 py-2 text-xs text-muted-4">
         No checks reported.
       </div>
     );
@@ -85,7 +85,7 @@ export function PrChecksSection({ pr }: { pr: ReviewPr }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2 text-left text-[11px] transition-colors hover:bg-hover"
+        className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2 text-left text-xs transition-colors hover:bg-hover"
       >
         <ChevronDownIcon
           size={11}
@@ -123,7 +123,7 @@ export function PrChecksSection({ pr }: { pr: ReviewPr }) {
                     )
                   }
                   title={`${groupCollapsed ? "Expand" : "Collapse"} (⌘-click for all)`}
-                  className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-1 text-left font-mono text-[9.5px] tracking-[.06em] uppercase transition-colors hover:bg-hover"
+                  className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-1 text-left text-xs font-semibold transition-colors hover:bg-hover"
                   style={{ color: g.color }}
                 >
                   <ChevronDownIcon
@@ -160,7 +160,7 @@ function Tally({
 }) {
   return (
     <span className="flex items-center gap-1" style={{ color: color.color }}>
-      <span className="flex items-center font-mono">{pulse ? <RunningDot /> : color.glyph}</span>
+      <span className="flex items-center">{pulse ? <RunningDot /> : color.glyph}</span>
       <span className="tabular-nums">{n}</span>
       <span className="text-muted-3">{label}</span>
     </span>
@@ -184,12 +184,12 @@ function CheckRow({ check, pr }: { check: PrCheck; pr: ReviewPr }) {
           className={`flex-none text-muted-4 transition-transform ${open ? "" : "-rotate-90"}`}
         />
         <span
-          className="flex w-[1ch] flex-none items-center justify-center font-mono text-[11px]"
+          className="flex w-[1ch] flex-none items-center justify-center text-xs"
           style={{ color: meta.color }}
         >
           {isRunning(check) ? <RunningDot label={meta.label} /> : meta.glyph}
         </span>
-        <span className="min-w-0 flex-1 truncate text-[11.5px] text-fg-3">{check.name}</span>
+        <span className="min-w-0 flex-1 truncate text-sm text-fg-3">{check.name}</span>
       </button>
       {open && <CheckMeta check={check} pr={pr} />}
     </div>
@@ -208,16 +208,16 @@ function CheckMeta({ check, pr }: { check: PrCheck; pr: ReviewPr }) {
 
   return (
     <div className="mx-3 mb-1.5 rounded-md border border-line-2 bg-input px-2.5 py-2">
-      <dl className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[10.5px] text-muted-3">
+      <dl className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-3">
         <Meta label="Status">{checkStatusMeta[check.status].label}</Meta>
         {check.description && <Meta label="From">{check.description}</Meta>}
         {started && <Meta label="Started">{started}</Meta>}
         {completed && <Meta label="Completed">{completed}</Meta>}
         {check.jobId != null && (
-          <span className="font-mono text-muted-4">check #{check.jobId}</span>
+          <span className="text-muted-4 tabular-nums">check #{check.jobId}</span>
         )}
         {check.runId != null && (
-          <span className="font-mono text-muted-4">workflow #{check.runId}</span>
+          <span className="text-muted-4 tabular-nums">workflow #{check.runId}</span>
         )}
       </dl>
 

@@ -48,7 +48,7 @@ export function UpdatesSection({ embedded = false }: { embedded?: boolean }) {
               check.reset();
               setSetting({ scope: "app", key: UPDATE_CHANNEL_KEY, value });
             }}
-            className="w-full rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-[12px] text-fg-3"
+            className="w-full rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-sm text-fg-3"
             wrapperClassName="w-[148px]"
           >
             <option value="stable" className="bg-input">
@@ -67,7 +67,7 @@ export function UpdatesSection({ embedded = false }: { embedded?: boolean }) {
         </div>
 
         <div className="flex items-center gap-3 border-t border-line px-4 py-3">
-          <div className="min-w-0 flex-1 text-[12px] text-muted-3">
+          <div className="min-w-0 flex-1 text-sm text-muted-3">
             {install.isPending
               ? percent !== null
                 ? `Downloading… ${percent}%`
@@ -112,10 +112,8 @@ export function UpdatesSection({ embedded = false }: { embedded?: boolean }) {
 
         {update?.notes && !install.isPending && (
           <div className="max-h-[220px] overflow-y-auto border-t border-line bg-surface px-4 py-3">
-            <div className="mb-1.5 text-[11px] font-semibold tracking-wide text-muted-3 uppercase">
-              What's new
-            </div>
-            <pre className="whitespace-pre-wrap break-words font-sans text-[12px] leading-[1.55] text-fg-3">
+            <div className="mb-1.5 text-xs font-semibold text-muted-3">What's new</div>
+            <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-[1.55] text-fg-3">
               {update.notes}
             </pre>
           </div>

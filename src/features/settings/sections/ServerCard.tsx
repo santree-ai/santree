@@ -130,8 +130,8 @@ function ServerControls({ status }: { status: ServerStatus }) {
     >
       <div className="flex items-start justify-between gap-4 p-4">
         <div className="min-w-0">
-          <div className="text-[13.5px] font-semibold text-fg-bright">santree server</div>
-          <p className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+          <div className="text-md font-semibold text-fg-bright">santree server</div>
+          <p className="mt-[3px] text-sm leading-[1.5] text-muted-3">
             Owns this Mac's terminals, so a quit, a crash or an update never ends an agent.
           </p>
         </div>
@@ -229,11 +229,9 @@ function ServerStateBlock({
       <div className="flex items-start gap-2.5">
         <ToneGlyph tone={tone} name={TONE_NAME[tone]} />
         <div className="min-w-0 flex-1">
-          <div className="text-[12.5px] font-medium text-fg-3">{pendingLabel ?? view.title}</div>
+          <div className="text-base font-medium text-fg-3">{pendingLabel ?? view.title}</div>
           {reason && !pendingLabel && (
-            <div className="mt-0.5 text-[11.5px] leading-[1.5] break-words text-muted-3">
-              {reason}
-            </div>
+            <div className="mt-0.5 text-sm leading-[1.5] break-words text-muted-3">{reason}</div>
           )}
         </div>
       </div>
@@ -269,8 +267,8 @@ function DrainingServers({
 }) {
   return (
     <section aria-label="Older servers" className="border-t border-line px-4 py-3">
-      <div className="text-[11.5px] font-medium text-fg-3">Older servers still running</div>
-      <p className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+      <div className="text-sm font-medium text-fg-3">Older servers still running</div>
+      <p className="mt-[3px] text-sm leading-[1.5] text-muted-3">
         An update left these running because they still hold terminals. Each exits when its last one
         ends.
       </p>
@@ -278,7 +276,7 @@ function DrainingServers({
         {draining.map((d) => (
           <li
             key={d.revision}
-            className="flex items-center gap-3 border-t border-line px-3 py-2 text-[11.5px] first:border-t-0"
+            className="flex items-center gap-3 border-t border-line px-3 py-2 text-sm first:border-t-0"
           >
             <span className="min-w-0 flex-1 text-fg-3">
               r{d.revision} · {sessionCountText(d.sessions)} · exits when it ends
@@ -348,7 +346,7 @@ function ServerConfirm({
  *  the app. */
 function ServerOff() {
   return (
-    <p className="mb-3.5 text-[11.5px] leading-[1.5] text-muted-3">
+    <p className="mb-3.5 text-sm leading-[1.5] text-muted-3">
       Terminals aren't persistent in this build: they run inside santree and end when it quits. A
       signed release keeps them in a separate server that outlives the app.
     </p>

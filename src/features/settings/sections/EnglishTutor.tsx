@@ -124,7 +124,7 @@ export function EnglishTutorSection() {
                     Last <RelativeTime ms={log.updatedAtMs} />.
                   </span>
                 )}
-                <span className="font-mono text-[10.5px] break-all text-muted-4">{log.path}</span>
+                <span className="font-mono text-xs break-all text-muted-4">{log.path}</span>
               </span>
             ) : (
               "The file the agent appends corrections to."
@@ -169,7 +169,7 @@ export function EnglishTutorSection() {
           )}
           {analysis ? (
             <>
-              <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-muted-3">
+              <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-3">
                 <span>
                   Covering {SCOPE_LABEL[analysis.scope]} ·{" "}
                   <RelativeTime ms={analysis.createdAtMs} />
@@ -228,7 +228,7 @@ function LogView({ log, loading }: { log: EnglishLog | undefined; loading: boole
       {unparsed > 0 && (
         // Never silently hide entries: if the format drifted, say so here rather
         // than quietly showing a shorter log than the file holds.
-        <div className="flex items-center gap-1.5 rounded-lg border border-line-2 px-3 py-2 text-[11.5px] text-muted-3">
+        <div className="flex items-center gap-1.5 rounded-lg border border-line-2 px-3 py-2 text-sm text-muted-3">
           <WarningIcon size={11} />
           {unparsed} line{unparsed === 1 ? "" : "s"} in the file couldn't be read as a correction
           and {unparsed === 1 ? "isn't" : "aren't"} shown below.
@@ -259,9 +259,9 @@ function DaySection({ day, defaultOpen }: { day: EnglishDay; defaultOpen: boolea
           size={11}
           className={`flex-none text-muted-4 transition-transform ${open ? "rotate-90" : ""}`}
         />
-        <span className="text-[12.5px] font-medium text-fg-2">{formatDay(day.date)}</span>
-        <span className="font-mono text-[10.5px] text-muted-4">{day.date}</span>
-        <span className="ml-auto font-mono text-[10.5px] text-muted-3">{day.entries.length}</span>
+        <span className="text-base font-medium text-fg-2">{formatDay(day.date)}</span>
+        <span className="text-xs text-muted-4 tabular-nums">{day.date}</span>
+        <span className="ml-auto text-xs text-muted-3 tabular-nums">{day.entries.length}</span>
       </button>
       {open && (
         <ul className="flex flex-col gap-1.5 px-3 pt-0.5 pb-3">
@@ -269,14 +269,11 @@ function DaySection({ day, defaultOpen }: { day: EnglishDay; defaultOpen: boolea
             // Entries have no id and the same correction can legitimately repeat
             // on a day, so the index is the only key available. Safe here: the
             // list is immutable once rendered — nothing reorders or splices it.
-            <li
-              key={i}
-              className="flex flex-wrap items-baseline gap-x-1.5 text-[12px] leading-[1.6]"
-            >
+            <li key={i} className="flex flex-wrap items-baseline gap-x-1.5 text-sm leading-[1.6]">
               <span className="text-muted-3 line-through decoration-muted-4/60">{e.original}</span>
               <span className="text-muted-4">→</span>
               <span className="font-medium text-fg-2">{e.correction}</span>
-              {e.reason && <span className="text-[11px] text-muted-4">{e.reason}</span>}
+              {e.reason && <span className="text-xs text-muted-4">{e.reason}</span>}
             </li>
           ))}
         </ul>

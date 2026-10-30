@@ -225,7 +225,7 @@ export function PriorityBars({
         role="img"
         aria-label={label}
         title={label}
-        className="flex h-[11px] w-[11px] items-center justify-center rounded-[2.5px] font-mono text-[8.5px] leading-none font-bold"
+        className="flex h-[11px] w-[11px] items-center justify-center rounded-xs text-2xs leading-none font-bold"
         style={{ background: color, color: "var(--on-danger)" }}
       >
         !
@@ -283,7 +283,7 @@ export function formatPoints(points: number): string {
 /** A ticket's estimate: Linear's mark and the points. */
 export function EstimateTag({
   estimate,
-  className = "text-[10px]",
+  className = "text-2xs",
 }: {
   estimate: number;
   className?: string;
@@ -295,7 +295,7 @@ export function EstimateTag({
       role="img"
       aria-label={label}
       title={label}
-      className={`flex flex-none items-center gap-[3px] font-mono text-muted-3 tabular-nums ${className}`}
+      className={`flex flex-none items-center gap-[3px] text-muted-3 tabular-nums ${className}`}
     >
       <EstimateIcon size={9} />
       <span>{value}</span>
@@ -307,9 +307,7 @@ export function EstimateTag({
  *  Quiet and lowercase like the list register's other state chips: most rows never
  *  carry one, and the one that does only needs to be noticed. */
 export function DraftTag() {
-  return (
-    <span className="flex-none rounded bg-input px-1 py-px text-[9px] text-muted-4">draft</span>
-  );
+  return <span className="flex-none rounded bg-input px-1 py-px text-2xs text-muted-4">draft</span>;
 }
 
 /** The points a group adds up to — Linear's mark and the sum, the way its own
@@ -319,7 +317,7 @@ export function PointsSum({ points }: { points: number }) {
   const value = formatPoints(points);
   return (
     <span
-      className="flex flex-none items-center gap-[3px] font-mono text-[10px] text-muted-4 normal-case tracking-normal tabular-nums"
+      className="flex flex-none items-center gap-[3px] text-2xs text-muted-4 normal-case tracking-normal tabular-nums"
       title={`${value} points estimated in this group`}
     >
       <EstimateIcon size={9} />
@@ -410,7 +408,7 @@ export function cycleProgress(
 
 export function CycleTag({
   cycle,
-  className = "text-[9px]",
+  className = "text-2xs",
 }: {
   cycle: CycleRef;
   className?: string;
@@ -430,7 +428,7 @@ export function CycleTag({
       role="img"
       aria-label={label}
       title={label}
-      className={`flex flex-none items-center gap-[3px] font-mono text-muted-3 tabular-nums ${className}`}
+      className={`flex flex-none items-center gap-[3px] text-muted-3 tabular-nums ${className}`}
     >
       <CycleIcon size={10} progress={cycleProgress(cycle)} />
       <span>{number}</span>
@@ -439,8 +437,8 @@ export function CycleTag({
 }
 
 /** Where a heading's due date sits: at its trailing edge, in the heading's
- *  mono register but out of its uppercase. */
-const HEADING_DUE_CLASS = "ml-auto flex-none font-mono text-[9px] normal-case tracking-normal";
+ *  register but out of its uppercase. */
+const HEADING_DUE_CLASS = "ml-auto flex-none text-2xs normal-case tracking-normal";
 
 /** A date something is due, coloured by how near it is: overdue and imminent
  * dates gain urgency, distant ones stay quiet. Where it sits is the caller's
@@ -494,7 +492,7 @@ export function MilestoneDueDate({ date }: { date: string | null | undefined }) 
  *  nothing without one, so a row that has none ends where it did. */
 export function IssueDueDate({
   date,
-  className = "flex-none font-mono text-[9px]",
+  className = "flex-none text-2xs tabular-nums",
 }: {
   date: string | null | undefined;
   className?: string;
@@ -506,7 +504,7 @@ export function IssueDueDate({
  * The innermost folding heading a work rail uses — a quiet uppercase label, a
  * count, and whatever trailing signal the level carries.
  *
- * Shared rather than restyled per rail because this register (mono, uppercase,
+ * Shared rather than restyled per rail because this register (uppercase,
  * `muted-4`) is what tells a reader "this is a grouping, not a row" everywhere
  * in the app; a second copy of the class list is how one rail's grouping quietly
  * stops looking like a grouping. `noun` is what the accessible name calls the
@@ -547,7 +545,7 @@ export function BandHeading({
       aria-expanded={open}
       aria-label={`${open ? "Collapse" : "Expand"} ${noun} ${label}`}
       title={title ? `${title}\n${BULK_TOGGLE_HINT}` : BULK_TOGGLE_HINT}
-      className="tree-band flex w-full cursor-pointer items-center gap-1.5 px-2 pt-2.5 pb-1.5 text-left font-mono text-[10px] tracking-[.05em] text-muted-4 uppercase hover:text-fg-2"
+      className="tree-band flex w-full cursor-pointer items-center gap-1.5 px-2 pt-2.5 pb-1.5 text-left text-xs font-semibold text-muted-4 hover:text-fg-2"
     >
       <Chevron size={9} className="flex-none" />
       <span className="truncate">{label}</span>
@@ -594,12 +592,12 @@ export function ProjectHeading({
       title={BULK_TOGGLE_HINT}
       // No focus styling of its own: THE ring is the one global `:focus-visible`
       // rule in styles.css, and a local override escapes its pointer gate.
-      className="tree-band flex w-full cursor-pointer items-center gap-1.5 px-2 pt-2.5 pb-1 text-left text-[11px] font-medium text-muted-3 hover:text-fg-2"
+      className="tree-band flex w-full cursor-pointer items-center gap-1.5 px-2 pt-2.5 pb-1 text-left text-xs font-medium text-muted-3 hover:text-fg-2"
     >
       <Chevron size={9} className="flex-none" />
       <ProjectGlyph color={color ?? PROJECT_FALLBACK} icon={icon ?? null} size={6} />
       <span className="truncate">{label}</span>
-      <span className="font-mono text-[10px] text-muted-4 tabular-nums">{count}</span>
+      <span className="text-2xs text-muted-4 tabular-nums">{count}</span>
       {points !== undefined && <PointsSum points={points} />}
       <ProjectDueDate date={targetDate} />
     </button>

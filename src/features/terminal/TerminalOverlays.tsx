@@ -21,7 +21,7 @@ export function WaitingBadge({
   return (
     <div
       role="status"
-      className="pointer-events-none absolute top-2 right-3 flex max-w-[280px] flex-col gap-0.5 rounded border border-line-2 bg-raised px-2 py-1 text-[11px] text-muted-2 shadow-sm"
+      className="pointer-events-none absolute top-2 right-3 flex max-w-[280px] flex-col gap-0.5 rounded border border-line-2 bg-raised px-2 py-1 text-xs text-muted-2 shadow-sm"
     >
       {reconnecting && (
         <span className="flex items-center gap-1.5">
@@ -56,13 +56,13 @@ export function LostSession({
     >
       <WarningIcon size={14} className="flex-none text-status-amber" />
       <div className="min-w-0 flex-1">
-        <div className="text-[12px] font-medium text-fg-2">This terminal's session is gone</div>
-        <div className="text-[11px] leading-[1.5] text-muted-3">
+        <div className="text-sm font-medium text-fg-2">This terminal's session is gone</div>
+        <div className="text-xs leading-[1.5] text-muted-3">
           santree lost it: the santree server stopped, or it never got a session. Nothing was
           restarted.
         </div>
         {onResume && resumeBlocked && (
-          <div id={hintId} className="mt-0.5 text-[11px] leading-[1.5] text-muted-2">
+          <div id={hintId} className="mt-0.5 text-xs leading-[1.5] text-muted-2">
             {resumeBlocked}
           </div>
         )}

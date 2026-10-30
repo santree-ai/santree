@@ -72,9 +72,9 @@ export function ReviewWorklist({
   return (
     <section className="mb-6 border-b border-hairline pb-5">
       <div className="mb-2.5 flex items-center gap-2">
-        <div className="font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">Queue</div>
+        <div className="text-xs font-semibold text-muted-4">Queue</div>
         {items.length > 0 && (
-          <span className="ml-auto text-[10px] text-muted-4">{openCount} open</span>
+          <span className="ml-auto text-2xs text-muted-4">{openCount} open</span>
         )}
         {/* Wrapped, not passed straight through: the Trees launcher takes an
             optional agent override, and handing it to onClick would pass the
@@ -95,7 +95,7 @@ export function ReviewWorklist({
           }}
           placeholder="Add something to improve…"
           aria-label="New review improvement"
-          className="min-w-0 flex-1 rounded-md border border-line-2 bg-input px-2.5 py-1.5 text-[12px] text-fg outline-none focus:border-accent"
+          className="min-w-0 flex-1 rounded-md border border-line-2 bg-input px-2.5 py-1.5 text-sm text-fg"
         />
         {/* The same spark every other queue action wears — see {@link QueueAction}.
             This one keeps its own Button because the body comes from the input
@@ -106,7 +106,7 @@ export function ReviewWorklist({
       </div>
 
       {items.length === 0 ? (
-        <p className="text-[11px] leading-relaxed text-muted-4">
+        <p className="text-xs leading-relaxed text-muted-4">
           Add notes here, or use “Add to queue” on a check, a comment or an AI draft.
         </p>
       ) : (
@@ -351,7 +351,7 @@ function WorkItem({
           role="img"
           aria-label={facts.label}
           title={facts.label}
-          className="mt-0.5 grid size-4 flex-none place-items-center text-[10px] leading-none"
+          className="mt-0.5 grid size-4 flex-none place-items-center text-2xs leading-none"
         >
           {facts.glyph}
         </span>
@@ -373,15 +373,15 @@ function WorkItem({
                 }
               }}
               aria-label="Edit review improvement"
-              className="w-full rounded border border-accent bg-input px-1.5 py-0.5 text-[12px] outline-none"
+              className="w-full rounded border border-accent bg-input px-1.5 py-0.5 text-sm outline-none"
             />
           ) : (
-            <p className={`text-[12px] leading-snug text-fg-2 ${item.done ? "line-through" : ""}`}>
+            <p className={`text-sm leading-snug text-fg-2 ${item.done ? "line-through" : ""}`}>
               {item.body}
             </p>
           )}
           {pieces.length > 0 && (
-            <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[9.5px] text-muted-4">
+            <div className="mt-1 flex min-w-0 items-center gap-1.5 text-2xs text-muted-4">
               {pieces.map((piece, index) => (
                 <Fragment key={piece.key}>
                   {index > 0 && <span aria-hidden>·</span>}

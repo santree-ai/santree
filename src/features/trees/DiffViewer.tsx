@@ -53,7 +53,7 @@ export const DiffViewer = memo(function DiffViewer({
   }
 
   return (
-    <div className="diff-viewer selectable min-w-0 text-[12.5px]">
+    <div className="diff-viewer selectable min-w-0 text-base">
       <DiffView
         data={data}
         diffViewMode={mode === "split" ? DiffModeEnum.Split : DiffModeEnum.Unified}

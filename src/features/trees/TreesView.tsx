@@ -157,8 +157,8 @@ function CreatingPane({ worktree }: { worktree: Worktree }) {
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-app text-center">
       <TerminalActivity label="Creating workspace…" />
       <div>
-        <div className="flex items-baseline gap-1 text-[11.5px] text-muted-3">
-          <span className="font-mono">{worktree.id}</span>
+        <div className="flex items-baseline gap-1 text-sm text-muted-3">
+          <span className="tabular-nums">{worktree.id}</span>
           <span>·</span>
           <MarkdownTitle>{worktree.title}</MarkdownTitle>
         </div>
@@ -184,7 +184,7 @@ function PrSuggestionBar({ worktree }: { worktree: Worktree }) {
   if (!show) return null;
   return (
     <div
-      className="flex flex-none items-center gap-2 border-t border-line px-3 py-2 text-[11.5px]"
+      className="flex flex-none items-center gap-2 border-t border-line px-3 py-2 text-sm"
       style={{ background: alpha(10) }}
     >
       <span className="flex-none text-accent">

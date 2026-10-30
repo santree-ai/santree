@@ -179,7 +179,7 @@ export function TriageSection() {
       <div className="flex flex-none flex-col pb-1 opacity-60">
         <div className={SECTION_HEADER}>Triage</div>
         <div
-          className="py-(--density-compact) text-[11px] text-muted-4"
+          className="py-(--density-compact) text-xs text-muted-4"
           style={{ paddingLeft: SECTION_GUTTER }}
         >
           Needs a Linear or Jira connection
@@ -197,7 +197,7 @@ export function TriageSection() {
         <button
           type="button"
           onClick={openTeamSettings}
-          className="cursor-pointer py-(--density-compact) text-left text-[11px] text-muted-4 hover:text-fg-3"
+          className="cursor-pointer py-(--density-compact) text-left text-xs text-muted-4 hover:text-fg-3"
           style={{ paddingLeft: SECTION_GUTTER }}
         >
           {orgProvider} has no triage. Pick a Linear or Jira project for it
@@ -282,10 +282,10 @@ export function TriageSection() {
                 <ChevronRightIcon size={9} className="pointer-events-none flex-none text-muted-4" />
               )}
               <SnoozeIcon size={11} className="pointer-events-none flex-none text-muted-4" />
-              <span className="pointer-events-none min-w-0 flex-1 truncate text-[12px] leading-4 text-muted-2">
+              <span className="pointer-events-none min-w-0 flex-1 truncate text-sm leading-4 text-muted-2">
                 Snoozed
               </span>
-              <span className="pointer-events-none flex-none font-mono text-[10px] text-muted-4 tabular-nums">
+              <span className="pointer-events-none flex-none text-2xs text-muted-4 tabular-nums">
                 {group.snoozed.length}
               </span>
             </div>
@@ -319,7 +319,7 @@ export function TriageSection() {
             day. Under the stretched toggle it can't carry a title, so the noun a
             bare number needs is `sr-only`. */}
         {active.length > 0 && (
-          <span className="pointer-events-none font-mono text-[10px] font-normal tracking-normal text-muted-4 tabular-nums">
+          <span className="pointer-events-none text-2xs font-normal tracking-normal text-muted-4 tabular-nums">
             {active.length}
             <span className="sr-only"> in the queue</span>
           </span>
@@ -345,7 +345,7 @@ export function TriageSection() {
 
           {empty && (
             <div
-              className="py-(--density-compact) text-[11px] text-muted-4"
+              className="py-(--density-compact) text-xs text-muted-4"
               style={{ paddingLeft: SECTION_GUTTER }}
             >
               Nothing in triage
@@ -394,7 +394,7 @@ function ScopeMenu({
           onClick={toggle}
           aria-label={`Triage scope: ${current.label}`}
           title="Whose tickets the queue shows"
-          className="flex cursor-pointer items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-4 transition-colors hover:text-fg-2"
+          className="flex cursor-pointer items-center gap-0.5 rounded px-1 py-0.5 text-2xs font-semibold text-muted-4 transition-colors hover:text-fg-2"
         >
           {current.label}
           <ChevronDownIcon size={9} className="flex-none" />
@@ -424,7 +424,7 @@ function ScopeMenu({
                 </span>
                 <span className="flex min-w-0 flex-col">
                   <span className={checked ? "text-fg" : undefined}>{scope.label}</span>
-                  <span className="text-[11px] text-muted-3">{scope.hint}</span>
+                  <span className="text-xs text-muted-3">{scope.hint}</span>
                 </span>
               </button>
             );
@@ -441,7 +441,7 @@ function ScopeMenu({
             <span className="w-3 flex-none" />
             <span className="flex min-w-0 flex-col">
               <span>Teams…</span>
-              <span className="text-[11px] text-muted-3">Which teams show up here</span>
+              <span className="text-xs text-muted-3">Which teams show up here</span>
             </span>
           </button>
         </>
@@ -490,7 +490,7 @@ function ScopeSwitch({
             aria-label={`${label}: ${hint}`}
             title={hint}
             onClick={() => onChange(value)}
-            className={`cursor-pointer rounded px-1 py-px font-mono text-[9px] uppercase tracking-[0.06em] transition-colors ${
+            className={`cursor-pointer rounded px-1 py-px text-2xs transition-colors ${
               on ? "bg-(--tree-tag-fill) text-fg-2" : "text-muted-4 hover:text-fg-2"
             }`}
           >
@@ -549,11 +549,11 @@ function TeamRow({
         aria-label={`${open ? "Collapse" : "Expand"} ${name}`}
         className="absolute inset-0 cursor-pointer"
       />
-      <span className="pointer-events-none min-w-0 truncate text-[12px] font-semibold text-fg-2">
+      <span className="pointer-events-none min-w-0 truncate text-sm font-semibold text-fg-2">
         {name}
       </span>
       {count > 0 && (
-        <span className="pointer-events-none font-mono text-[10px] text-muted-4 tabular-nums">
+        <span className="pointer-events-none text-2xs text-muted-4 tabular-nums">
           {count}
           <span className="sr-only"> in the queue</span>
         </span>
@@ -591,12 +591,12 @@ function RotationChip({ schedule, onOpen }: { schedule: TriageSchedule; onOpen?:
         ) : (
           <span
             aria-hidden
-            className="flex size-3.5 flex-none items-center justify-center rounded-full border border-line-strong font-mono text-[8px] text-muted-4"
+            className="flex size-3.5 flex-none items-center justify-center rounded-full border border-line-strong text-2xs text-muted-4"
           >
             ?
           </span>
         ))}
-      <span className={`min-w-0 truncate text-[11px] ${who ? "text-muted-2" : "text-muted-4"}`}>
+      <span className={`min-w-0 truncate text-xs ${who ? "text-muted-2" : "text-muted-4"}`}>
         {hasRotation ? (who ?? "uncovered") : "no rotation"}
       </span>
     </>
@@ -692,14 +692,11 @@ function TicketRow({
             <span aria-hidden className="flex flex-none items-center text-muted-4">
               <RepoTrackerLogo repo={repo} size={CARD_GLYPH} />
             </span>
-            <span className="tree-tag font-mono tabular-nums">{ticketHandle(ticket.id)}</span>
+            <span className="tree-tag tabular-nums">{ticketHandle(ticket.id)}</span>
             {ticket.priority !== "None" && <PriorityBars priority={ticket.priority} />}
             <span className="ml-auto flex flex-none items-center">
               {snoozed && ticket.snoozedUntilMs != null ? (
-                <span
-                  className="font-mono text-[9px] text-muted-4 tabular-nums"
-                  title="Snoozed until"
-                >
+                <span className="text-2xs text-muted-4 tabular-nums" title="Snoozed until">
                   {formatSnoozeLabel(ticket.snoozedUntilMs)}
                 </span>
               ) : (
@@ -708,7 +705,7 @@ function TicketRow({
             </span>
           </div>
           <MarkdownTitle
-            className={`mt-0.5 block truncate text-[12.5px] leading-[18px] font-medium ${
+            className={`mt-0.5 block truncate text-base leading-[18px] font-medium ${
               active ? "text-fg" : "text-fg-2"
             }`}
             style={{ paddingLeft: CARD_LABEL_X - CARD_INSET }}

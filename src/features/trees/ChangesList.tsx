@@ -156,7 +156,7 @@ export function ChangesList({
     <>
       {!loading && list.length > 0 && (
         <div className="flex flex-none items-center justify-between gap-2 border-b border-line px-2.5 py-1.5">
-          <span className="font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
+          <span className="text-xs font-semibold text-muted-4">
             {stagedCount}/{list.length} staged
           </span>
           <div className="flex items-center gap-1.5">
@@ -166,7 +166,7 @@ export function ChangesList({
               <button
                 type="button"
                 onClick={() => act({ action: allStaged ? "unstageAll" : "stageAll" })}
-                className="cursor-pointer rounded-[5px] border border-line-3 bg-input px-2 py-0.5 text-[10.5px] text-muted-2 hover:border-line-strong hover:text-fg-2"
+                className="cursor-pointer rounded-sm border border-line-3 bg-input px-2 py-0.5 text-xs text-muted-2 hover:border-line-strong hover:text-fg-2"
               >
                 {allStaged ? "Unstage all" : "Stage all"}
               </button>
@@ -179,7 +179,7 @@ export function ChangesList({
         {loading ? (
           <ListSkeleton rows={7} />
         ) : nothing ? (
-          <div className="px-3 py-6 text-center text-[11.5px] text-muted-3">No changes.</div>
+          <div className="px-3 py-6 text-center text-sm text-muted-3">No changes.</div>
         ) : (
           <>
             {tracked.length > 0 && (
@@ -270,7 +270,7 @@ export function ChangesList({
   );
 }
 
-/** A folding section of the panel: an uppercase label with a count. Open by
+/** A folding section of the panel: a section label with a count. Open by
  *  default — these lists are short, and the fold is for getting one out of the
  *  way, not for hiding it. */
 function Section({
@@ -290,7 +290,7 @@ function Section({
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full cursor-pointer items-center gap-1.5 px-2.5 pt-2 pb-1 text-left font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase hover:text-fg-2"
+        className="flex w-full cursor-pointer items-center gap-1.5 px-2.5 pt-2 pb-1 text-left text-xs font-semibold text-muted-4 hover:text-fg-2"
       >
         <Chevron size={9} className="flex-none" />
         <span>{label}</span>
@@ -380,7 +380,7 @@ function ShowMoreRow({ hidden, onClick }: { hidden: number; onClick: () => void 
     <button
       type="button"
       onClick={onClick}
-      className={`flex w-full cursor-pointer items-center gap-2 ${ROW_MIN_H} px-2.5 text-left font-mono text-[10.5px] text-muted-3 hover:bg-hover hover:text-fg-2`}
+      className={`flex w-full cursor-pointer items-center gap-2 ${ROW_MIN_H} px-2.5 text-left text-xs text-muted-3 hover:bg-hover hover:text-fg-2`}
     >
       <span>Show more</span>
       <span className="ml-auto flex-none tabular-nums text-muted-5">
@@ -406,7 +406,7 @@ function ViewToggle({ tree, onChange }: { tree: boolean; onChange: (tree: boolea
           onClick={() => onChange(on)}
           title={`${label} view`}
           aria-pressed={tree === on}
-          className="flex cursor-pointer items-center rounded-[5px] border px-1.5 py-1"
+          className="flex cursor-pointer items-center rounded-sm border px-1.5 py-1"
           style={
             tree === on
               ? accentActiveStyle()
@@ -592,10 +592,8 @@ const ChangeFolderRow = memo(function ChangeFolderRow({
         {icon ? (
           <img src={icon} alt="" className="ml-0.5 h-4 w-4 flex-none" draggable={false} />
         ) : null}
-        <span className="ml-1.5 min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2">
-          {name}
-        </span>
-        <span className="ml-1.5 flex-none font-mono text-[9.5px] text-muted-4">{count}</span>
+        <span className="ml-1.5 min-w-0 flex-1 truncate font-mono text-sm text-fg-2">{name}</span>
+        <span className="ml-1.5 flex-none text-2xs text-muted-4 tabular-nums">{count}</span>
       </button>
       {(onDiscard || onStage) && (
         <RowActions>
@@ -691,7 +689,7 @@ const ChangeRow = memo(function ChangeRow({
           line up under their folder, and carrying the staged mark when there is
           one. */}
       <span
-        className="flex flex-none items-center justify-center text-[10px] leading-none"
+        className="flex flex-none items-center justify-center text-2xs leading-none"
         style={{ width: 14, color: "var(--accent)" }}
         title={staged ? "Staged" : undefined}
       >
@@ -702,18 +700,18 @@ const ChangeRow = memo(function ChangeRow({
         {/* The name stays neutral. Status is already said twice at the trailing
             edge — in the counts and in the letter — and a list where every row's
             text is a different hue reads as a warning, not as files. */}
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-3">
+        <span className="min-w-0 flex-1 truncate font-mono text-sm text-fg-3">
           {name}
           {showDir && dir && <span className="text-muted-4"> {dir}</span>}
         </span>
         {/* A zero side is not a fact worth a column: "+91 −0" reads as two
             numbers where there is one. */}
-        <span className="flex flex-none gap-1 font-mono text-[9.5px] tabular-nums">
+        <span className="flex flex-none gap-1 text-2xs tabular-nums">
           {f.addLines > 0 && <span className="text-status-green">+{f.addLines}</span>}
           {f.delLines > 0 && <span className="text-status-red">−{f.delLines}</span>}
         </span>
         <span
-          className="flex-none font-mono text-[10px] font-semibold"
+          className="flex-none text-2xs font-semibold"
           style={{ color: meta.color }}
           title={f.status}
         >

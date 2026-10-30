@@ -29,8 +29,8 @@ export function GeneralSection() {
         />
       </div>
       <div className="mb-2.5 px-1">
-        <div className="text-[13px] font-semibold text-fg-bright">Appearance</div>
-        <div className="mt-0.5 text-[11.5px] text-muted-3">
+        <div className="text-base font-semibold text-fg-bright">Appearance</div>
+        <div className="mt-0.5 text-sm text-muted-3">
           Color theme, text size, and how people's names are shown.
         </div>
       </div>
@@ -38,15 +38,13 @@ export function GeneralSection() {
         <AppearanceSection embedded />
       </div>
       <div className="mb-2.5 px-1">
-        <div className="text-[13px] font-semibold text-fg-bright">Updates</div>
-        <div className="mt-0.5 text-[11.5px] text-muted-3">Release channel and app version.</div>
+        <div className="text-base font-semibold text-fg-bright">Updates</div>
+        <div className="mt-0.5 text-sm text-muted-3">Release channel and app version.</div>
       </div>
       <UpdatesSection embedded />
       <div className="mt-5 mb-2.5 px-1">
-        <div className="text-[13px] font-semibold text-fg-bright">Diagnostics</div>
-        <div className="mt-0.5 text-[11.5px] text-muted-3">
-          What to send when something goes wrong.
-        </div>
+        <div className="text-base font-semibold text-fg-bright">Diagnostics</div>
+        <div className="mt-0.5 text-sm text-muted-3">What to send when something goes wrong.</div>
       </div>
       <DiagnosticsSection />
     </>

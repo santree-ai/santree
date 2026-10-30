@@ -85,7 +85,7 @@ function Chip({ title, dense, children }: { title: string; dense: boolean; child
     <span
       title={title}
       className={`inline-flex flex-none items-center gap-1 rounded-md border border-line-2 bg-input whitespace-nowrap text-fg-3 ${
-        dense ? "h-[18px] px-1.5 text-[10px]" : "h-5 px-2 text-[10.5px]"
+        dense ? "h-[18px] px-1.5 text-2xs" : "h-5 px-2 text-xs"
       }`}
     >
       {children}
@@ -141,7 +141,7 @@ export function IssueProperties({
   if (facts.dueDate) {
     chips.push(
       <Chip key="due" title="Due date" dense={dense}>
-        <IssueDueDate date={facts.dueDate} className="font-mono" />
+        <IssueDueDate date={facts.dueDate} className="tabular-nums" />
       </Chip>,
     );
   }
@@ -177,7 +177,7 @@ export function IssueProperties({
   for (const label of facts.labels ?? []) {
     chips.push(
       <Chip key={`label-${label}`} title="Label" dense={dense}>
-        <span className="font-mono">{label}</span>
+        <span>{label}</span>
       </Chip>,
     );
   }

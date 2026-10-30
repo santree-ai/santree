@@ -25,16 +25,16 @@ export function AddProjectPrompt({
 
   return (
     <div className={className}>
-      {error && <p className="pb-1 text-[11px] text-[var(--color-status-red)]">{error}</p>}
+      {error && <p className="pb-1 text-xs text-[var(--color-status-red)]">{error}</p>}
       {pendingRepo && (
         <div className="rounded-md border border-line bg-surface p-2">
-          <p className="pb-1 text-[11px] text-muted-4">Ticket tracker for {pendingRepo}</p>
+          <p className="pb-1 text-xs text-muted-4">Ticket tracker for {pendingRepo}</p>
           {connections.map((c) => (
             <button
               key={c.id}
               type="button"
               onClick={() => chooseConnection(c.id)}
-              className="flex h-6 w-full cursor-pointer items-center gap-1.5 rounded px-1.5 text-[12px] text-fg-2 transition-colors hover:bg-hover"
+              className="flex h-6 w-full cursor-pointer items-center gap-1.5 rounded px-1.5 text-sm text-fg-2 transition-colors hover:bg-hover"
             >
               <TrackerLogo provider={c.provider} size={11} />
               <span className="min-w-0 truncate">{c.name}</span>
@@ -43,7 +43,7 @@ export function AddProjectPrompt({
           <button
             type="button"
             onClick={dismissPending}
-            className="flex h-6 w-full cursor-pointer items-center rounded px-1.5 text-[12px] text-muted-3 transition-colors hover:bg-hover"
+            className="flex h-6 w-full cursor-pointer items-center rounded px-1.5 text-sm text-muted-3 transition-colors hover:bg-hover"
           >
             None for now
           </button>

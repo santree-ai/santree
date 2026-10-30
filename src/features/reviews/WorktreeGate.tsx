@@ -127,19 +127,19 @@ function WorktreeDialog({
         onKeyDown={(e) => {
           if (e.key === "Escape") onCancel();
         }}
-        className="relative flex w-[440px] max-w-full flex-col gap-3 rounded-xl border border-line-3 bg-panel p-4 shadow-2xl"
+        className="relative flex w-[440px] max-w-full flex-col gap-3 rounded-2xl border border-line-2 bg-popover p-4 shadow-dialog"
         style={{ animation: "toastIn .16s ease-out" }}
       >
         <div className="flex items-center gap-2">
           <BranchIcon size={13} className="flex-none text-muted-3" />
-          <h2 className="text-[13px] font-medium text-fg">Create a worktree?</h2>
+          <h2 className="text-base font-medium text-fg">Create a worktree?</h2>
         </div>
 
-        <p className="text-[12px] leading-[1.55] text-muted-2">
+        <p className="text-sm leading-[1.55] text-muted-2">
           {action} needs this pull request checked out. santree will create a worktree on the PR's
           branch — a real checkout you can build, run and open terminals in.
         </p>
-        <p className="text-[11px] leading-[1.5] text-muted-4">
+        <p className="text-xs leading-[1.5] text-muted-4">
           It stays out of Trees until you keep it, and it lives until you delete it.
         </p>
 
@@ -152,10 +152,10 @@ function WorktreeDialog({
             <Toggle on={runSetup} onClick={onToggleSetup} ariaLabelledBy={SETUP_LABEL_ID} />
           </span>
           <span className="min-w-0">
-            <span id={SETUP_LABEL_ID} className="block text-[12px] leading-4 text-fg-2">
+            <span id={SETUP_LABEL_ID} className="block text-sm leading-4 text-fg-2">
               Run the setup script
             </span>
-            <span className="block text-[10.5px] leading-[1.45] text-muted-4">
+            <span className="block text-xs leading-[1.45] text-muted-4">
               <code className="font-mono">.santree/init.sh</code> — installs dependencies so the
               branch can be built and run. Off by default: it can take minutes.
             </span>

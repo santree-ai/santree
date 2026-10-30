@@ -173,15 +173,14 @@ export function ReviewPrMenu({ pr, children }: { pr: ReviewPr; children: ReactNo
         message={
           worktree ? (
             <>
-              Delete the worktree for <span className="font-mono text-fg-2">{worktree.id}</span> and
-              its branch <span className="font-mono text-fg-2">{worktree.branch}</span>? Any
-              uncommitted changes will be lost.
+              Delete the worktree for <span className="text-fg-2">{worktree.id}</span> and its
+              branch <span className="font-mono text-fg-2">{worktree.branch}</span>? Any uncommitted
+              changes will be lost.
             </>
           ) : (
             <>
-              Delete the review checkout for{" "}
-              <span className="font-mono text-fg-2">#{pr.number}</span>? Reviewing it again cuts a
-              new one.
+              Delete the review checkout for <span className="text-fg-2">#{pr.number}</span>?
+              Reviewing it again cuts a new one.
             </>
           )
         }

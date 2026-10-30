@@ -21,7 +21,7 @@ export function SidebarFooter() {
       <button
         type="button"
         onClick={() => navigate({ to: "/settings" })}
-        className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border transition-colors hover:!border-line-strong hover:!text-fg-2"
+        className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border transition-colors hover:!bg-hover-2 hover:!text-fg"
         style={iconButtonStyle(onSettings)}
         aria-label="Settings"
       >
@@ -29,7 +29,7 @@ export function SidebarFooter() {
       </button>
       <HelpMenu />
       <div className="flex-1" />
-      <span className="font-mono text-[9px] text-muted-5">{version ? `v${version}` : ""}</span>
+      <span className="text-2xs text-muted-5">{version ? `v${version}` : ""}</span>
     </div>
   );
 }

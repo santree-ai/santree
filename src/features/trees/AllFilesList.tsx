@@ -156,7 +156,7 @@ export function AllFilesList({
     <div className={`${TREE_GROUP} min-h-0 flex-1 overflow-y-auto py-1`}>
       {files === undefined && <ListSkeleton rows={10} />}
       {files !== undefined && rows.length === 0 && (
-        <div className="px-3 py-6 text-center text-[11.5px] text-muted-3">No files.</div>
+        <div className="px-3 py-6 text-center text-sm text-muted-3">No files.</div>
       )}
       {rows.map((r) => (
         <TreeRow
@@ -197,7 +197,7 @@ const TreeRow = memo(function TreeRow({
   const acts = node.dir || openable;
   // No `gap` on the row: the guides have to sit flush against the arrow slot, or
   // every line lands beside the arrow it belongs under (see IndentGuides).
-  const className = `selection-row flex w-full items-center ${ROW_MIN_H} pr-2 pl-1.5 text-[12px]`;
+  const className = `selection-row flex w-full items-center ${ROW_MIN_H} pr-2 pl-1.5 text-sm`;
   const style = { color: tint ?? (node.dir ? "var(--color-fg-2)" : "var(--color-muted)") };
   const body = (
     <>

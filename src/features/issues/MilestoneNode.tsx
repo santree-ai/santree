@@ -21,7 +21,7 @@ export const MilestoneNode = memo(
   function MilestoneNode({ data }: NodeProps & { data: MilestoneNodeData }) {
     return (
       <div
-        className="rounded-[10px]"
+        className="rounded-lg"
         style={{
           width: data.width,
           height: data.height,
@@ -31,7 +31,7 @@ export const MilestoneNode = memo(
         }}
       >
         <div
-          className="absolute top-[7px] left-[11px] flex items-center gap-1.5 font-mono text-[9px] tracking-[.04em] uppercase"
+          className="absolute top-[7px] left-[11px] flex items-center gap-1.5 text-xs font-semibold"
           style={{
             color: data.dim ? "var(--color-muted-4)" : data.color,
             maxWidth: data.width - 22,

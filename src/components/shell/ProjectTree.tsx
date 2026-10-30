@@ -409,7 +409,7 @@ export function ProjectTree({
         <SectionSkeleton />
       ) : projects.length === 0 ? (
         <div
-          className="py-(--density-compact) text-[11px] text-muted-4"
+          className="py-(--density-compact) text-xs text-muted-4"
           style={{ paddingLeft: HEADER_GUTTER }}
         >
           {emptyLabel}
@@ -578,7 +578,7 @@ export function ProjectSection({
             className="absolute inset-0 cursor-pointer"
           />
           <RepoAvatar repo={project.repo} size={16} bordered={false} />
-          <span className="pointer-events-none min-w-0 truncate text-[12px] font-semibold text-fg-2">
+          <span className="pointer-events-none min-w-0 truncate text-sm font-semibold text-fg-2">
             {project.label}
           </span>
           <Chevron
@@ -656,7 +656,7 @@ export function ProjectSection({
 
       {open && empty && (
         <div
-          className="py-(--density-compact) text-[11px] text-muted-4"
+          className="py-(--density-compact) text-xs text-muted-4"
           style={{ paddingLeft: WORKTREE_GUTTER }}
         >
           No worktrees yet

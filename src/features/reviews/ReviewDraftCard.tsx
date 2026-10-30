@@ -40,7 +40,7 @@ function basename(path: string): string {
 
 /** Both header badges, so they are the same shape: same radius, same padding,
  *  same height. They differ only in what they say and in their tint. */
-const BADGE = "gap-1 px-1.5 py-px text-[9.5px] font-medium";
+const BADGE = "gap-1 px-1.5 py-px text-2xs font-medium";
 
 export function ReviewDraftCard({
   draft,
@@ -93,7 +93,7 @@ export function ReviewDraftCard({
       {/* One line-box height (`leading-4`) across three type sizes, so the path,
           the badges and the time sit on one line instead of three near-misses. */}
       <div className="flex items-center gap-2 px-3 py-1.5 leading-4">
-        <span className="flex min-w-0 items-center text-[10.5px] text-muted-3">
+        <span className="flex min-w-0 items-center text-xs text-muted-3">
           {/* Only the path is code — the anchor is prose, so it stays in the UI
               face. The title carries the *whole* path because this card also
               renders in Trees' PR pane, away from its file, where `a/util.py`
@@ -128,7 +128,7 @@ export function ReviewDraftCard({
         )}
         <RelativeTime
           ms={draft.updatedAtMs}
-          className="ml-auto flex-none font-mono text-[9.5px] text-muted-4"
+          className="ml-auto flex-none text-2xs text-muted-4 tabular-nums"
         />
       </div>
 
@@ -154,7 +154,7 @@ export function ReviewDraftCard({
           />
         ) : (
           <>
-            <div className="text-[12px]">
+            <div className="text-sm">
               <SuggestionOriginal value={original}>
                 <Markdown noRemote>{composeDraftBody(draft)}</Markdown>
               </SuggestionOriginal>

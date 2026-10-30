@@ -118,8 +118,8 @@ export function WorktreeSettings({ repo, forRepo }: { repo: string; forRepo?: st
     <>
       <Card>
         <div className="pt-2.5 pb-0.5">
-          <div className="text-[13px] font-semibold text-fg-bright">Scripts</div>
-          <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+          <div className="text-base font-semibold text-fg-bright">Scripts</div>
+          <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">
             The setup that runs when a worktree is created, and how batches behave.
           </div>
         </div>
@@ -229,13 +229,13 @@ function SetupScriptField({ repo }: { repo: string }) {
         className="flex w-full cursor-pointer items-center gap-2 text-left"
       >
         <div className="min-w-0 flex-1">
-          <div className="text-[12.5px] font-medium text-fg-3">Setup script</div>
-          <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+          <div className="text-base font-medium text-fg-3">Setup script</div>
+          <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">
             <code className="text-fg-3">.santree/init.sh</code> runs in each new worktree.
             {needsChmod && !open && <span className="text-status-amber"> · not executable</span>}
           </div>
         </div>
-        <span className="flex flex-none items-center gap-1 text-[11px] text-muted-2">
+        <span className="flex flex-none items-center gap-1 text-xs text-muted-2">
           {open ? "Hide" : script?.exists ? "Edit" : "Create"}
           <ChevronDownIcon size={11} className={open ? "" : "-rotate-90"} />
         </span>
@@ -255,7 +255,7 @@ function SetupScriptField({ repo }: { repo: string }) {
             chmodding={chmodding}
           />
         ) : (
-          <div className="mt-3 text-[12px] text-muted-3">
+          <div className="mt-3 text-sm text-muted-3">
             Add a repository to configure its setup script.
           </div>
         ))}
@@ -289,7 +289,7 @@ function SetupScriptBody({
     <div className="mt-3">
       {needsChmod && (
         <div className="mb-3 flex items-center gap-3 rounded-lg border border-status-amber/40 bg-status-amber/10 px-3 py-2.5">
-          <div className="min-w-0 flex-1 text-[11.5px] text-fg-3">
+          <div className="min-w-0 flex-1 text-sm text-fg-3">
             This script isn't executable, so it won't run when a worktree is created.
           </div>
           <Button onClick={() => makeExecutable()} disabled={chmodding} className="flex-none">

@@ -69,8 +69,8 @@ function StatusCard() {
       <div className="flex items-center gap-[13px] p-4">
         <DaedalusLogo size={34} className="flex-none" />
         <div className="min-w-0 flex-1">
-          <span className="text-[13.5px] font-semibold text-fg-bright">Daedalus</span>
-          <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+          <span className="text-md font-semibold text-fg-bright">Daedalus</span>
+          <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">
             Through the Daedalus agent on this Mac.
           </div>
         </div>
@@ -92,19 +92,19 @@ function StatusCard() {
         <div className="flex items-start gap-2.5">
           <ToneGlyph tone={notice.tone} name={TONE_NAME[notice.tone]} />
           <div className="min-w-0 flex-1">
-            <div className="text-[12.5px] font-medium text-fg-3">
+            <div className="text-base font-medium text-fg-3">
               {/* The action is the button below; the title names the state. */}
               {santreeOff ? SANTREE_OFF : notice.title}
             </div>
             {notice.detail && link?.kind !== "Connected" && (
-              <div className="mt-0.5 text-[11.5px] leading-[1.5] break-words text-muted-3">
+              <div className="mt-0.5 text-sm leading-[1.5] break-words text-muted-3">
                 {notice.detail}
               </div>
             )}
             {santreeOff && <TurnOnSantree className="mt-2" />}
           </div>
           {checkedMs !== null && !checking && (
-            <span className="flex-none text-[11px] text-muted-4">
+            <span className="flex-none text-xs text-muted-4">
               Checked {formatRelativeTime(checkedMs, now)}
             </span>
           )}
@@ -167,8 +167,8 @@ function ThisMacCard() {
       className="mt-4 overflow-hidden rounded-xl border border-line-2 bg-raised"
     >
       <div className="px-4 pt-3.5 pb-1">
-        <div className="text-[13px] font-semibold text-fg-bright">This Mac</div>
-        <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+        <div className="text-base font-semibold text-fg-bright">This Mac</div>
+        <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">
           Daedalus keeps these for this Mac. A change is asked of the box, which applies it within
           seconds. The menu bar and Daedalus › Settings › Machines show the same settings.
         </div>
@@ -188,7 +188,7 @@ function Notice({ tone, text }: { tone: "warn" | "error"; text: string }) {
   return (
     <div className="flex items-start gap-2.5 px-4 py-3">
       <ToneGlyph tone={tone} name={TONE_NAME[tone]} />
-      <div className="min-w-0 flex-1 text-[12px] break-words text-fg-3">{text}</div>
+      <div className="min-w-0 flex-1 text-sm break-words text-fg-3">{text}</div>
     </div>
   );
 }
@@ -227,19 +227,19 @@ function MachineSwitches({ settings }: { settings: DaedalusMachineSettings }) {
         />
       ))}
       {readOnly && (
-        <div className="border-t border-line py-3 text-[11.5px] leading-[1.5] text-muted-3">
+        <div className="border-t border-line py-3 text-sm leading-[1.5] text-muted-3">
           {readOnly}
         </div>
       )}
       {settings.fingerprint && (
         <div className="flex items-center gap-2 border-t border-line py-3">
           <div className="min-w-0 flex-1">
-            <div className="text-[12.5px] font-medium text-fg-3">This Mac's key</div>
-            <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+            <div className="text-base font-medium text-fg-3">This Mac's key</div>
+            <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">
               Daedalus asks for its first characters when you turn santree on.
             </div>
           </div>
-          <span className="font-mono text-[11.5px] text-fg-3" title={settings.fingerprint}>
+          <span className="font-mono text-sm text-fg-3" title={settings.fingerprint}>
             {settings.fingerprintShort ?? settings.fingerprint}
           </span>
           <Button
@@ -320,10 +320,10 @@ function MachineSwitch({
   return (
     <div className="flex items-center gap-[13px] border-t border-line py-3 first:border-t-0">
       <div className="min-w-0 flex-1">
-        <div id={labelId} className="text-[12.5px] font-medium text-fg-3">
+        <div id={labelId} className="text-base font-medium text-fg-3">
           {label}
         </div>
-        <div aria-live="polite" className="mt-[3px] text-[11.5px] leading-[1.5] break-words">
+        <div aria-live="polite" className="mt-[3px] text-sm leading-[1.5] break-words">
           {status}
         </div>
       </div>

@@ -12,7 +12,7 @@ import { ChevronRightIcon } from "../../components/icons";
 export const STEP_INDENT = "pl-6";
 
 const SHAPE =
-  "group -mx-2 flex min-w-0 gap-2 rounded-md px-2 py-[3px] text-left text-[12.5px] leading-[1.5]";
+  "group -mx-2 flex min-w-0 gap-2 rounded-md px-2 py-[3px] text-left text-base leading-[1.5]";
 
 export function ActivityRow({
   icon,
@@ -46,7 +46,7 @@ export function ActivityRow({
       </span>
       <span className={`min-w-0 ${wrap ? "break-words" : "truncate"}`}>{children}</span>
       {meta && (
-        <span className="flex min-w-0 flex-none items-center gap-1.5 text-[11.5px] text-muted-4">
+        <span className="flex min-w-0 flex-none items-center gap-1.5 text-sm text-muted-4">
           {meta}
         </span>
       )}
@@ -88,5 +88,5 @@ export function ActivityRow({
 
 /** A small heading inside an opened step: "Brief", "Report". */
 export function StepLabel({ children }: { children: ReactNode }) {
-  return <div className="mb-1 text-[11px] font-medium text-muted-4">{children}</div>;
+  return <div className="mb-1 text-xs font-medium text-muted-4">{children}</div>;
 }

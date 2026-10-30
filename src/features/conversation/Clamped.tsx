@@ -30,7 +30,7 @@ export function Clamped({
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
-          className="mt-1 cursor-pointer text-[11px] font-medium text-muted-3 hover:text-fg-2"
+          className="mt-1 cursor-pointer text-xs font-medium text-muted-3 hover:text-fg-2"
         >
           {open
             ? "Show less"

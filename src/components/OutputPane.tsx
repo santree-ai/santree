@@ -187,7 +187,7 @@ function StatusLine({ run, label }: { run: ReturnType<typeof useStreamRun>; labe
   const now = useLiveNow();
   if (run.running) {
     return (
-      <span className="flex min-w-0 flex-1 items-center gap-2 text-[11.5px] text-muted-2">
+      <span className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-2">
         <Spinner size={11} />
         <span className="truncate">
           Running <span className="font-mono">{label}</span>…
@@ -196,7 +196,7 @@ function StatusLine({ run, label }: { run: ReturnType<typeof useStreamRun>; labe
     );
   }
   return (
-    <span className="flex min-w-0 flex-1 items-center gap-2 text-[11.5px]">
+    <span className="flex min-w-0 flex-1 items-center gap-2 text-sm">
       <span className={run.ok ? "text-status-green" : "text-status-red"}>{run.ok ? "✓" : "✕"}</span>
       <span className="truncate text-muted-2">
         <span className="font-mono">{label}</span> {run.ok ? "finished" : "failed"}

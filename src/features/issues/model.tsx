@@ -1143,11 +1143,11 @@ function LaunchOptionsDialog({
         <div className="space-y-3">
           {pending?.askStack && (
             <div className="space-y-1.5">
-              <div id="launch-base-label" className="text-[12px] text-fg-2">
+              <div id="launch-base-label" className="text-sm text-fg-2">
                 {stacking.length === 1 ? (
                   <>
-                    <span className="font-mono text-[11.5px]">{stacking[0].id}</span> is blocked by{" "}
-                    <span className="font-mono text-[11.5px]">{stacking[0].base}</span>, which is
+                    <span className="text-sm tabular-nums">{stacking[0].id}</span> is blocked by{" "}
+                    <span className="text-sm tabular-nums">{stacking[0].base}</span>, which is
                     already in a worktree. Start from:
                   </>
                 ) : (
@@ -1172,9 +1172,8 @@ function LaunchOptionsDialog({
           )}
           {pending?.askSetup && (
             <div className="flex items-center gap-3">
-              <span id="batch-setup-label" className="min-w-0 flex-1 text-[12px] text-fg-2">
-                Run <span className="font-mono text-[11.5px]">.santree/init.sh</span> in each new
-                worktree
+              <span id="batch-setup-label" className="min-w-0 flex-1 text-sm text-fg-2">
+                Run <span className="font-mono text-sm">.santree/init.sh</span> in each new worktree
               </span>
               <Toggle
                 on={runSetup}

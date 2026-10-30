@@ -44,8 +44,8 @@ export const palette = {
  *  renderers only** (xterm paints to canvas/WebGL and can't take a CSS var, so
  *  it resolves `--accent` at theme-build time and falls back to this if the
  *  computed style is empty). Everything that renders through CSS must use
- *  {@link accentVar} instead, so the accent still inverts in light mode. */
-export const XTERM_ACCENT_FALLBACK = "#ffffff";
+ *  {@link accentVar} instead, so the accent still deepens in light mode. */
+export const XTERM_ACCENT_FALLBACK = "#2dd4a7";
 
 /** Fixed, deterministic palette for {@link Avatar} initials — a name hashes to
  *  one of these. Literal hex (not theme colors): the same name must map to the
@@ -382,15 +382,13 @@ export function agentSlug(kind: AgentKind): string {
 
 /**
  * The live accent as a CSS value (the `--accent` token). Always use this rather
- * than a literal: the accent is monochrome and *inverts* per theme (white on
- * dark, near-black on light), so a hardcoded hex is right in exactly one theme.
+ * than a literal: the emerald is tuned per theme (deepened on light to clear
+ * AA), so a hardcoded hex is right in exactly one theme.
  */
 export const accentVar = "var(--accent)";
 
 /** The solid accent fill (`--accent-fill`) for primary buttons / launch
- *  checkboxes. Inversion is what the accent has instead of hue, so this slab is
- *  the brightest thing on a dark screen and the darkest on a light one. Pair it
- *  with `--on-accent` — never raw accent + on-accent. */
+ *  checkboxes. Pair it with `--on-accent` — never raw accent + on-accent. */
 export const accentFillVar = "var(--accent-fill)";
 
 /**
@@ -471,17 +469,17 @@ export function raisedActiveStyle(): CSSProperties {
 }
 
 /**
- * Style for a small icon button that toggles into the accent-active treatment
- * when `active` (open/selected) — shared by the sidebar footer's Help and
+ * Style for a small borderless icon button that takes the selection fill when
+ * `active` (open/selected) — shared by the sidebar footer's Help and
  * Settings buttons so a menu-open button and a route-active button look the
  * same way "on".
  */
 export function iconButtonStyle(active: boolean): CSSProperties {
   return active
-    ? accentActiveStyle()
+    ? { ...accentActiveStyle(), borderColor: "transparent" }
     : {
         background: "transparent",
-        borderColor: "var(--color-line-3)",
+        borderColor: "transparent",
         color: "var(--color-muted-2)",
       };
 }

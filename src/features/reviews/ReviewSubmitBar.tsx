@@ -70,7 +70,7 @@ export function ReviewSubmitBar({
 
   return (
     <div
-      className="flex flex-none items-center gap-2.5 border-t px-3 py-2 text-[11.5px]"
+      className="flex flex-none items-center gap-2.5 border-t px-3 py-2 text-sm"
       style={{ borderColor: alpha(34, palette.amber), background: alpha(10, palette.amber) }}
     >
       <WarningIcon size={12} className="flex-none" />
@@ -94,7 +94,7 @@ export function ReviewSubmitBar({
         message={
           <>
             {drafted(drafts) || "Your draft review"} will be posted on{" "}
-            <span className="font-mono text-fg-3">
+            <span className="text-fg-3 tabular-nums">
               {prRepo}#{number}
             </span>
             .
@@ -118,10 +118,10 @@ export function ReviewSubmitBar({
               placeholder={
                 event === "Approve" ? "Summary (optional)…" : "Summary (required by GitHub)…"
               }
-              className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none"
+              className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-sm leading-[1.55] text-fg-2 placeholder:text-muted-4"
             />
             {needsSummary && (
-              <span className="text-[10.5px] text-muted-3">
+              <span className="text-xs text-muted-3">
                 GitHub needs a summary for anything but an approval.
               </span>
             )}

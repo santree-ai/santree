@@ -134,7 +134,7 @@ export function CommitBox({
           onChange={(e) => setMessage(e.target.value)}
           placeholder={stageAll ? "Commit message (stages all)" : "Commit message"}
           rows={3}
-          className="w-full resize-none rounded-lg border border-line-3 bg-input px-2.5 py-2 pr-8 font-mono text-[11.5px] text-fg-3 outline-none placeholder:text-muted-4 focus:border-line-strong"
+          className="w-full resize-none rounded-lg border border-line-3 bg-input px-2.5 py-2 pr-8 text-sm text-fg-3 placeholder:text-muted-4"
         />
         <button
           type="button"

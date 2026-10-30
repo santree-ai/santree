@@ -56,7 +56,7 @@ function BodySkeleton() {
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-muted-2">
+    <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-muted-2">
       {children}
     </div>
   );
@@ -145,8 +145,8 @@ export function IssuePanel() {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
         <div className="mb-1.5 flex items-center gap-2">
-          <span className="font-mono text-[11px] text-muted-2">{ticketHandle(focus.id)}</span>
-          <span className="flex items-center gap-1.5 text-[11px] text-muted-2">
+          <span className="text-xs text-muted-2 tabular-nums">{ticketHandle(focus.id)}</span>
+          <span className="flex items-center gap-1.5 text-xs text-muted-2">
             <StatusGlyph status={focus.status} size={12} />
             {statusLabel[focus.status]}
           </span>
@@ -157,21 +157,21 @@ export function IssuePanel() {
               type="button"
               onClick={() => openUrl(ready.url)}
               title={`Open in ${trackerOf(ready.trackerName)}`}
-              className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 py-1 text-[10.5px] text-muted-2 hover:text-fg-2"
+              className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 py-1 text-xs text-muted-2 hover:text-fg-2"
             >
               <TrackerLogo provider={trackerOf(ready.trackerName)} size={11} branded />
               Open
             </button>
           )}
         </div>
-        <MarkdownTitle className="block text-[15px] leading-[1.3] font-semibold text-fg-bright">
+        <MarkdownTitle className="block text-lg leading-[1.3] font-semibold text-fg-bright">
           {focus.title}
         </MarkdownTitle>
         {/* The row knows everything but the labels, so the properties are there
             before the detail lands; the author line waits for it. */}
         <IssueProperties facts={factsOfTask(focus, ready)} dense className="mt-2" />
         {ready && (
-          <div className="mt-2 flex items-center gap-1.5 text-[10.5px] text-muted-3">
+          <div className="mt-2 flex items-center gap-1.5 text-xs text-muted-3">
             {/* TickTick names no author, so its line is just the date. */}
             {ready.author && (
               <>
@@ -329,7 +329,7 @@ function RunButton({
           : undefined
       }
     >
-      <span className="text-[10px]">▶</span>
+      <span className="text-2xs">▶</span>
       {modifierHeld ? "Run in background" : "Run"}
     </Button>
   );
@@ -391,7 +391,7 @@ function QueueControl({
     return (
       <div className="space-y-1.5">
         {control}
-        <div className="text-center font-mono text-[10.5px] text-muted-3">
+        <div className="text-center text-xs text-muted-3 tabular-nums">
           ⛓ branches off {chainBase}
         </div>
       </div>
@@ -404,7 +404,7 @@ function QueueControl({
       ? `${statusLabel[focusStatus]}, can't queue`
       : "Blocked. Resolve blockers first.";
   return (
-    <div className="flex cursor-default items-center justify-center gap-1.5 rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] font-medium text-muted-3">
+    <div className="flex cursor-default items-center justify-center gap-1.5 rounded-lg border border-line-2 bg-input px-3 py-2 text-sm font-medium text-muted-3">
       {reason}
     </div>
   );
@@ -437,7 +437,7 @@ function WorktreeCard({
       />
       <div className="flex items-center gap-2">
         <BranchIcon size={12} className="flex-none text-muted-3" />
-        <span className="flex-1 overflow-hidden font-mono text-[11px] text-ellipsis whitespace-nowrap text-fg-2">
+        <span className="flex-1 overflow-hidden font-mono text-xs text-ellipsis whitespace-nowrap text-fg-2">
           {worktree.branch}
         </span>
         {prs.length > 0 && (
@@ -449,7 +449,7 @@ function WorktreeCard({
           →
         </span>
       </div>
-      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px] text-muted-4">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-2xs text-muted-4 tabular-nums">
         <WorktreeStats worktree={worktree} showClean />
       </div>
     </div>

@@ -27,9 +27,7 @@ export function IssueMeta({
 }) {
   return (
     <div className={`flex flex-col gap-2 ${className}`}>
-      <div
-        className={`flex items-center gap-1.5 ${dense ? "text-[10.5px]" : "text-[11px]"} text-muted-3`}
-      >
+      <div className={`flex items-center gap-1.5 ${dense ? "text-xs" : "text-xs"} text-muted-3`}>
         {/* TickTick names no author, so its line is just the date. */}
         {detail.author && (
           <>

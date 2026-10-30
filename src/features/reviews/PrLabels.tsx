@@ -37,7 +37,7 @@ export function PrLabels({ pr }: { pr: ReviewPr }) {
     );
 
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
       <span className="text-muted-4">Labels</span>
       {labels.map((l) => (
         <LabelChip
@@ -56,7 +56,7 @@ export function PrLabels({ pr }: { pr: ReviewPr }) {
             type="button"
             onClick={t}
             title="Add or remove labels"
-            className="flex cursor-pointer items-center gap-1 rounded border border-dashed border-line-3 px-1.5 py-px text-[10.5px] text-muted-2 hover:border-line-strong hover:text-fg-2"
+            className="flex cursor-pointer items-center gap-1 rounded border border-dashed border-line-3 px-1.5 py-px text-xs text-muted-2 hover:border-line-strong hover:text-fg-2"
           >
             <PlusIcon size={10} /> Label
           </button>
@@ -76,7 +76,7 @@ function LabelChip({ label, onRemove }: { label: PrLabel; onRemove: () => void }
   const color = readableLabelColor(label.color, theme);
   return (
     <span
-      className="inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-medium"
+      className="inline-flex items-center gap-1 rounded px-1.5 py-px text-2xs font-medium"
       style={{ color, background: alpha(14, color), border: `1px solid ${alpha(42, color)}` }}
       title={label.description ?? undefined}
     >
@@ -114,12 +114,12 @@ function LabelPicker({
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Filter labels…"
-          className="w-full rounded border border-line-3 bg-input px-2 py-1 text-[11.5px] text-fg-2 outline-none focus:border-line-strong"
+          className="w-full rounded border border-line-3 bg-input px-2 py-1 text-sm text-fg-2"
         />
       </div>
       <div className="max-h-64 overflow-y-auto py-1">
         {filtered.length === 0 ? (
-          <div className="px-3 py-2 text-[11.5px] text-muted-3">No labels.</div>
+          <div className="px-3 py-2 text-sm text-muted-3">No labels.</div>
         ) : (
           filtered.map((l) => (
             <button key={l.name} type="button" onClick={() => onToggle(l)} className={MENU_ITEM}>

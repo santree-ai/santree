@@ -122,7 +122,7 @@ export function PrPage({
                     <span className="flex items-center gap-2">
                       {openDrafts > 0 && (
                         <span
-                          className="flex items-center gap-1 font-mono text-[10px]"
+                          className="flex items-center gap-1 text-2xs tabular-nums"
                           title={`${openDrafts} unsent AI comment${openDrafts === 1 ? "" : "s"}`}
                           style={{ color: palette.purple }}
                         >
@@ -146,7 +146,7 @@ export function PrPage({
                   icon: <CheckIcon size={12} />,
                   badge: (
                     <span className="flex items-center gap-1.5">
-                      <span className="font-mono text-[11px]" style={{ color: checks.color }}>
+                      <span className="text-xs" style={{ color: checks.color }}>
                         {checks.glyph}
                       </span>
                       {countBadge(detail?.checks.length)}

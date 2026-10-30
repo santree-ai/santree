@@ -25,7 +25,7 @@ import { UsageSegment } from "./UsageSegment";
 /** The window-wide status bar. Mounted once by the shell, below everything. */
 export function StatusBar() {
   return (
-    <footer className="flex h-6 min-h-[24px] w-full flex-none items-center gap-4 overflow-hidden border-t border-line bg-panel px-3 text-[11px] text-muted-4">
+    <footer className="flex h-6 min-h-[24px] w-full flex-none items-center gap-4 overflow-hidden border-t border-line bg-panel px-3 text-xs text-muted-4">
       <UsageSegment />
       <SessionSegment />
       <div className="flex-1" />

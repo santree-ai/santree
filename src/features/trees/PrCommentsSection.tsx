@@ -73,9 +73,7 @@ export function PrCommentsSection({ pr }: { pr: ReviewPr }) {
   return (
     <section className="border-b border-hairline px-3 py-2.5">
       <div className="mb-2 flex items-center gap-2">
-        <span className="font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
-          Comments
-        </span>
+        <span className="text-xs font-semibold text-muted-4">Comments</span>
       </div>
 
       <Segmented
@@ -91,13 +89,10 @@ export function PrCommentsSection({ pr }: { pr: ReviewPr }) {
 
       {byFile.length > 0 && (
         <div className="mb-2.5 overflow-hidden rounded-md border border-line-2">
-          <div className="border-b border-line-2 bg-raised px-2.5 py-1 text-[10px] text-muted-4">
+          <div className="border-b border-line-2 bg-raised px-2.5 py-1 text-2xs text-muted-4">
             On the code
-            {/* Weight, not just colour: the accent is monochrome, so accent-as-text
-                lands within ~1.2:1 of the label beside it and would read as the
-                same run of type. `font-medium` is what makes it emphasis. */}
             {unresolved > 0 && (
-              <span className="font-medium text-accent"> · {unresolved} unresolved</span>
+              <span className="font-medium text-status-amber"> · {unresolved} unresolved</span>
             )}
           </div>
           {byFile.map(({ path, count, open }) => (
@@ -110,10 +105,10 @@ export function PrCommentsSection({ pr }: { pr: ReviewPr }) {
             >
               {/* Basename only: at this width a full path truncates to its
                   leading directories, which is the half that doesn't identify it. */}
-              <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-fg-3">
+              <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg-3">
                 {basename(path)}
               </span>
-              <span className="flex flex-none items-center gap-1 font-mono text-[9.5px] text-muted-4">
+              <span className="flex flex-none items-center gap-1 text-2xs text-muted-4 tabular-nums">
                 <MessageSquareIcon size={9} />
                 {count}
               </span>
@@ -136,7 +131,7 @@ export function PrCommentsSection({ pr }: { pr: ReviewPr }) {
           <Skeleton className="h-3 w-1/2" />
         </div>
       ) : shown.length === 0 && shownDrafts.length === 0 ? (
-        <p className="py-1 text-[11px] text-muted-4">
+        <p className="py-1 text-xs text-muted-4">
           {comments.length === 0
             ? "No conversation on this pull request yet."
             : `Nothing from ${audienceLabel[audience].toLowerCase()} here.`}
@@ -191,9 +186,9 @@ function CommentCard({ comment, pr }: { comment: PrComment; pr: ReviewPr }) {
     <div className="group rounded-md border border-line-2 bg-raised px-2.5 py-2">
       <div className="mb-1 flex items-center gap-1.5">
         <Avatar name={comment.author} src={comment.authorAvatarUrl} size={16} />
-        <span className="min-w-0 truncate text-[11px] font-medium text-fg-2">{comment.author}</span>
+        <span className="min-w-0 truncate text-xs font-medium text-fg-2">{comment.author}</span>
         {comment.isBot && (
-          <Pill color={palette.slate} className="px-1 py-px text-[8.5px] font-medium uppercase">
+          <Pill color={palette.slate} className="px-1 py-px text-2xs font-medium">
             bot
           </Pill>
         )}
@@ -211,7 +206,7 @@ function CommentCard({ comment, pr }: { comment: PrComment; pr: ReviewPr }) {
         <span className="ml-auto flex flex-none items-center gap-1.5">
           <RelativeTime
             ms={isoMs(comment.createdAt)}
-            className="font-mono text-[9.5px] text-muted-4"
+            className="text-2xs text-muted-4 tabular-nums"
           />
           <span className="flex h-4 w-4 flex-none items-center justify-center">
             {/* The AI work queue's own spark: the button and the place it sends
@@ -241,7 +236,7 @@ function CommentCard({ comment, pr }: { comment: PrComment; pr: ReviewPr }) {
       </div>
       {/* A bare verdict has nothing under its header, and draws nothing. */}
       {body && (
-        <div className="text-[11.5px]">
+        <div className="text-sm">
           <Markdown>{comment.body}</Markdown>
         </div>
       )}
@@ -258,9 +253,9 @@ function ReviewVerb({ state }: { state: PrComment["reviewState"] }) {
       : state === "ChangesRequested"
         ? { label: "requested changes", color: palette.red }
         : null;
-  if (!verdict) return <span className="text-[10px] text-muted-4">reviewed</span>;
+  if (!verdict) return <span className="text-2xs text-muted-4">reviewed</span>;
   return (
-    <span className="text-[10px] font-medium" style={{ color: verdict.color }}>
+    <span className="text-2xs font-medium" style={{ color: verdict.color }}>
       {verdict.label}
     </span>
   );

@@ -86,15 +86,15 @@ function Row({
         />
       )}
       <span
-        className={`min-w-0 flex-1 truncate ${strong ? "font-mono text-[10px] tracking-[.06em] text-muted-3 uppercase" : "text-[11.5px] text-fg-2"}`}
+        className={`min-w-0 flex-1 truncate ${strong ? "text-xs font-semibold text-muted-3" : "text-sm text-fg-2"}`}
         title={label}
       >
         {label}
       </span>
-      <span className="w-12 flex-none text-right font-mono text-[10.5px] text-muted-3 tabular-nums">
+      <span className="w-12 flex-none text-right text-xs text-muted-3 tabular-nums">
         {pct(cpu, cores)}
       </span>
-      <span className="w-[68px] flex-none text-right font-mono text-[10.5px] text-muted-3 tabular-nums">
+      <span className="w-[68px] flex-none text-right text-xs text-muted-3 tabular-nums">
         {formatBytes(rss)}
       </span>
     </>
@@ -191,7 +191,7 @@ export function ResourceSegment() {
         <div className="flex max-h-[420px] flex-col">
           <div className="flex flex-none items-center gap-2 border-b border-line px-3 py-2">
             <MemoryIcon size={12} className="text-muted-3" />
-            <span className="text-[12px] font-semibold text-fg">Resource manager</span>
+            <span className="text-sm font-semibold text-fg">Resource manager</span>
             <button
               type="button"
               onClick={() => void usage.refetch()}
@@ -204,31 +204,31 @@ export function ResourceSegment() {
             </button>
           </div>
           {usage.data && (
-            <div className="flex flex-none items-center gap-2 border-b border-line px-3 py-1.5 font-mono text-[11px] tabular-nums">
+            <div className="flex flex-none items-center gap-2 border-b border-line px-3 py-1.5 text-xs tabular-nums">
               {/* The core count is on-screen, not just in the tooltip: it is the
                   denominator, and without it the percentage means nothing. */}
               <span className="flex-none text-fg-2" title={CPU_HELP}>
                 {pct(usage.data.totalCpuPct, cores)}
               </span>
-              <span className="flex-none text-[10px] text-muted-4" title={CPU_HELP}>
+              <span className="flex-none text-2xs text-muted-4" title={CPU_HELP}>
                 of {cores} cores
               </span>
               <span className="sr-only">{CPU_HELP}</span>
               <span className="ml-1 flex-none text-fg-2" title={RSS_HELP}>
                 {formatBytes(usage.data.totalRssBytes)}
               </span>
-              <span className="flex-none text-[10px] text-muted-4" title={RSS_HELP}>
+              <span className="flex-none text-2xs text-muted-4" title={RSS_HELP}>
                 Σ RSS
               </span>
               <span className="sr-only">{RSS_HELP}</span>
               <span
-                className="ml-auto w-12 flex-none text-right text-[10px] text-muted-4 uppercase"
+                className="ml-auto w-12 flex-none text-right text-2xs text-muted-4"
                 title={CPU_HELP}
               >
                 CPU
               </span>
               <span
-                className="w-[68px] flex-none text-right text-[10px] text-muted-4 uppercase"
+                className="w-[68px] flex-none text-right text-2xs text-muted-4"
                 title={RSS_HELP}
               >
                 RSS
@@ -239,7 +239,7 @@ export function ResourceSegment() {
             {usage.data === undefined ? (
               <ListSkeleton rows={4} className="px-2" />
             ) : usage.data.repos.length === 0 ? (
-              <div className="px-3 py-6 text-center text-[11.5px] text-muted-3">
+              <div className="px-3 py-6 text-center text-sm text-muted-3">
                 No terminals are running.
               </div>
             ) : (

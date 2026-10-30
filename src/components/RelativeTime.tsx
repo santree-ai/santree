@@ -37,7 +37,7 @@ const SLA_URGENT_MS = 24 * 60 * 60 * 1000;
  * The compact triage clock, toned like the due-date signals: red once breached,
  * amber inside the last day, plain muted ink otherwise. The unconditional red it
  * used to wear made "SLA in 4d" shout as loudly as "SLA breached", which is the
- * decorative-color habit the monochrome pass exists to remove.
+ * decorative-color habit to avoid.
  *
  * It reads `useLiveNow` itself rather than taking `now` from the row, so the
  * shared 30s tick re-renders this span and not every row in the list.
@@ -61,7 +61,7 @@ export function SlaSignal({
         : "var(--color-muted-4)";
   return (
     <span
-      className={`flex-none font-mono text-[9px] tabular-nums ${className ?? ""}`}
+      className={`flex-none text-2xs tabular-nums ${className ?? ""}`}
       style={{ color }}
       title={left <= 0 ? "Triage SLA has been breached" : "Time left on the triage SLA"}
     >

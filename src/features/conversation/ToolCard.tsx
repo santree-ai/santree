@@ -41,11 +41,10 @@ import { displayPath, durationLabel, firstLine, useConversationScope } from "./s
 import { type ItemOf, toolLabel } from "./turns";
 
 /** A code or output well: commands, file text, JSON. */
-const WELL =
-  "rounded-md border border-line bg-input px-3 py-2 font-mono text-[11.5px] leading-[1.6]";
+const WELL = "rounded-md border border-line bg-input px-3 py-2 font-mono text-sm leading-[1.6]";
 
 /** A line of small print under a body: an exit code, a cut. */
-const NOTE = "text-[11px] text-muted-4";
+const NOTE = "text-xs text-muted-4";
 
 const STATUS_LABEL: Record<ToolStatus, string> = {
   Running: "Running",
@@ -121,7 +120,7 @@ function headOf(call: ToolCall, cwd: string | null): Head {
       const [only] = input.files;
       const added = input.files.reduce((n, f) => n + f.added, 0);
       const removed = input.files.reduce((n, f) => n + f.removed, 0);
-      const stat = <DiffStat additions={added} deletions={removed} className="text-[11px]" />;
+      const stat = <DiffStat additions={added} deletions={removed} className="text-xs" />;
       if (input.files.length === 1 && only) {
         return {
           icon: <PencilIcon size={12} />,
@@ -168,7 +167,7 @@ function headOf(call: ToolCall, cwd: string | null): Head {
         verb: input.description ?? "Subagent",
         meta: (
           <>
-            {type && <span className="font-mono text-[11px]">{type}</span>}
+            {type && <span className="text-xs">{type}</span>}
             {status?.color && (
               <span className="flex flex-none items-center gap-1">
                 <Dot color={status.color} size={6} glow={status.glow} />
@@ -218,9 +217,7 @@ export function toolIcon(call: ToolCall): ReactNode {
 
 /** A duration in the rows' own column, quiet and aligned. */
 export function Took({ ms }: { ms: number }) {
-  return (
-    <span className="font-mono text-[11px] text-muted-4 tabular-nums">{durationLabel(ms)}</span>
-  );
+  return <span className="text-xs text-muted-4 tabular-nums">{durationLabel(ms)}</span>;
 }
 
 /** A call folded to its row, opening onto its detail. */
@@ -250,7 +247,7 @@ export const ToolRow = memo(function ToolRow({
         {head.object && (
           <>
             {" "}
-            <span className="font-mono text-[12px] text-fg-3">{head.object}</span>
+            <span className="font-mono text-sm text-fg-3">{head.object}</span>
           </>
         )}
       </ActivityRow>
@@ -270,7 +267,7 @@ function ToolBody({ call, live }: { call: ToolCall; live: boolean }) {
       return (
         <div className="space-y-2">
           {input.description && (
-            <p className="text-[12.5px] leading-[1.55] text-muted-3">{input.description}</p>
+            <p className="text-base leading-[1.55] text-muted-3">{input.description}</p>
           )}
           <Clamped text={`$ ${input.command}`} lines={8} className={`${WELL} text-fg-3`} />
           <Output output={call.output} pending={call.status === "Running" && live} />
@@ -299,7 +296,7 @@ function ToolBody({ call, live }: { call: ToolCall; live: boolean }) {
       return (
         <div className="space-y-2">
           {input.prompt && (
-            <p className="text-[12.5px] leading-[1.55] text-muted-3">Asked: {input.prompt}</p>
+            <p className="text-base leading-[1.55] text-muted-3">Asked: {input.prompt}</p>
           )}
           {call.output && !call.output.isError ? (
             <ProseOutput output={call.output} />
@@ -361,7 +358,7 @@ function ProseOutput({ output }: { output: ToolOutput }) {
   return (
     <div className="space-y-1">
       <div className="max-h-96 overflow-y-auto rounded-md bg-raised px-3.5 py-2.5">
-        <Markdown noRemote className="text-[12.5px] leading-[1.65] text-fg-3">
+        <Markdown noRemote className="text-base leading-[1.65] text-fg-3">
           {output.text}
         </Markdown>
       </div>
@@ -378,13 +375,13 @@ function FileRow({ file }: { file: FileChange }) {
     <div>
       <ActivityRow
         icon={<PencilIcon size={12} />}
-        meta={<DiffStat additions={file.added} deletions={file.removed} className="text-[11px]" />}
+        meta={<DiffStat additions={file.added} deletions={file.removed} className="text-xs" />}
         open={open}
         onToggle={() => setOpen((o) => !o)}
         title={file.path}
       >
         {OP_VERB[file.op]}{" "}
-        <span className="font-mono text-[12px] text-fg-3">
+        <span className="font-mono text-sm text-fg-3">
           {displayPath(file.path, scope?.cwd ?? null)}
         </span>
       </ActivityRow>
@@ -421,7 +418,7 @@ function SubagentBody({ call, brief, live }: { call: ToolCall; brief: string; li
     <div className="space-y-3">
       <div>
         <StepLabel>Brief</StepLabel>
-        <Clamped text={brief} lines={6} className="text-[12.5px] leading-[1.6] text-muted-2" />
+        <Clamped text={brief} lines={6} className="text-base leading-[1.6] text-muted-2" />
       </div>
       {call.output && (
         <div>
@@ -464,10 +461,7 @@ export function TodoList({ items }: { items: TodoItem[] }) {
   return (
     <ul className="space-y-1.5">
       {items.map((todo, i) => (
-        <li
-          key={`${i}:${todo.text}`}
-          className="flex items-start gap-2.5 text-[12.5px] leading-[1.5]"
-        >
+        <li key={`${i}:${todo.text}`} className="flex items-start gap-2.5 text-base leading-[1.5]">
           <span
             role="img"
             aria-label={
@@ -511,10 +505,8 @@ function QuestionList({ questions }: { questions: Question[] }) {
         const free = q.answer !== null && !q.options.some((option) => chose(q.answer, option));
         return (
           <div key={`${i}:${q.question}`}>
-            {q.header && (
-              <div className="mb-0.5 text-[11px] font-medium text-muted-4">{q.header}</div>
-            )}
-            <div className="selectable text-[13px] leading-[1.6] text-fg-2">{q.question}</div>
+            {q.header && <div className="mb-0.5 text-xs font-medium text-muted-4">{q.header}</div>}
+            <div className="selectable text-base leading-[1.6] text-fg-2">{q.question}</div>
             {q.options.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {q.options.map((option) => {
@@ -522,7 +514,7 @@ function QuestionList({ questions }: { questions: Question[] }) {
                   return (
                     <span
                       key={option}
-                      className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[12px] ${
+                      className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-sm ${
                         picked
                           ? "border-line-strong bg-raised-2 font-medium text-fg"
                           : "border-line-2 text-muted-3"
@@ -536,7 +528,7 @@ function QuestionList({ questions }: { questions: Question[] }) {
               </div>
             )}
             {free && (
-              <div className="mt-2 text-[12.5px] text-fg-2">
+              <div className="mt-2 text-base text-fg-2">
                 <span className="text-muted-4">Answered: </span>
                 <span className="selectable">{q.answer}</span>
               </div>
@@ -549,7 +541,7 @@ function QuestionList({ questions }: { questions: Question[] }) {
   );
 }
 
-const PLAN_PROSE = "text-[13px] leading-[1.7] text-fg-2";
+const PLAN_PROSE = "text-base leading-[1.7] text-fg-2";
 
 /** What the user did with a plan, as far as the record says. */
 const PLAN_STATE: Record<ToolStatus, string> = {
@@ -583,10 +575,10 @@ export const AskCard = memo(function AskCard({
           : null;
   return (
     <div className="rounded-lg border border-line-2 bg-raised px-4 pt-3 pb-3.5">
-      <div className="mb-2 flex items-center gap-2 text-[12px] text-muted-3">
+      <div className="mb-2 flex items-center gap-2 text-sm text-muted-3">
         {plan ? <ListIcon size={12} /> : <HelpIcon size={12} />}
         <span className="font-medium text-fg-2">{plan ? "Plan" : "Questions"}</span>
-        {state && <span className="ml-auto text-[11.5px] text-muted-4">{state}</span>}
+        {state && <span className="ml-auto text-sm text-muted-4">{state}</span>}
       </div>
       {input.kind === "plan" ? (
         <>
@@ -599,7 +591,7 @@ export const AskCard = memo(function AskCard({
             <button
               type="button"
               onClick={() => setFull((f) => !f)}
-              className="mt-2 cursor-pointer text-[11.5px] font-medium text-muted-3 hover:text-fg-2"
+              className="mt-2 cursor-pointer text-sm font-medium text-muted-3 hover:text-fg-2"
             >
               {full ? "Show less" : "Show the whole plan"}
             </button>

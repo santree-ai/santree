@@ -107,7 +107,7 @@ function Chip({ children, title, tone }: { children: ReactNode; title?: string; 
   return (
     <span
       title={title}
-      className={`flex-none rounded-sm bg-panel px-1.5 py-px text-[10px] ${
+      className={`flex-none rounded-sm bg-panel px-1.5 py-px text-2xs ${
         tone === "amber" ? "text-status-amber" : "text-muted-3"
       }`}
     >
@@ -134,7 +134,7 @@ function SessionRow({
   const status = statusOf(s);
   return (
     <div
-      className="group flex items-center gap-2.5 border-t border-line py-1.5 pr-3 pl-9 text-[11.5px] first:border-t-0"
+      className="group flex items-center gap-2.5 border-t border-line py-1.5 pr-3 pl-9 text-sm first:border-t-0"
       title={s.cwd ?? s.label}
     >
       <span className="flex size-3.5 flex-none items-center justify-center text-muted-3">
@@ -151,7 +151,7 @@ function SessionRow({
           r{s.serverRevision} · draining
         </Chip>
       )}
-      <span className="w-[92px] flex-none text-right font-mono text-[10.5px] text-muted-4 tabular-nums">
+      <span className="w-[92px] flex-none text-right text-xs text-muted-4 tabular-nums">
         {s.pid ?? "—"} · {s.cols}×{s.rows}
       </span>
       <span
@@ -222,16 +222,14 @@ function SurfaceBlock({
 
   return (
     <div className="border-t border-line first:border-t-0">
-      <div className="flex items-center gap-2 bg-panel/50 py-1.5 pr-3 pl-6 text-[11.5px]">
+      <div className="flex items-center gap-2 bg-panel/50 py-1.5 pr-3 pl-6 text-sm">
         <BranchIcon size={11} className="flex-none text-muted-4" />
         <span className="min-w-0 truncate font-medium text-fg-2">{title}</span>
-        {sub && <span className="flex-none font-mono text-[10.5px] text-muted-4">{sub}</span>}
+        {sub && <span className="flex-none text-xs text-muted-4 tabular-nums">{sub}</span>}
         {wt && !isBase && (
-          <span className="min-w-0 truncate font-mono text-[10.5px] text-muted-4">{wt.branch}</span>
+          <span className="min-w-0 truncate font-mono text-xs text-muted-4">{wt.branch}</span>
         )}
-        <span className="ml-auto flex-none text-[10.5px] text-muted-4">
-          {surface.sessions.length}
-        </span>
+        <span className="ml-auto flex-none text-xs text-muted-4">{surface.sessions.length}</span>
       </div>
       {surface.sessions.map((s) => {
         const { label, agent } = labelOf(s);
@@ -281,9 +279,9 @@ function ProjectBlock({
         ) : (
           <TerminalIcon size={13} className="text-muted-4" />
         )}
-        <span className="text-[12.5px] font-semibold text-fg-2">{repo?.name ?? "Elsewhere"}</span>
+        <span className="text-base font-semibold text-fg-2">{repo?.name ?? "Elsewhere"}</span>
         {detached > 0 && <Chip tone="amber">{detached} detached</Chip>}
-        <span className="ml-auto text-[11px] text-muted-4">
+        <span className="ml-auto text-xs text-muted-4">
           {sessions.length} session{sessions.length === 1 ? "" : "s"}
         </span>
       </div>

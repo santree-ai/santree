@@ -18,8 +18,8 @@ import { Button, ChevronSelect, Toggle } from "../../components/primitives";
 export function Heading({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <header className="mb-5 border-b border-line pb-4">
-      <h1 className="text-[17px] font-semibold tracking-[-.01em] text-fg-bright">{title}</h1>
-      <div className="mt-1 max-w-[620px] text-[12px] leading-[1.55] text-muted-3">{subtitle}</div>
+      <h1 className="text-xl font-semibold tracking-[-.01em] text-fg-bright">{title}</h1>
+      <div className="mt-1 max-w-[620px] text-sm leading-[1.55] text-muted-3">{subtitle}</div>
     </header>
   );
 }
@@ -41,10 +41,10 @@ export function Field({
   const labelId = useId();
   return (
     <div className="border-t border-line py-3.5 first:border-t-0">
-      <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+      <div id={labelId} className="mb-[3px] text-base font-medium text-fg-3">
         {label}
       </div>
-      {hint && <div className="mb-2.5 text-[11.5px] text-muted-3">{hint}</div>}
+      {hint && <div className="mb-2.5 text-sm text-muted-3">{hint}</div>}
       {Children.map(children, (child) =>
         isValidElement(child)
           ? cloneElement(child as ReactElement<{ "aria-labelledby"?: string }>, {
@@ -74,10 +74,10 @@ export function ToggleRow({
   return (
     <div className="flex items-center gap-[13px] border-t border-line py-3.5 first:border-t-0">
       <div className="min-w-0 flex-1">
-        <div id={labelId} className="text-[12.5px] font-medium text-fg-3">
+        <div id={labelId} className="text-base font-medium text-fg-3">
           {label}
         </div>
-        {hint && <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">{hint}</div>}
+        {hint && <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">{hint}</div>}
       </div>
       <Toggle on={on} onClick={() => onChange(!on)} disabled={disabled} ariaLabelledBy={labelId} />
     </div>
@@ -96,8 +96,8 @@ export function Block({
 }) {
   return (
     <div className="border-t border-line pt-5 first:border-t-0 first:pt-0">
-      <div className="text-[13px] font-medium text-fg-2">{title}</div>
-      {subtitle && <div className="mt-[3px] mb-3 text-[11.5px] text-muted-3">{subtitle}</div>}
+      <div className="text-base font-medium text-fg-2">{title}</div>
+      {subtitle && <div className="mt-[3px] mb-3 text-sm text-muted-3">{subtitle}</div>}
       {!subtitle && <div className="mb-3" />}
       {children}
     </div>
@@ -108,8 +108,8 @@ export function Block({
 export function KvRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex border-t border-line first:border-t-0">
-      <div className="w-[110px] flex-none px-3 py-2 text-[11.5px] text-muted-3">{label}</div>
-      <div className="break-all px-3 py-2 text-[11.5px] text-fg-3">{value}</div>
+      <div className="w-[110px] flex-none px-3 py-2 text-sm text-muted-3">{label}</div>
+      <div className="break-all px-3 py-2 text-sm text-fg-3">{value}</div>
     </div>
   );
 }
@@ -117,7 +117,7 @@ export function KvRow({ label, value }: { label: string; value: string }) {
 /** Shared classes for the settings dropdowns — used as the `<select>` className
  *  inside {@link ChevronSelect} (which adds the chevron + `appearance-none`). */
 export const SELECT_CLASS =
-  "w-full rounded-[var(--radius-md)] border border-line-3 bg-input py-2 pr-8 pl-[11px] font-mono text-[12px] text-fg-3";
+  "w-full rounded-[var(--radius-md)] border border-line-3 bg-input py-2 pr-8 pl-[11px] text-sm text-fg-3";
 
 /** A `<select>` whose empty option inherits the app default, with a Reset. */
 export function OverrideSelect({
@@ -172,10 +172,10 @@ export function CardRow({
   return (
     <div className="flex items-center gap-4 border-t border-line px-4 py-3 first:border-t-0">
       <div className="min-w-0 flex-1">
-        <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+        <div id={labelId} className="mb-[3px] text-base font-medium text-fg-3">
           {label}
         </div>
-        <div className="text-[11.5px] text-muted-3">{hint}</div>
+        <div className="text-sm text-muted-3">{hint}</div>
       </div>
       {children(labelId)}
     </div>

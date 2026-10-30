@@ -298,7 +298,7 @@ export function PrCheckoutBar({ pr, source }: { pr: ReviewPr; source: CheckoutSo
   const busy = promote.isPending || removal.pending;
 
   return (
-    <div className="flex flex-none flex-col gap-1.5 border-b border-hairline bg-raised px-3 py-2 text-[10.5px] leading-[1.5] text-muted-3">
+    <div className="flex flex-none flex-col gap-1.5 border-b border-hairline bg-raised px-3 py-2 text-xs leading-[1.5] text-muted-3">
       {source.isReview && <span>{REVIEW_CHECKOUT_NOTE}</span>}
       {behindRemote && (
         <span className="flex">

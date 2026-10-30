@@ -115,17 +115,17 @@ export function ProjectPickerDialog({
         role="dialog"
         aria-modal
         aria-labelledby={TITLE_ID}
-        className="relative flex w-[440px] max-w-full flex-col gap-3 rounded-xl border border-line-3 bg-panel p-4 shadow-2xl"
+        className="relative flex w-[440px] max-w-full flex-col gap-3 rounded-2xl border border-line-2 bg-popover p-4 shadow-dialog"
         style={{ animation: "toastIn .16s ease-out" }}
       >
         <div className="flex items-center gap-2">
           <BranchIcon size={13} className="flex-none text-muted-3" />
-          <h2 id={TITLE_ID} className="text-[13px] font-medium text-fg">
+          <h2 id={TITLE_ID} className="text-base font-medium text-fg">
             {title}
           </h2>
         </div>
 
-        <p className="text-[12px] leading-[1.55] text-muted-2">
+        <p className="text-sm leading-[1.55] text-muted-2">
           {action} needs a project. {explain}
         </p>
 
@@ -136,7 +136,7 @@ export function ProjectPickerDialog({
           className="flex max-h-72 flex-col gap-0.5 overflow-y-auto rounded-lg border border-hairline bg-raised p-1"
         >
           {repos.length === 0 && (
-            <div className="px-3 py-3 text-[11.5px] text-muted-3">
+            <div className="px-3 py-3 text-sm text-muted-3">
               No projects registered yet. Add one in Settings first.
             </div>
           )}
@@ -165,16 +165,16 @@ export function ProjectPickerDialog({
               >
                 <RepoAvatar repo={repo.name} size={16} bordered={false} />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[12.5px] text-fg-2">
+                  <span className="block truncate text-base text-fg-2">
                     {shortRepoName(repo.name)}
                   </span>
                   {repo.path && (
-                    <span className="block truncate font-mono text-[10.5px] text-muted-4">
+                    <span className="block truncate font-mono text-xs text-muted-4">
                       {repo.path}
                     </span>
                   )}
                 </span>
-                {selected && <span className="flex-none text-[10px] text-muted-4">current</span>}
+                {selected && <span className="flex-none text-2xs text-muted-4">current</span>}
               </button>
             );
           })}
@@ -189,12 +189,10 @@ export function ProjectPickerDialog({
             />
           </span>
           <span className="min-w-0">
-            <span id={DEFAULT_LABEL_ID} className="block text-[12px] leading-4 text-fg-2">
+            <span id={DEFAULT_LABEL_ID} className="block text-sm leading-4 text-fg-2">
               {defaultToggle.label}
             </span>
-            <span className="block text-[10.5px] leading-[1.45] text-muted-4">
-              {defaultToggle.hint}
-            </span>
+            <span className="block text-xs leading-[1.45] text-muted-4">{defaultToggle.hint}</span>
           </span>
         </div>
 

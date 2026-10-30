@@ -61,10 +61,10 @@ export function DiagnosticsSection() {
       {saved && (
         <div className="flex items-center gap-2 border-t border-line px-4 py-2.5">
           <div className="min-w-0 flex-1">
-            <div className="truncate font-mono text-[11px] text-fg-3" title={saved.path}>
+            <div className="truncate font-mono text-xs text-fg-3" title={saved.path}>
               {saved.path}
             </div>
-            <div className="mt-[3px] text-[11px] text-muted-3">
+            <div className="mt-[3px] text-xs text-muted-3">
               {saved.count} log{saved.count === 1 ? "" : "s"} · {sizeLabel(saved.bytes)}
             </div>
           </div>

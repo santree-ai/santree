@@ -42,10 +42,8 @@ export function WelcomeScreen() {
       {/* Stand-in for the top bar (the overlay traffic lights render over it). */}
       <div data-tauri-drag-region className="h-[46px] flex-none" />
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-8 pb-[46px]">
-        <div className="font-mono text-[26px] font-semibold tracking-tight text-fg-bright">
-          santree
-        </div>
-        <p className="mt-2 max-w-[360px] text-center text-[12.5px] leading-relaxed text-muted-2">
+        <div className="text-3xl font-semibold text-fg-bright">santree</div>
+        <p className="mt-2 max-w-[360px] text-center text-base leading-relaxed text-muted-2">
           Manage AI coding agents across your repository&rsquo;s tickets. Open a repository to get
           started.
         </p>
@@ -60,7 +58,7 @@ export function WelcomeScreen() {
           {addRepo.isPending && <Spinner size={12} color="var(--on-accent)" />}
           {addRepo.isPending ? "Validating…" : "Open a repository…"}
         </Button>
-        <p className="mt-3 text-[11px] text-muted-4">Choose any folder inside a git checkout.</p>
+        <p className="mt-3 text-xs text-muted-4">Choose any folder inside a git checkout.</p>
         {daedalus && (
           <Button variant="ghost" onClick={() => setDaedalusOpen(true)} className="mt-2 gap-2">
             <DaedalusLogo size={14} />
@@ -68,7 +66,7 @@ export function WelcomeScreen() {
           </Button>
         )}
         {error && (
-          <p className="mt-3 max-w-[380px] text-center text-[11px] leading-snug text-status-red">
+          <p className="mt-3 max-w-[380px] text-center text-xs leading-snug text-status-red">
             {error}
           </p>
         )}

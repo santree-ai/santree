@@ -144,10 +144,10 @@ export function InlineCommentBox({
             src={viewer ? `https://github.com/${viewer}.png` : null}
             size={20}
           />
-          <span className="text-[12px] font-semibold text-fg-2">
+          <span className="text-sm font-semibold text-fg-2">
             Add a comment on {anchorLabel(from, line, onRight)}
           </span>
-          <span className="ml-auto truncate font-mono text-[9.5px] text-muted-4" title={path}>
+          <span className="ml-auto truncate font-mono text-2xs text-muted-4" title={path}>
             {path}
           </span>
         </div>

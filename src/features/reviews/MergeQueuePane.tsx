@@ -45,9 +45,9 @@ export function MergeQueuePane() {
       <div className="mx-auto w-full max-w-[760px] px-6 pt-8 pb-12">
         <div className="flex items-center gap-2.5">
           <MergeQueueIcon size={16} className="flex-none text-muted-3" />
-          <h1 className="text-[18px] font-semibold text-fg-bright">Merge queue</h1>
+          <h1 className="text-xl font-semibold text-fg-bright">Merge queue</h1>
           {queue?.branch && (
-            <span className="rounded-[5px] border border-line-2 bg-input-alt px-1.5 py-px font-mono text-[11px] text-fg-2">
+            <span className="rounded-sm border border-line-2 bg-input-alt px-1.5 py-px font-mono text-xs text-fg-2">
               {queue.branch}
             </span>
           )}
@@ -63,7 +63,7 @@ export function MergeQueuePane() {
             </Button>
           )}
         </div>
-        <div className="mt-1 font-mono text-[11px] text-muted-3">{scope}</div>
+        <div className="mt-1 text-xs text-muted-3">{scope}</div>
 
         {queue && <QueueStats queue={queue} />}
 
@@ -105,8 +105,8 @@ export function MergeQueuePane() {
         )}
 
         {queue && count > 0 && (
-          <div className="mt-5 overflow-hidden rounded-[10px] border border-line-2">
-            <div className="flex items-center gap-2 border-b border-line bg-raised px-4 py-2 text-[11.5px] font-medium text-muted-2">
+          <div className="mt-5 overflow-hidden rounded-lg border border-line-2">
+            <div className="flex items-center gap-2 border-b border-line bg-raised px-4 py-2 text-sm font-medium text-muted-2">
               <PrIcon size={12} className="text-muted-3" />
               {count} queued
             </div>
@@ -139,13 +139,11 @@ function QueueStats({ queue }: { queue: MergeQueue }) {
     },
   ];
   return (
-    <dl className="mt-5 grid grid-cols-3 gap-px overflow-hidden rounded-[10px] border border-line-2 bg-line-2">
+    <dl className="mt-5 grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-line-2 bg-line-2">
       {cells.map((cell) => (
         <div key={cell.label} className="bg-app px-4 py-3" title={cell.hint}>
-          <dt className="text-[10px] font-medium tracking-[0.06em] text-muted-4 uppercase">
-            {cell.label}
-          </dt>
-          <dd className="mt-1.5 font-mono text-[20px] leading-none font-semibold text-fg-bright tabular-nums">
+          <dt className="text-xs font-semibold text-muted-4">{cell.label}</dt>
+          <dd className="mt-1.5 text-2xl leading-none font-semibold text-fg-bright tabular-nums">
             {cell.value}
           </dd>
         </div>
@@ -164,7 +162,7 @@ function QueueRow({ entry }: { entry: MergeQueueEntry }) {
     >
       {/* Position in line — front of the queue is #1. */}
       <span
-        className="flex h-6 w-6 flex-none items-center justify-center rounded-full font-mono text-[11px] font-semibold"
+        className="flex h-6 w-6 flex-none items-center justify-center rounded-full text-xs font-semibold tabular-nums"
         style={
           entry.isMine
             ? { background: "var(--accent-fill)", color: "var(--on-accent)" }
@@ -179,16 +177,16 @@ function QueueRow({ entry }: { entry: MergeQueueEntry }) {
           type="button"
           onClick={() => openUrl(entry.prUrl)}
           title="Open on GitHub"
-          className="min-w-0 cursor-pointer truncate text-left text-[13px] leading-[1.3] font-medium text-fg hover:underline"
+          className="min-w-0 cursor-pointer truncate text-left text-base leading-[1.3] font-medium text-fg hover:underline"
         >
           {entry.prTitle}
         </button>
-        <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-3">
-          <span className="font-mono">#{entry.prNumber}</span>
+        <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-3">
+          <span className="tabular-nums">#{entry.prNumber}</span>
           {entry.isMine && (
             <span
-              className="rounded-[4px] px-1 font-mono text-[8.5px] uppercase"
-              style={{ color: "var(--accent-text)", border: `1px solid ${alpha(40)}` }}
+              className="rounded-sm px-1 text-2xs"
+              style={{ color: "var(--accent-text)", background: alpha(14) }}
             >
               yours
             </span>
@@ -217,7 +215,7 @@ function QueueRow({ entry }: { entry: MergeQueueEntry }) {
 
       {state.label && (
         <span
-          className="flex flex-none items-center gap-1.5 font-mono text-[10.5px]"
+          className="flex flex-none items-center gap-1.5 text-xs"
           style={{ color: state.color }}
           title={state.label}
         >
@@ -231,7 +229,7 @@ function QueueRow({ entry }: { entry: MergeQueueEntry }) {
 
 function QueueSkeleton() {
   return (
-    <div className="mt-5 overflow-hidden rounded-[10px] border border-line-2">
+    <div className="mt-5 overflow-hidden rounded-lg border border-line-2">
       {[0, 1, 2, 3].map((i) => (
         <div
           key={i}

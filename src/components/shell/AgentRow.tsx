@@ -69,7 +69,7 @@ export function AgentRow({
         </span>
       </span>
       <span
-        className={`min-w-0 flex-1 truncate text-[11px] leading-4 ${
+        className={`min-w-0 flex-1 truncate text-xs leading-4 ${
           emphasized ? "font-medium text-fg-2" : "text-muted-3"
         }`}
       >
@@ -77,7 +77,7 @@ export function AgentRow({
       </span>
       <RelativeTime
         ms={entry.updatedAtMs}
-        className="flex-none font-mono text-[10px] text-muted-4 tabular-nums"
+        className="flex-none text-2xs text-muted-4 tabular-nums"
       />
     </button>
   );

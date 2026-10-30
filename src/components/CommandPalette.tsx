@@ -422,7 +422,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
         role="dialog"
         aria-modal
         aria-label="Command palette"
-        className="relative flex max-h-[64vh] w-[620px] max-w-full flex-col overflow-hidden rounded-xl border border-line-3 bg-popover shadow-[0_30px_80px_-20px_rgba(0,0,0,.85)]"
+        className="relative flex max-h-[64vh] w-[620px] max-w-full flex-col overflow-hidden rounded-2xl border border-line-2 bg-popover shadow-dialog"
       >
         <div className="flex h-12 flex-none items-center gap-3 border-b border-line px-4">
           <SearchIcon size={15} className="flex-none text-muted-3" />
@@ -447,7 +447,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
             }}
             placeholder="Search tickets, pull requests, worktrees, agents, projects, settings…"
             aria-label="Search"
-            className="overlay-search-input min-w-0 flex-1 bg-transparent text-[14px] text-fg outline-none placeholder:text-muted-4"
+            className="overlay-search-input min-w-0 flex-1 bg-transparent text-md text-fg outline-none placeholder:text-muted-4"
           />
           <Kbd token="esc" />
         </div>
@@ -455,8 +455,8 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
         <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
           {rows.length === 0 ? (
             <div className="px-3 py-10 text-center">
-              <div className="text-[13px] text-fg-3">No results for “{trimmed}”</div>
-              <div className="mt-1 text-[11.5px] text-muted-4">
+              <div className="text-base text-fg-3">No results for “{trimmed}”</div>
+              <div className="mt-1 text-sm text-muted-4">
                 Try a ticket id, a PR number, a branch, an agent, a project or a setting.
               </div>
             </div>
@@ -467,7 +467,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
               return (
                 <div key={item.key}>
                   {first && (
-                    <div className="px-2.5 pt-3 pb-1 font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
+                    <div className="px-2.5 pt-3 pb-1 text-xs font-semibold text-muted-4">
                       {item.group}
                     </div>
                   )}
@@ -476,27 +476,27 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
                     onMouseEnter={() => setActive(index)}
                     onClick={item.run}
                     data-active={isActive}
-                    className="flex h-8 w-full cursor-pointer items-center gap-3 rounded-md px-2.5 text-left data-[active=true]:bg-(--interaction-hover)"
+                    className="flex h-8 w-full cursor-pointer items-center gap-3 rounded-md px-2.5 text-left data-[active=true]:bg-(--selection-fill)"
                   >
                     <span className="flex w-4 flex-none items-center justify-center text-muted-3">
                       {item.icon}
                     </span>
                     {item.code && (
-                      <span className="flex-none font-mono text-[11px] text-muted-3 tabular-nums">
+                      <span className="flex-none text-xs text-muted-3 tabular-nums">
                         {item.code}
                       </span>
                     )}
-                    <span className="min-w-0 flex-1 truncate text-[13px] text-fg-2">
+                    <span className="min-w-0 flex-1 truncate text-base text-fg-2">
                       {item.label}
                     </span>
                     {item.meta && (
-                      <span className="max-w-[38%] flex-none truncate font-mono text-[10.5px] text-muted-4">
+                      <span className="max-w-[38%] flex-none truncate text-xs text-muted-4">
                         {item.meta}
                       </span>
                     )}
                     <span
                       aria-hidden
-                      className={`w-3 flex-none font-mono text-[10px] text-muted-4 ${
+                      className={`w-3 flex-none text-2xs text-muted-4 ${
                         isActive ? "" : "invisible"
                       }`}
                     >
@@ -509,7 +509,7 @@ function PaletteDialog({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
-        <div className="flex flex-none items-center gap-4 border-t border-line px-4 py-2 text-[10.5px] text-muted-4">
+        <div className="flex flex-none items-center gap-4 border-t border-line px-4 py-2 text-xs text-muted-4">
           <Hint keys={["↑", "↓"]} label="navigate" />
           <Hint keys={["↵"]} label="open" />
           <Hint keys={["esc"]} label="close" />

@@ -39,7 +39,7 @@ export function DiffStat({
     // another number.
     <span
       role="img"
-      className={`flex flex-none items-center gap-1.5 font-mono text-[11px] ${className ?? ""}`}
+      className={`flex flex-none items-center gap-1.5 text-xs tabular-nums ${className ?? ""}`}
       aria-label={label}
       title={label}
     >

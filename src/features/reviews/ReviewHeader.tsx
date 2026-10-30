@@ -98,12 +98,12 @@ export function ReviewHeader({
               last word, the way GitHub sets it — and the verdict trails the number,
               because "has this been approved" is the question the heading is read
               to answer. */}
-            <h1 className="text-[19px] leading-[1.28] font-semibold text-fg-bright">
+            <h1 className="text-xl leading-[1.28] font-semibold text-fg-bright">
               <MarkdownTitle>{pr.title}</MarkdownTitle>{" "}
               <span className="font-normal text-muted-4">#{pr.number}</span>{" "}
               <Pill
                 color={decision.color}
-                className="align-[3px] px-1.5 py-px text-[10px] font-medium"
+                className="align-[3px] px-1.5 py-px text-2xs font-medium"
               >
                 {decision.label}
               </Pill>
@@ -112,7 +112,7 @@ export function ReviewHeader({
                   {" "}
                   <Pill
                     color={mergeQueueMeta.color}
-                    className="align-[3px] px-1.5 py-px text-[10px] font-medium"
+                    className="align-[3px] px-1.5 py-px text-2xs font-medium"
                   >
                     {mergeQueueMeta.glyph} {mergeQueueMeta.label}
                   </Pill>
@@ -175,7 +175,7 @@ export function ReviewHeader({
             on a wide window). The shrink weights are the priority order — the
             chips absorb the squeeze first, and the sentence only starts losing
             words once they are down to their stubs. */}
-        <div className="mb-2 flex min-w-0 items-center gap-2 text-[11.5px] text-muted-2">
+        <div className="mb-2 flex min-w-0 items-center gap-2 text-sm text-muted-2">
           <span className="flex flex-none items-center gap-2">
             <StatePill state={pr.state} isDraft={pr.isDraft} />
             <Avatar name={pr.author} src={pr.authorAvatarUrl} size={16} />
@@ -186,7 +186,7 @@ export function ReviewHeader({
           </span>
           <span
             title={pr.baseRef}
-            className="min-w-[3.5rem] max-w-[240px] truncate rounded border border-line-2 bg-input px-1.5 py-px font-mono text-[10.5px] text-[color:var(--color-branch)]"
+            className="min-w-[3.5rem] max-w-[240px] truncate rounded border border-line-2 bg-input px-1.5 py-px font-mono text-xs text-[color:var(--color-branch)]"
           >
             {pr.baseRef}
           </span>
@@ -198,7 +198,7 @@ export function ReviewHeader({
               toast.success("Branch copied.");
             }}
             title={`Copy branch — ${pr.headRef}`}
-            className="group flex min-w-0 max-w-[300px] cursor-pointer items-center gap-1.5 rounded border border-line-2 bg-input px-1.5 py-px font-mono text-[10.5px] text-[color:var(--color-branch)] hover:border-line-strong"
+            className="group flex min-w-0 max-w-[300px] cursor-pointer items-center gap-1.5 rounded border border-line-2 bg-input px-1.5 py-px font-mono text-xs text-[color:var(--color-branch)] hover:border-line-strong"
           >
             <BranchIcon size={10} className="flex-none" />
             <span className="truncate">{pr.headRef}</span>
@@ -231,7 +231,7 @@ function StatePill({ state, isDraft }: { state: PrState; isDraft: boolean }) {
     <Pill
       color={meta.color}
       title={`${meta.label} pull request`}
-      className="gap-1 px-2 py-0.5 text-[11px] font-medium"
+      className="gap-1 px-2 py-0.5 text-xs font-medium"
     >
       <Icon size={11} />
       {meta.label}
@@ -256,7 +256,7 @@ export function commitPhrase(count: number | null): string {
  *  bordered chip with a people glyph. */
 function Reviewers({ reviewers }: { reviewers: Reviewer[] }) {
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[11px]">
+    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-xs">
       <span className="text-muted-4">Reviewers</span>
       {reviewers.map((r) =>
         r.kind === "User" ? (
@@ -267,7 +267,7 @@ function Reviewers({ reviewers }: { reviewers: Reviewer[] }) {
         ) : (
           <span
             key={`t:${r.name}`}
-            className="flex items-center gap-1 rounded-md border border-line-2 bg-input px-1.5 py-0.5 text-[10px] text-muted-2"
+            className="flex items-center gap-1 rounded-md border border-line-2 bg-input px-1.5 py-0.5 text-2xs text-muted-2"
             title={`Team: ${r.name}`}
           >
             <AgentsIcon size={11} />

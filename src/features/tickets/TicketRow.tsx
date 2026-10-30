@@ -49,7 +49,7 @@ import { statusLabel } from "../../theme/colors";
 import { isStartable, type TicketRow as Row } from "./useTickets";
 
 /** 10px labels in 16px pills — the row's third tier, under title and key. */
-const TAG_CLASS = "h-4 gap-1 px-[5px] font-mono text-[10px] leading-none";
+const TAG_CLASS = "h-4 gap-1 px-[5px] text-2xs leading-none tabular-nums";
 
 /** The chip's second half: who is on it, or how many are. */
 function agentLabelOf(row: Row): string | null {
@@ -256,7 +256,7 @@ export const TicketRow = memo(function TicketRow({
                 : `Add ${ticketHandle(task.id)} to the launch queue`
             }
             onClick={() => onToggleQueue(row)}
-            className={`absolute top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 cursor-pointer items-center justify-center rounded-[3px] border transition-[opacity,background-color,border-color] focus-visible:opacity-100 group-hover:opacity-100 ${
+            className={`absolute top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 cursor-pointer items-center justify-center rounded-xs border transition-[opacity,background-color,border-color] focus-visible:opacity-100 group-hover:opacity-100 ${
               queued
                 ? "border-transparent bg-accent-fill opacity-100"
                 : "border-line-strong bg-input opacity-0 hover:border-fg-2"
@@ -272,7 +272,7 @@ export const TicketRow = memo(function TicketRow({
         {/* Wide enough for a nine-character handle (TickTick's tt-05fcd4, or a
           key like MSG-54881): the column used to be 52px, which is where
           eight-character keys truncated to "MSG-54…". */}
-        <span className="w-[60px] flex-none truncate font-mono text-[11px] text-muted-4">
+        <span className="w-[60px] flex-none truncate text-xs text-muted-4 tabular-nums">
           {ticketHandle(task.id)}
         </span>
         {showSource && row.provider && (
@@ -284,7 +284,7 @@ export const TicketRow = memo(function TicketRow({
           </span>
         )}
         <StatusGlyph status={task.status} size={12} />
-        <MarkdownTitle className="block min-w-0 flex-1 truncate text-[13px] text-fg-2">
+        <MarkdownTitle className="block min-w-0 flex-1 truncate text-base text-fg-2">
           {task.title}
         </MarkdownTitle>
         {row.blockedBy && row.worktree === null && (

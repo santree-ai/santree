@@ -302,7 +302,7 @@ export function PromptsSection({ repo, forRepo }: { repo: string; forRepo: boole
                 <button
                   type="button"
                   onClick={() => setCreating(true)}
-                  className="mx-2 mt-0.5 flex w-[calc(100%-16px)] cursor-pointer items-center gap-2 rounded-md py-[6px] pr-2.5 pl-[23px] text-left text-[12px] text-muted-2 hover:bg-hover hover:text-fg-2"
+                  className="mx-2 mt-0.5 flex w-[calc(100%-16px)] cursor-pointer items-center gap-2 rounded-md py-[6px] pr-2.5 pl-[23px] text-left text-sm text-muted-2 hover:bg-hover hover:text-fg-2"
                 >
                   <PlusIcon size={12} className="flex-none" /> New block
                 </button>
@@ -353,8 +353,8 @@ function PromptsHeader({ repo, forRepo }: { repo: string; forRepo: boolean }) {
   return (
     <div className="flex flex-none flex-wrap items-start gap-x-8 gap-y-2 border-b border-line px-5 py-4">
       <div className="min-w-0 flex-1 basis-[440px]">
-        <h1 className="text-[17px] font-semibold tracking-[-.01em] text-fg-bright">Prompts</h1>
-        <p className="mt-1 max-w-[720px] text-[12px] leading-[1.55] text-muted-3">
+        <h1 className="text-xl font-semibold tracking-[-.01em] text-fg-bright">Prompts</h1>
+        <p className="mt-1 max-w-[720px] text-sm leading-[1.55] text-muted-3">
           Every prompt santree hands an agent, in one place.{" "}
           {forRepo ? (
             <>
@@ -375,10 +375,8 @@ function PromptsHeader({ repo, forRepo }: { repo: string; forRepo: boolean }) {
           with <Code>{'{% include "name" %}'}</Code>.
         </p>
       </div>
-      <div className="flex flex-none items-center gap-3 pt-1.5 text-[11px] text-muted-3">
-        <span className="font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
-          Reference
-        </span>
+      <div className="flex flex-none items-center gap-3 pt-1.5 text-xs text-muted-3">
+        <span className="text-xs font-semibold text-muted-4">Reference</span>
         {SYNTAX_DOCS.map((doc) => (
           <DocLink key={doc.label} label={doc.label} url={doc.url} />
         ))}
@@ -388,7 +386,7 @@ function PromptsHeader({ repo, forRepo }: { repo: string; forRepo: boolean }) {
 }
 
 function Code({ children }: { children: ReactNode }) {
-  return <code className="font-mono text-[11px] text-fg-3">{children}</code>;
+  return <code className="font-mono text-xs text-fg-3">{children}</code>;
 }
 
 /** One folding group of the rail. Its rows hang from the heading's label, not
@@ -423,13 +421,9 @@ function RailGroup({
         className="tree-band group mx-2 flex w-[calc(100%-16px)] cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-left"
       >
         <Chevron size={9} className="flex-none text-muted-4 group-hover:text-muted-3" />
-        <span className="font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
-          {title}
-        </span>
+        <span className="text-xs font-semibold text-muted-4">{title}</span>
         {!open && (
-          <span className="ml-auto font-mono text-[10px] text-muted-4 tabular-nums">
-            {items.length}
-          </span>
+          <span className="ml-auto text-2xs text-muted-4 tabular-nums">{items.length}</span>
         )}
       </button>
       {open &&
@@ -442,7 +436,7 @@ function RailGroup({
               type="button"
               onClick={() => onSelect(p.name)}
               data-active={active}
-              className={`selection-row mx-2 flex w-[calc(100%-16px)] cursor-pointer items-center gap-2 rounded-md py-[6px] pr-2.5 pl-[23px] text-left text-[12.5px] ${
+              className={`selection-row mx-2 flex w-[calc(100%-16px)] cursor-pointer items-center gap-2 rounded-md py-[6px] pr-2.5 pl-[23px] text-left text-base ${
                 active ? "text-fg-bright" : "text-fg-3"
               }`}
             >
@@ -699,7 +693,7 @@ function PromptEditor({
       {/* Header */}
       <div className="flex-none border-b border-line px-5 py-3.5">
         <div className="flex items-center gap-2">
-          <span className="text-[13.5px] font-semibold text-fg-bright">{prompt.label}</span>
+          <span className="text-md font-semibold text-fg-bright">{prompt.label}</span>
           {!prompt.editable ? (
             <Badge color="var(--color-muted)">
               <LockIcon size={10} className="mr-1" />
@@ -721,11 +715,9 @@ function PromptEditor({
             />
           )}
         </div>
-        <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
-          {prompt.description}
-        </div>
+        <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">{prompt.description}</div>
         {forRepo && prompt.editable && (
-          <div className="mt-2 text-[11px] text-muted-3">
+          <div className="mt-2 text-xs text-muted-3">
             {layer === "project" ? (
               <>
                 <span className="font-mono text-fg-3">.santree/prompts/{prompt.name}.njk</span> —
@@ -769,7 +761,7 @@ function PromptEditor({
           {/* Variable palette — or, for a prompt that can't be edited, the one
               line saying so and what it receives. */}
           {!prompt.editable ? (
-            <div className="flex flex-none items-center gap-2 border-t border-line bg-raised/30 px-4 py-2.5 text-[11px] text-muted-3">
+            <div className="flex flex-none items-center gap-2 border-t border-line bg-raised/30 px-4 py-2.5 text-xs text-muted-3">
               <LockIcon size={11} className="flex-none text-muted-4" />
               <span>
                 Shown as the agent gets it. It receives{" "}
@@ -781,9 +773,7 @@ function PromptEditor({
             </div>
           ) : (
             <div className="flex-none border-t border-line bg-raised/30 px-4 py-2.5">
-              <div className="mb-1.5 font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
-                Insert
-              </div>
+              <div className="mb-1.5 text-xs font-semibold text-muted-4">Insert</div>
               <div className="flex max-h-[76px] flex-wrap gap-1.5 overflow-y-auto">
                 {prompt.variables.map((v) => (
                   <button
@@ -791,7 +781,7 @@ function PromptEditor({
                     type="button"
                     title={v.description}
                     onClick={() => insert(`{{ ${v.name} }}`)}
-                    className="cursor-pointer rounded border border-line-3 bg-input px-[6px] py-[2px] font-mono text-[10.5px] text-fg-3 hover:border-line-strong hover:text-fg-bright"
+                    className="cursor-pointer rounded border border-line-3 bg-input px-[6px] py-[2px] font-mono text-xs text-fg-3 hover:border-line-strong hover:text-fg-bright"
                   >
                     {v.name}
                   </button>
@@ -802,7 +792,7 @@ function PromptEditor({
                     type="button"
                     title={`Embed the “${inc}” block`}
                     onClick={() => insert(`{% include "${inc}" %}`)}
-                    className="cursor-pointer rounded border border-dashed border-line-3 bg-input px-[6px] py-[2px] font-mono text-[10.5px] text-accent hover:border-line-strong"
+                    className="cursor-pointer rounded border border-dashed border-line-3 bg-input px-[6px] py-[2px] font-mono text-xs text-accent hover:border-line-strong"
                   >
                     {`include "${inc}"`}
                   </button>
@@ -827,14 +817,12 @@ function PromptEditor({
 
       {/* Actions */}
       <div className="flex flex-none items-center justify-between gap-2 border-t border-line px-5 py-3">
-        <div className={`text-[11px] ${stale ? "text-status-amber" : "text-muted-3"}`}>
-          {status}
-        </div>
+        <div className={`text-xs ${stale ? "text-status-amber" : "text-muted-3"}`}>{status}</div>
         <div className="flex items-center gap-2">
           {!prompt.editable ? null : isCustomAppScope ? (
             confirmDelete ? (
               <>
-                <span className="text-[11px] text-muted-2">Delete this block?</span>
+                <span className="text-xs text-muted-2">Delete this block?</span>
                 <Button onClick={() => setConfirmDelete(false)}>Cancel</Button>
                 <Button variant="danger" onClick={onDelete}>
                   Delete
@@ -857,7 +845,7 @@ function PromptEditor({
                   </Button>
                 ) : confirmExtend ? (
                   <>
-                    <span className="text-[11px] text-muted-2">
+                    <span className="text-xs text-muted-2">
                       Discard this text and extend santree's prompt instead?
                     </span>
                     <Button onClick={() => setConfirmExtend(false)}>Cancel</Button>
@@ -963,12 +951,10 @@ function SlotField({
   const rows = Math.min(14, Math.max(2, value.split("\n").length + 1));
   return (
     <div className="mx-[14px] my-2 rounded-md border border-dashed border-accent/50 bg-app/40 p-2.5">
-      <label htmlFor={id} className="block text-[11.5px] font-medium text-fg-2">
+      <label htmlFor={id} className="block text-sm font-medium text-fg-2">
         {slot.label}
       </label>
-      {slot.hint && (
-        <div className="mt-0.5 text-[11px] leading-[1.5] text-muted-3">{slot.hint}</div>
-      )}
+      {slot.hint && <div className="mt-0.5 text-xs leading-[1.5] text-muted-3">{slot.hint}</div>}
       <textarea
         id={id}
         value={value}
@@ -980,7 +966,7 @@ function SlotField({
         autoCorrect="off"
         autoCapitalize="off"
         autoComplete="off"
-        className="mt-2 block w-full resize-y rounded border border-line-3 bg-input px-2 py-1.5 font-mono text-[12px] leading-[1.6] text-fg-2 outline-none placeholder:text-muted-4 focus:border-line-strong"
+        className="mt-2 block w-full resize-y rounded border border-line-3 bg-input px-2 py-1.5 font-mono text-sm leading-[1.6] text-fg-2 placeholder:text-muted-4"
       />
     </div>
   );
@@ -1011,7 +997,7 @@ function DocLink({ label, url }: { label: string; url: string }) {
 function CompositionLine({ includes, usedBy }: { includes: string[]; usedBy: string[] }) {
   if (includes.length === 0 && usedBy.length === 0) return null;
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-3">
+    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-3">
       {includes.length > 0 && (
         <span>
           Includes: <span className="font-mono text-fg-3">{includes.join(", ")}</span>
@@ -1105,18 +1091,16 @@ function PreviewPane({
     >
       <EdgeResizeHandle edge="left" {...resize} />
       <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-2">
-        <span className="font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
-          Preview
-        </span>
-        {isFetching && <span className="text-[10px] text-muted-4">rendering…</span>}
+        <span className="text-xs font-semibold text-muted-4">Preview</span>
+        {isFetching && <span className="text-2xs text-muted-4">rendering…</span>}
         {kind === "sample" ? (
-          <span className="ml-auto truncate text-[10.5px] text-muted-4">Sample data</span>
+          <span className="ml-auto truncate text-xs text-muted-4">Sample data</span>
         ) : (
           <div className="ml-auto min-w-0 max-w-[220px] flex-1">
             <ChevronSelect
               value={issueId}
               onChange={onIssueChange}
-              className="w-full rounded-md border border-line-3 bg-input py-1 pr-7 pl-2 font-mono text-[11px] text-fg-3"
+              className="w-full rounded-md border border-line-3 bg-input py-1 pr-7 pl-2 text-xs text-fg-3"
             >
               <option value="">Sample ticket</option>
               {tasks.map((t) => (
@@ -1143,7 +1127,7 @@ function PreviewPane({
           />
         )}
         {error ? (
-          <pre className="m-3 whitespace-pre-wrap rounded-lg border border-status-red/40 bg-status-red/10 px-3 py-2.5 font-mono text-[11px] text-status-red">
+          <pre className="m-3 whitespace-pre-wrap rounded-lg border border-status-red/40 bg-status-red/10 px-3 py-2.5 font-mono text-xs text-status-red">
             {error}
           </pre>
         ) : data?.output ? (
@@ -1151,7 +1135,7 @@ function PreviewPane({
             // What the agent reads, laid out as it would read it. The
             // substitution marks are stripped: markdown can't carry the tint,
             // and the private-use characters would otherwise render as boxes.
-            <MarkdownDocument className="px-4 py-3 text-[12.5px] leading-[1.6] text-fg-2">
+            <MarkdownDocument className="px-4 py-3 text-base leading-[1.6] text-fg-2">
               {stripRenderMarks(data.output)}
             </MarkdownDocument>
           ) : (
@@ -1159,13 +1143,13 @@ function PreviewPane({
             // highlightRendered). Input is HTML-escaped there; only our own marker
             // sentinels become spans, so this is safe to inject.
             <pre
-              className="prompt-render whitespace-pre-wrap px-4 py-3 font-mono text-[11px] leading-[1.55] text-fg-3"
+              className="prompt-render whitespace-pre-wrap px-4 py-3 font-mono text-xs leading-[1.55] text-fg-3"
               // biome-ignore lint/security/noDangerouslySetInnerHtml: highlightRendered escapes the output; only marker sentinels are turned into spans.
               dangerouslySetInnerHTML={{ __html: highlightRendered(data.output) }}
             />
           )
         ) : (
-          <pre className="whitespace-pre-wrap px-4 py-3 font-mono text-[11px] leading-[1.55] text-fg-3">
+          <pre className="whitespace-pre-wrap px-4 py-3 text-xs leading-[1.55] text-fg-3">
             Type a template to see its preview.
           </pre>
         )}
@@ -1187,7 +1171,7 @@ function blankItem(source: ReviewWorkItemSource): PromptWorkItemSample {
 }
 
 const QUEUE_INPUT =
-  "min-w-0 rounded border border-line-3 bg-input px-1.5 py-[3px] font-mono text-[10.5px] text-fg-3 outline-none placeholder:text-muted-4 focus:border-line-strong";
+  "min-w-0 rounded border border-line-3 bg-input px-1.5 py-[3px] text-xs text-fg-3 placeholder:text-muted-4";
 
 /** The Start-work preview's stand-in queue: the rows the prompt is rendered
  *  over, each one queue item of one kind — a failing check, a review comment,
@@ -1211,10 +1195,8 @@ function SampleQueueEditor({
   return (
     <div className="border-b border-line bg-raised/30 px-4 py-3">
       <div className="mb-2 flex items-baseline justify-between gap-3">
-        <span className="font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
-          Sample queue
-        </span>
-        <span className="truncate text-[10.5px] text-muted-4">
+        <span className="text-xs font-semibold text-muted-4">Sample queue</span>
+        <span className="truncate text-xs text-muted-4">
           Becomes the JSON below exactly as a real queue does.
         </span>
       </div>
@@ -1228,7 +1210,7 @@ function SampleQueueEditor({
           />
         ))}
         {rows.length === 0 && (
-          <div className="text-[11px] text-muted-4">
+          <div className="text-xs text-muted-4">
             Empty. Add an item to see how the prompt carries it.
           </div>
         )}
@@ -1239,7 +1221,7 @@ function SampleQueueEditor({
             key={kind.value}
             type="button"
             onClick={() => onAdd(kind.value)}
-            className="flex cursor-pointer items-center gap-1 rounded border border-dashed border-line-3 bg-input px-[6px] py-[2px] font-mono text-[10.5px] text-fg-3 hover:border-line-strong hover:text-fg-bright"
+            className="flex cursor-pointer items-center gap-1 rounded border border-dashed border-line-3 bg-input px-[6px] py-[2px] text-xs text-fg-3 hover:border-line-strong hover:text-fg-bright"
           >
             <PlusIcon size={9} /> {kind.label}
           </button>
@@ -1278,7 +1260,7 @@ function SampleQueueRow({
               body: hasBody(source) ? (item.body ?? "") : null,
             });
           }}
-          className="w-[132px] flex-none rounded border border-line-3 bg-input py-[3px] pr-6 pl-1.5 font-mono text-[10.5px] text-fg-3"
+          className="w-[132px] flex-none rounded border border-line-3 bg-input py-[3px] pr-6 pl-1.5 text-xs text-fg-3"
         >
           {QUEUE_KINDS.map((k) => (
             <option key={k.value} value={k.value} className="bg-input">
@@ -1337,7 +1319,7 @@ function SampleQueueRow({
           onChange={(e) => onChange({ path: e.target.value || null })}
           placeholder="path/to/file"
           aria-label="Path"
-          className={`${QUEUE_INPUT} flex-1`}
+          className={`${QUEUE_INPUT} flex-1 font-mono`}
         />
         <input
           value={item.line ?? ""}
@@ -1398,12 +1380,12 @@ function NewBlockForm({
 
   return (
     <div className="mx-auto mt-10 w-[440px]">
-      <div className="mb-1 text-[15px] font-semibold text-fg-bright">New shared block</div>
-      <div className="mb-5 text-[12px] text-muted-3">
+      <div className="mb-1 text-lg font-semibold text-fg-bright">New shared block</div>
+      <div className="mb-5 text-sm text-muted-3">
         A reusable partial you can embed in any prompt with{" "}
         <code className="font-mono text-fg-3">{`{% include "…" %}`}</code>.
       </div>
-      <label className="mb-1 block text-[12px] font-medium text-fg-3" htmlFor="block-label">
+      <label className="mb-1 block text-sm font-medium text-fg-3" htmlFor="block-label">
         Label
       </label>
       <input
@@ -1411,9 +1393,9 @@ function NewBlockForm({
         value={label}
         onChange={(e) => setLabel(e.target.value)}
         placeholder="House style"
-        className="mb-4 w-full rounded-lg border border-line-3 bg-input px-3 py-2 text-[13px] text-fg-2 outline-none focus:border-line-strong"
+        className="mb-4 w-full rounded-lg border border-line-3 bg-input px-3 py-2 text-base text-fg-2"
       />
-      <label className="mb-1 block text-[12px] font-medium text-fg-3" htmlFor="block-name">
+      <label className="mb-1 block text-sm font-medium text-fg-3" htmlFor="block-name">
         Include name
       </label>
       <input
@@ -1424,13 +1406,13 @@ function NewBlockForm({
           setName(e.target.value);
         }}
         placeholder="house-style"
-        className="w-full rounded-lg border border-line-3 bg-input px-3 py-2 font-mono text-[12.5px] text-fg-2 outline-none focus:border-line-strong"
+        className="w-full rounded-lg border border-line-3 bg-input px-3 py-2 font-mono text-base text-fg-2"
       />
-      <div className="mt-1.5 text-[11px] text-muted-3">
+      <div className="mt-1.5 text-xs text-muted-3">
         Referenced as{" "}
         <code className="font-mono text-fg-3">{`{% include "${effectiveName || "…"}" %}`}</code>.
       </div>
-      {error && <div className="mt-2 text-[11.5px] text-status-red">{error}</div>}
+      {error && <div className="mt-2 text-sm text-status-red">{error}</div>}
       <div className="mt-5 flex items-center gap-2">
         <Button variant="primary" onClick={submit} disabled={!valid || isPending}>
           Create block

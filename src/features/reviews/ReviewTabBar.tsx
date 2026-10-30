@@ -159,7 +159,7 @@ export function ReviewTabBar({
         // that vanished the moment the tab became closable would be worse than
         // no count at all.
         badge: count ? (
-          <span className="font-mono text-[9px]" style={{ color: palette.purple }}>
+          <span className="text-2xs tabular-nums" style={{ color: palette.purple }}>
             {count}
           </span>
         ) : undefined,
@@ -270,12 +270,12 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
         >
           <AgentIcon kind={agent} size={13} />
           {agentProvider(agent).label}
-          <span className="ml-auto text-[10px] text-muted-4">{i + 1}</span>
+          <span className="ml-auto text-2xs text-muted-4">{i + 1}</span>
         </button>
       ))}
       {/* What the rows above put on disk. Said where the action is offered, not
           discovered afterwards in a directory listing. */}
-      <p className="px-3 pt-1 pb-2 text-[10.5px] leading-4 text-muted-4">{REVIEW_CHECKOUT_NOTE}</p>
+      <p className="px-3 pt-1 pb-2 text-xs leading-4 text-muted-4">{REVIEW_CHECKOUT_NOTE}</p>
       <MenuSection>Work in the checkout</MenuSection>
       {checkedOut ? (
         <>
@@ -293,13 +293,13 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
             >
               <AgentIcon kind={agent} size={13} />
               {agentProvider(agent).label}
-              <span className="ml-auto text-[10px] text-muted-4">{i + 3}</span>
+              <span className="ml-auto text-2xs text-muted-4">{i + 3}</span>
             </button>
           ))}
           <button type="button" onClick={() => work(null)} className={MENU_ITEM}>
             <TerminalIcon />
             Terminal
-            <span className="ml-auto text-[10px] text-muted-4">5</span>
+            <span className="ml-auto text-2xs text-muted-4">5</span>
           </button>
           <WebMenuRow off={webOff} digit={6} onAdd={browse} />
         </>
@@ -318,11 +318,11 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
           >
             <BranchIcon size={13} />
             Open as tree
-            {tabs.checkout.canOpen && <span className="ml-auto text-[10px] text-muted-4">3</span>}
+            {tabs.checkout.canOpen && <span className="ml-auto text-2xs text-muted-4">3</span>}
           </button>
           {/* Not a disabled row per provider: the missing thing is the checkout,
               and saying it once is the whole answer. */}
-          <p className="px-3 pb-2 text-[10.5px] leading-4 text-muted-4">
+          <p className="px-3 pb-2 text-xs leading-4 text-muted-4">
             Terminals and agents run in the PR's own checkout.
           </p>
         </>
@@ -332,9 +332,5 @@ function NewTabMenu({ tabs, close }: { tabs: ReviewTabs; close: () => void }) {
 }
 
 function MenuSection({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="px-3 pt-2 pb-1 font-mono text-[9px] tracking-[.06em] text-muted-4 uppercase">
-      {children}
-    </div>
-  );
+  return <div className="px-3 pt-2 pb-1 text-xs font-semibold text-muted-4">{children}</div>;
 }

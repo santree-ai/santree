@@ -136,7 +136,7 @@ export const IssueNode = memo(
         // then rasterizes at 1× and magnifies — WebKit keeps the layer around, so
         // the whole graph stays blurry after a focus toggle. Dim is applied
         // instantly instead.
-        className="relative w-[212px] cursor-pointer rounded-[11px] px-3 py-2.5 text-left shadow-sm transition-[border-color,box-shadow] duration-200"
+        className="relative w-[212px] cursor-pointer rounded-xl px-3 py-2.5 text-left shadow-sm transition-[border-color,box-shadow] duration-200"
         style={{
           opacity: data.dim ? 0.32 : data.grayed ? 0.75 : 1,
           ...cardStyleFor(data, working),
@@ -151,13 +151,13 @@ export const IssueNode = memo(
         {focused ? (
           <span
             aria-hidden
-            className="pointer-events-none absolute -inset-px rounded-[12px]"
+            className="pointer-events-none absolute -inset-px rounded-xl"
             style={{ boxShadow: `0 0 0 2px ${accent}, 0 12px 34px -16px ${alpha(65)}` }}
           />
         ) : hovered ? (
           <span
             aria-hidden
-            className="pointer-events-none absolute -inset-px rounded-[12px]"
+            className="pointer-events-none absolute -inset-px rounded-xl"
             // Neutral ring for a transient hover — visually distinct from the
             // accent ring used for the focused (open-in-panel) node.
             style={{ boxShadow: "0 0 0 2px var(--color-line-strong)" }}
@@ -166,7 +166,7 @@ export const IssueNode = memo(
 
         <div className="mb-1.5 flex items-center gap-[7px]">
           <StatusGlyph status={data.status} size={12} />
-          <span className="font-mono text-[11px] text-muted-2">{ticketHandle(id)}</span>
+          <span className="text-xs text-muted-2 tabular-nums">{ticketHandle(id)}</span>
           <div className="ml-auto flex items-center gap-1">
             {working && <Badge color="var(--color-status-amber)">WIP</Badge>}
             {data.selected && !working && <Badge color={accent}>Queued</Badge>}
@@ -186,14 +186,14 @@ export const IssueNode = memo(
         </div>
 
         <MarkdownTitle
-          className="min-h-[33px] overflow-hidden text-[12.5px] leading-[1.32] font-normal text-fg-3"
+          className="min-h-[33px] overflow-hidden text-base leading-[1.32] font-normal text-fg-3"
           style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}
         >
           {data.title}
         </MarkdownTitle>
 
         <div className="mt-[7px] flex min-h-[14px] items-center gap-[7px]">
-          <span className="text-[10.5px] font-medium" style={{ color: data.statusColor }}>
+          <span className="text-xs font-medium" style={{ color: data.statusColor }}>
             {data.statusLabel}
           </span>
           {/* The same trailing signals as the list row, at the card's edge. */}

@@ -115,9 +115,7 @@ export function ReviewBriefSection({
     <div className="mb-6 border-b border-hairline pb-4">
       <div className="mb-2.5 flex items-center gap-1.5">
         <AgentIcon kind={displayedAgent} size={11} className="text-muted-3" />
-        <span className="font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
-          Review brief
-        </span>
+        <span className="text-xs font-semibold text-muted-4">Review brief</span>
         {brief && onStartReview && (
           <div className="ml-auto flex items-center gap-0.5">
             <Button
@@ -164,13 +162,13 @@ export function ReviewBriefSection({
 
       {!brief && !liveSession && (
         <div className="rounded-lg border border-line-2 bg-raised px-3 py-3">
-          <p className="mb-2 text-[11.5px] leading-[1.6] text-muted-2">
+          <p className="mb-2 text-sm leading-[1.6] text-muted-2">
             {agentProvider(defaultAgent).label} reads the PR and writes a brief here, plus draft
             comments in the diff. You edit them and decide which ones to send.
           </p>
           {/* The one thing that isn't obvious from the button: it puts a real
               checkout in the repo. Same sentence the "+" menu and the rail use. */}
-          <p className="mb-2.5 text-[10.5px] leading-[1.5] text-muted-4">{REVIEW_CHECKOUT_NOTE}</p>
+          <p className="mb-2.5 text-xs leading-[1.5] text-muted-4">{REVIEW_CHECKOUT_NOTE}</p>
           {onStartReview && (
             <div className="flex items-center gap-0.5">
               <Button size="sm" variant="primary" onClick={() => run()} disabled={startingReview}>
@@ -261,7 +259,7 @@ function BriefBody({
     <div>
       {stale && (
         <div
-          className="mb-2.5 flex items-start gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] leading-[1.5]"
+          className="mb-2.5 flex items-start gap-1.5 rounded-md border px-2.5 py-1.5 text-xs leading-[1.5]"
           style={{ color: palette.amber, borderColor: alpha(34, palette.amber) }}
         >
           <WarningIcon size={11} className="mt-[2px] flex-none" />
@@ -269,14 +267,14 @@ function BriefBody({
         </div>
       )}
       {brief.truncated && (
-        <div className="mb-2.5 flex items-start gap-1.5 text-[10.5px] leading-[1.5] text-muted-4">
+        <div className="mb-2.5 flex items-start gap-1.5 text-xs leading-[1.5] text-muted-4">
           <WarningIcon size={10} className="mt-[2px] flex-none" />
           <span>The diff was too large to send whole. This covers only part of the PR.</span>
         </div>
       )}
 
       {brief.summary && (
-        <p className="selectable mb-3 text-[12px] leading-[1.65] text-fg-2">{brief.summary}</p>
+        <p className="selectable mb-3 text-sm leading-[1.65] text-fg-2">{brief.summary}</p>
       )}
 
       {brief.readingOrder.length > 0 && (
@@ -293,21 +291,18 @@ function BriefBody({
                     className="group w-full cursor-pointer rounded-md px-1.5 py-1 text-left transition-colors hover:bg-hover"
                   >
                     <div className="flex items-baseline gap-1.5">
-                      <span className="w-3.5 flex-none text-right font-mono text-[9.5px] text-muted-4">
+                      <span className="w-3.5 flex-none text-right text-2xs text-muted-4 tabular-nums">
                         {i + 1}
                       </span>
-                      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-2 group-hover:text-[color:var(--accent)]">
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg-2 group-hover:text-[color:var(--accent)]">
                         {step.path}
                       </span>
-                      <Pill
-                        color={meta.color}
-                        className="px-1 py-px font-mono text-[8.5px] uppercase"
-                      >
+                      <Pill color={meta.color} className="px-1 py-px text-2xs">
                         {meta.label}
                       </Pill>
                     </div>
                     {step.why && (
-                      <div className="mt-px pl-[22px] text-[10.5px] leading-[1.45] text-muted-3">
+                      <div className="mt-px pl-[22px] text-xs leading-[1.45] text-muted-3">
                         {step.why}
                       </div>
                     )}
@@ -333,18 +328,15 @@ function BriefBody({
                   className="group cursor-pointer rounded-md px-1.5 py-1 text-left transition-colors hover:bg-hover"
                 >
                   <div className="mb-px flex items-baseline gap-1.5">
-                    <Pill
-                      color={meta.color}
-                      className="px-1 py-px font-mono text-[8.5px] uppercase"
-                    >
+                    <Pill color={meta.color} className="px-1 py-px text-2xs">
                       {meta.label}
                     </Pill>
-                    <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-muted-3 group-hover:text-[color:var(--accent)]">
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-3 group-hover:text-[color:var(--accent)]">
                       {w.path}
                       {w.line != null && `:${w.line}`}
                     </span>
                   </div>
-                  <div className="text-[11px] leading-[1.5] text-fg-3">{w.note}</div>
+                  <div className="text-xs leading-[1.5] text-fg-3">{w.note}</div>
                 </button>
               );
             })}
@@ -362,7 +354,7 @@ function BriefBody({
         </Group>
       )}
 
-      <div className="mt-3 text-[10px] text-muted-4">
+      <div className="mt-3 text-2xs text-muted-4">
         Written <RelativeTime ms={brief.generatedAtMs} />. Suggestions only, nothing was posted.
       </div>
     </div>
@@ -383,9 +375,7 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
           size={9}
           className={`flex-none text-muted-4 transition-transform ${open ? "" : "-rotate-90"}`}
         />
-        <span className="font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
-          {label}
-        </span>
+        <span className="text-xs font-semibold text-muted-4">{label}</span>
       </button>
       {open && children}
     </div>
@@ -397,9 +387,7 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
 function CopyableQuestion({ question }: { question: string }) {
   return (
     <div className="group flex items-start gap-1.5 rounded-md border border-line-2 bg-raised px-2 py-1.5">
-      <span className="selectable min-w-0 flex-1 text-[11px] leading-[1.5] text-fg-3">
-        {question}
-      </span>
+      <span className="selectable min-w-0 flex-1 text-xs leading-[1.5] text-fg-3">{question}</span>
       <button
         type="button"
         title="Copy this question"

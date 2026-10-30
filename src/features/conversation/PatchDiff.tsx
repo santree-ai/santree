@@ -33,7 +33,7 @@ export const PatchDiff = memo(function PatchDiff({
     [path, op, patch],
   );
   return (
-    <div className="diff-viewer selectable min-w-0 overflow-hidden rounded-md border border-line-2 text-[12px]">
+    <div className="diff-viewer selectable min-w-0 overflow-hidden rounded-md border border-line-2 text-sm">
       <DiffView
         data={data}
         diffViewMode={DiffModeEnum.Unified}

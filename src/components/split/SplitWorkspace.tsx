@@ -464,7 +464,7 @@ function DragOverlay<T extends string>({
             background: "color-mix(in srgb, var(--accent) 12%, transparent)",
           }}
         >
-          <span className="rounded bg-raised px-2 py-1 text-[11px] font-medium text-fg-2 shadow-sm">
+          <span className="rounded bg-raised px-2 py-1 text-xs font-medium text-fg-2 shadow-sm">
             {ZONE_LABEL[target.zone]}
           </span>
         </div>
@@ -478,7 +478,7 @@ function DragOverlay<T extends string>({
       )}
       <div
         ref={chip}
-        className="pointer-events-none fixed z-[70] flex max-w-[200px] items-center gap-1.5 rounded border border-line-2 bg-raised px-2.5 py-1 text-[11.5px] font-medium text-fg-2 shadow-md"
+        className="pointer-events-none fixed z-[70] flex max-w-[200px] items-center gap-1.5 rounded border border-line-2 bg-raised px-2.5 py-1 text-sm font-medium text-fg-2 shadow-md"
         style={{ left: drag.x + 12, top: drag.y + 10 }}
       >
         {item?.icon}

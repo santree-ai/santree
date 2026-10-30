@@ -61,11 +61,11 @@ import { NO_PROJECT } from "./model";
 type SourceTab = "linear" | "branch";
 
 /** Shared field label — the modal's rows read as one column of questions. */
-const LABEL = "w-[110px] flex-none pt-1.5 text-[11px] font-medium text-muted-2";
+const LABEL = "w-[110px] flex-none pt-1.5 text-xs font-medium text-muted-2";
 
 /** Shared text-field chrome (both search boxes). */
 const FIELD =
-  "w-full rounded-lg border border-line-3 bg-input py-1.5 pr-2.5 pl-7 text-[12.5px] text-fg-2 outline-none placeholder:text-muted-4 focus:border-line-strong";
+  "w-full rounded-lg border border-line-3 bg-input py-1.5 pr-2.5 pl-7 text-base text-fg-2 placeholder:text-muted-4";
 
 export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose: () => void }) {
   const navigate = useNavigate();
@@ -173,17 +173,17 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
         role="dialog"
         aria-modal
         aria-label="Create worktree"
-        className="relative flex w-[540px] max-w-full flex-col rounded-xl border border-line-3 bg-panel p-4 shadow-2xl"
+        className="relative flex w-[540px] max-w-full flex-col rounded-2xl border border-line-2 bg-popover p-4 shadow-dialog"
         style={{ animation: "toastIn .16s ease-out" }}
       >
-        <div className="text-[13px] font-semibold text-fg-bright">Create worktree</div>
+        <div className="text-base font-semibold text-fg-bright">Create worktree</div>
 
         {/* Given, not asked: you opened this from this project's header. */}
         <div className="mt-3.5 flex items-start">
           <span className={LABEL}>Project</span>
           <div className="flex min-w-0 flex-1 items-center gap-2 pt-1">
             <RepoAvatar repo={repo} size={16} bordered={false} />
-            <span className="truncate text-[12.5px] text-fg-2">{shortRepoName(repo)}</span>
+            <span className="truncate text-base text-fg-2">{shortRepoName(repo)}</span>
           </div>
         </div>
 
@@ -251,7 +251,7 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
                 <div
                   id="create-worktree-source-list"
                   role="listbox"
-                  className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-line-3 bg-popover px-1 py-1 shadow-xl"
+                  className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-line-3 bg-popover px-1 py-1 shadow-popover"
                 >
                   {tab === "linear" ? (
                     <TicketRows
@@ -284,7 +284,7 @@ export function CreateWorktreeDialog({ repo, onClose }: { repo: string; onClose:
 
         {error && (
           <div
-            className="selectable mt-3 rounded-md px-2.5 py-1.5 text-[11px] leading-[1.45]"
+            className="selectable mt-3 rounded-md px-2.5 py-1.5 text-xs leading-[1.45]"
             style={{
               color: "var(--color-status-red)",
               background: alpha(10, "var(--color-status-red)"),
@@ -388,10 +388,8 @@ function TicketRows({
             })
           }
         >
-          <span className="flex-none font-mono text-[10.5px] text-muted-3">
-            {ticketHandle(t.id)}
-          </span>
-          <MarkdownTitle className="min-w-0 flex-1 truncate text-[12.5px] text-fg-3">
+          <span className="flex-none text-xs text-muted-3 tabular-nums">{ticketHandle(t.id)}</span>
+          <MarkdownTitle className="min-w-0 flex-1 truncate text-base text-fg-3">
             {t.title}
           </MarkdownTitle>
         </Row>
@@ -425,8 +423,8 @@ function BranchRows({
           onPick={() => onPick({ kind: "new", branch: create.name })}
         >
           <BranchIcon size={11} className="flex-none text-muted-4" />
-          <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg-3">
-            Create new branch <span className="font-mono text-[11.5px]">{create.name}</span>
+          <span className="min-w-0 flex-1 truncate text-base text-fg-3">
+            Create new branch <span className="font-mono text-sm">{create.name}</span>
           </span>
         </Row>
       )}
@@ -439,10 +437,8 @@ function BranchRows({
           onPick={() => onPick({ kind: "existing", branch: b.name })}
         >
           <BranchIcon size={11} className="flex-none text-muted-4" />
-          <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-3">
-            {b.name}
-          </span>
-          {b.remoteOnly && <span className="flex-none text-[10px] text-muted-4">origin</span>}
+          <span className="min-w-0 flex-1 truncate font-mono text-sm text-fg-3">{b.name}</span>
+          {b.remoteOnly && <span className="flex-none text-2xs text-muted-4">origin</span>}
         </Row>
       ))}
       {taken.map((b) => (
@@ -454,10 +450,8 @@ function BranchRows({
           onPick={() => {}}
         >
           <BranchIcon size={11} className="flex-none text-muted-4" />
-          <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-3">
-            {b.name}
-          </span>
-          <span className="flex-none text-[10px] text-muted-4">in use</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-sm text-fg-3">{b.name}</span>
+          <span className="flex-none text-2xs text-muted-4">in use</span>
         </Row>
       ))}
     </div>
@@ -465,7 +459,7 @@ function BranchRows({
 }
 
 function Hint({ children }: { children: ReactNode }) {
-  return <div className="px-3 py-3 text-[11.5px] text-muted-3">{children}</div>;
+  return <div className="px-3 py-3 text-sm text-muted-3">{children}</div>;
 }
 
 /**
@@ -554,11 +548,11 @@ function ParentPicker({
         <div
           id="create-worktree-parent-list"
           role="listbox"
-          className="absolute z-10 mt-1 max-h-44 w-full overflow-y-auto rounded-lg border border-line-3 bg-popover px-1 py-1 shadow-xl"
+          className="absolute z-10 mt-1 max-h-44 w-full overflow-y-auto rounded-lg border border-line-3 bg-popover px-1 py-1 shadow-popover"
         >
           <Row keepFocus selected={value === null} onPick={() => pick(null)}>
-            <span className="text-[12.5px] text-fg-3">No parent</span>
-            <span className="ml-auto flex-none text-[10.5px] text-muted-4">repo default</span>
+            <span className="text-base text-fg-3">No parent</span>
+            <span className="ml-auto flex-none text-xs text-muted-4">repo default</span>
           </Row>
           {matches.map((w) => {
             // What you pick by is the worktree's name; the branch is how you
@@ -575,13 +569,13 @@ function ParentPicker({
                 hint={name === w.branch ? name : `${name}\n${w.branch}`}
                 onPick={() => pick(w.id)}
               >
-                <MarkdownTitle className="min-w-0 flex-1 truncate text-[12.5px] text-fg-3">
+                <MarkdownTitle className="min-w-0 flex-1 truncate text-base text-fg-3">
                   {name}
                 </MarkdownTitle>
                 {/* A branch-sourced worktree is named after its branch; printing
                     it twice is noise, not detail. */}
                 {name !== w.branch && (
-                  <span className="max-w-[45%] flex-none truncate font-mono text-[10.5px] text-muted-4">
+                  <span className="max-w-[45%] flex-none truncate font-mono text-xs text-muted-4">
                     {w.branch}
                   </span>
                 )}

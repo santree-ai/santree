@@ -88,11 +88,11 @@ function CommentComposer({
         placeholder={readOnly ? "Connected read-only" : placeholder}
         disabled={readOnly}
         rows={parentId ? 2 : 3}
-        className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none"
+        className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-sm leading-[1.55] text-fg-2 placeholder:text-muted-4"
       />
       <div className="mt-1.5 flex items-center justify-end gap-2">
-        <span className="mr-auto text-[9.5px] text-muted-4">
-          {readOnly ? TRACKER_READ_ONLY_HINT : <span className="font-mono">⌘⏎ to send</span>}
+        <span className="mr-auto text-2xs text-muted-4">
+          {readOnly ? TRACKER_READ_ONLY_HINT : <span>⌘⏎ to send</span>}
         </span>
         {onClose && (
           <Button variant="ghost" size="sm" onClick={onClose}>
@@ -116,8 +116,8 @@ function CommentHead({ comment, size }: { comment: TriageComment; size: number }
   return (
     <div className="mb-2 flex items-center gap-2">
       <Avatar name={comment.author} src={comment.avatarUrl} size={size} />
-      <span className="text-[11.5px] font-medium text-fg-2">{comment.author}</span>
-      <RelativeTime ms={comment.createdAtMs} className="font-mono text-[10px] text-muted-4" />
+      <span className="text-sm font-medium text-fg-2">{comment.author}</span>
+      <RelativeTime ms={comment.createdAtMs} className="text-2xs text-muted-4 tabular-nums" />
     </div>
   );
 }
@@ -138,7 +138,7 @@ function CommentItem({
   const threaded = useTrackerFeatures(repo).threadedComments;
   return (
     <div
-      className="rounded-[10px] border border-hairline bg-panel px-3.5 py-3"
+      className="rounded-lg border border-hairline bg-panel px-3.5 py-3"
       style={isPending(comment) ? { opacity: 0.55 } : undefined}
     >
       <CommentHead comment={comment} size={22} />
@@ -178,7 +178,7 @@ function CommentItem({
             onClick={() => setReplying(true)}
             disabled={readOnly}
             title={readOnly ? TRACKER_READ_ONLY_HINT : undefined}
-            className="mt-2.5 cursor-pointer text-[11px] font-medium text-muted-3 hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:text-muted-3"
+            className="mt-2.5 cursor-pointer text-xs font-medium text-muted-3 hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:text-muted-3"
           >
             Reply
           </button>
@@ -203,13 +203,13 @@ export const DiscussionContent = memo(function DiscussionContent({
         <Markdown>{detail.description}</Markdown>
       ) : (
         // Be explicit about an empty body — a blank space reads as "failed to load".
-        <p className="text-[12.5px] text-muted-4 italic">No description.</p>
+        <p className="text-base text-muted-4 italic">No description.</p>
       )}
 
       <div className="mt-6">
         {total > 0 && (
           <>
-            <div className="mb-3 font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
+            <div className="mb-3 text-xs font-semibold text-muted-4">
               {total} {total === 1 ? "comment" : "comments"}
             </div>
             <div className="mb-4 space-y-3.5">
@@ -263,7 +263,7 @@ export function DiscussionSkeleton({ dense = false }: { dense?: boolean }) {
       </div>
       <div className="mt-7 space-y-3.5">
         {[0, 1].map((i) => (
-          <div key={i} className="rounded-[10px] border border-hairline bg-panel px-3.5 py-3">
+          <div key={i} className="rounded-lg border border-hairline bg-panel px-3.5 py-3">
             <div className="mb-2 flex items-center gap-2">
               <Skeleton className="h-5 w-5 rounded-full" />
               <Skeleton className="h-3 w-24" />

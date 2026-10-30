@@ -76,8 +76,8 @@ export function LegacyMigrationProvider({ children }: { children: ReactNode }) {
         message={
           pending && (
             <>
-              <span className="font-mono text-fg">{pending.repo}</span> was set up with the santree
-              CLI. Import its Linear workspace{" "}
+              <span className="text-fg">{pending.repo}</span> was set up with the santree CLI.
+              Import its Linear workspace{" "}
               <span className="font-medium text-fg">{pending.info.orgName}</span>? The sign-in moves
               into the OS keychain; the repo's setup script and worktrees keep working as-is.
             </>

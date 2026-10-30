@@ -29,11 +29,11 @@ export function TrackerConnectPrompt() {
 
   return (
     <div className="mx-2.5 mb-2 flex-none rounded-md border border-line bg-surface p-2">
-      <p className="flex items-center gap-1.5 text-[12px] font-medium text-fg-2">
+      <p className="flex items-center gap-1.5 text-sm font-medium text-fg-2">
         <WarningIcon size={12} className="flex-none text-[var(--color-status-amber)]" />
         No ticket tracker connected
       </p>
-      <p className="pt-0.5 pb-2 text-[11px] leading-4 text-muted-4">
+      <p className="pt-0.5 pb-2 text-xs leading-4 text-muted-4">
         Tickets, triage and starting work all need a Linear workspace, a Jira site or a TickTick
         account.
       </p>
@@ -44,7 +44,7 @@ export function TrackerConnectPrompt() {
             type="button"
             aria-label={`Connect ${provider}`}
             onClick={() => navigate({ to: "/settings", search: { section } })}
-            className="flex h-7 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[12px] text-fg-2 transition-colors hover:border-line-strong hover:bg-hover"
+            className="flex h-7 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-sm text-fg-2 transition-colors hover:border-line-strong hover:bg-hover"
           >
             <TrackerLogo provider={provider} size={11} />
             {provider}

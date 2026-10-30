@@ -40,7 +40,7 @@ export function PrFileBody({
   draftMode?: "publish" | "queue";
 }) {
   if (!file.patch) {
-    return <div className="px-3 py-3 text-[11.5px] text-muted-3">Binary file. No preview.</div>;
+    return <div className="px-3 py-3 text-sm text-muted-3">Binary file. No preview.</div>;
   }
 
   const outdated = outdatedThreads(threads);
@@ -63,9 +63,7 @@ export function PrFileBody({
       />
       {outdated.length > 0 && (
         <div className="border-t border-line-2 px-3 py-2">
-          <div className="mb-1.5 font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
-            Outdated comments
-          </div>
+          <div className="mb-1.5 text-xs font-semibold text-muted-4">Outdated comments</div>
           <div className="overflow-hidden rounded-md border border-line-2">
             {outdated.map((t, i) => (
               <PrThreadCard
@@ -100,10 +98,8 @@ export function UnplaceableDrafts({
   return (
     <div className="border-t border-line-2 px-3 py-2">
       <div className="mb-1.5 flex items-center gap-1.5">
-        <span className="font-mono text-[9.5px] tracking-[.06em] text-muted-4 uppercase">
-          AI drafts on older code
-        </span>
-        <span className="text-[10px]" style={{ color: palette.amber }}>
+        <span className="text-xs font-semibold text-muted-4">AI drafts on older code</span>
+        <span className="text-2xs" style={{ color: palette.amber }}>
           Check the line before you send these.
         </span>
       </div>

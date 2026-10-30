@@ -62,7 +62,7 @@ export function IssueHeader({
   return (
     <div className="flex-none border-b border-hairline px-5 pt-4 pb-3.5">
       <div className="mb-2 flex flex-wrap items-center gap-x-2.5 gap-y-2">
-        <span className="font-mono text-[11.5px] whitespace-nowrap text-muted-2">
+        <span className="text-sm whitespace-nowrap text-muted-2 tabular-nums">
           {ticketHandle(id)}
         </span>
         {known && <PriorityPill priority={known.priority} />}
@@ -70,7 +70,7 @@ export function IssueHeader({
         {known && (
           <SlaCountdown
             breachMs={known.slaBreachMs}
-            className="font-mono text-[10.5px] whitespace-nowrap text-status-red/90"
+            className="text-xs whitespace-nowrap text-status-red/90 tabular-nums"
           />
         )}
         {/* Wraps as a whole: when the row is too narrow the actions drop below
@@ -94,7 +94,7 @@ export function IssueHeader({
         </div>
       </div>
       {known ? (
-        <MarkdownTitle className="mb-2 block text-[17px] leading-[1.3] font-semibold text-fg-bright">
+        <MarkdownTitle className="mb-2 block text-xl leading-[1.3] font-semibold text-fg-bright">
           {known.title}
         </MarkdownTitle>
       ) : (
@@ -115,7 +115,7 @@ export function IssueHeader({
         </div>
       )}
       {known?.snoozedUntilMs != null && (
-        <div className="mt-2.5 flex items-center gap-2 rounded-md border border-line-2 bg-input px-2.5 py-1.5 text-[11px] text-muted-2">
+        <div className="mt-2.5 flex items-center gap-2 rounded-md border border-line-2 bg-input px-2.5 py-1.5 text-xs text-muted-2">
           Snoozed until {formatSnoozeLabel(known.snoozedUntilMs)}. It waits in the sidebar's Snoozed
           group until then.
         </div>

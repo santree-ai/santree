@@ -54,7 +54,7 @@ const GROUP_BY_OPTIONS: { value: LinearGroupBy; label: string }[] = [
 /** The dropdown in the card's preference row — the same control the Linear card
  *  uses, so the two settings read as one kind of choice. */
 const ROW_SELECT_CLASS =
-  "rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-[12px] text-fg-3";
+  "rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-sm text-fg-3";
 
 export function GitHubSection() {
   const { data: gh, refetch, isFetching } = useGithubStatus();
@@ -111,14 +111,14 @@ export function GitHubSection() {
         {method === "cli" ? (
           <div className="flex flex-col gap-3.5 px-4 py-4">
             <div className="flex items-center gap-3">
-              <span className="flex-1 text-[12.5px] text-muted-3">
+              <span className="flex-1 text-base text-muted-3">
                 santree runs the `gh` CLI as you. No separate sign-in.
               </span>
               {badge}
               <button
                 type="button"
                 onClick={() => refetch()}
-                className="flex flex-none cursor-pointer items-center gap-1.5 text-[11.5px] text-muted-2 transition-colors hover:text-fg-2"
+                className="flex flex-none cursor-pointer items-center gap-1.5 text-sm text-muted-2 transition-colors hover:text-fg-2"
               >
                 <RefreshIcon size={12} className={isFetching ? "animate-spin" : ""} />
                 Refresh
@@ -126,7 +126,7 @@ export function GitHubSection() {
             </div>
 
             {gh && !gh.installed && (
-              <div className="flex items-start gap-2 text-[11.5px]">
+              <div className="flex items-start gap-2 text-sm">
                 <WarningIcon size={13} className="mt-px flex-none text-status-amber" />
                 <div className="text-muted-3">
                   <span className="font-medium text-status-amber">
@@ -154,7 +154,7 @@ export function GitHubSection() {
                 <KvRow label="CLI path" value={gh.detectedExec} />
                 {gh.version && <KvRow label="Version" value={gh.version} />}
                 {!gh.authenticated && (
-                  <div className="flex items-start gap-2 border-t border-line px-3 py-2.5 text-[11.5px]">
+                  <div className="flex items-start gap-2 border-t border-line px-3 py-2.5 text-sm">
                     <WarningIcon size={13} className="mt-px flex-none text-status-amber" />
                     <div className="text-muted-3">
                       <span className="font-medium text-status-amber">Not signed in.</span> Run{" "}
@@ -190,11 +190,11 @@ export function GitHubSection() {
               ))}
           </div>
         ) : (
-          <div className="px-4 py-6 text-center text-[12px] text-muted-3">
+          <div className="px-4 py-6 text-center text-sm text-muted-3">
             {method === "app"
               ? "Sign in to GitHub from inside santree, without the gh CLI."
               : "Paste a personal access token; santree keeps it in the OS keychain."}
-            <div className="mt-1 text-[11.5px] text-muted-4">Not built yet.</div>
+            <div className="mt-1 text-sm text-muted-4">Not built yet.</div>
           </div>
         )}
       </div>
@@ -276,8 +276,8 @@ function GithubBudget() {
   return (
     <div className="mt-3 rounded-xl border border-line-2 bg-raised px-4 py-3.5">
       <div className="mb-2.5 flex items-baseline gap-2">
-        <span className="text-[12.5px] font-medium text-fg-3">API budget</span>
-        <span className="text-[11.5px] text-muted-3">
+        <span className="text-base font-medium text-fg-3">API budget</span>
+        <span className="text-sm text-muted-3">
           Per hour, per pool. Throttling stops on whichever one runs out first.
         </span>
       </div>

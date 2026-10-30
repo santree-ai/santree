@@ -53,10 +53,10 @@ const WORKSPACE_SHORTCUTS: { label: string; keys: string[] }[] = [
 
 /** Both front-door actions wear the same shape — neither one is the primary. */
 const ACTION =
-  "flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-line-2 bg-raised px-4 text-[13px] font-medium text-fg-2 transition-colors hover:border-line-strong hover:bg-hover disabled:cursor-default disabled:opacity-60";
+  "flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-line-2 bg-raised px-4 text-base font-medium text-fg-2 transition-colors hover:border-line-strong hover:bg-hover disabled:cursor-default disabled:opacity-60";
 
 const LINK =
-  "flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted-4 transition-colors hover:text-fg-2";
+  "flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2 text-sm text-muted-4 transition-colors hover:text-fg-2";
 
 /** One block of the surface, arriving `delay` ms after the one above it. */
 function Enter({
@@ -101,8 +101,8 @@ export function WelcomeSurface({
             <SantreeAppIcon size={64} className="drop-shadow-[0_10px_24px_rgba(7,21,19,.28)]" />
           </Enter>
           <Enter delay={80} className="flex flex-col items-center gap-1.5">
-            <h1 className="text-[20px] font-semibold tracking-[-.02em] text-fg-bright">santree</h1>
-            <p className="max-w-[300px] text-center text-[13px] leading-[1.5] text-muted-3">
+            <h1 className="text-2xl font-semibold tracking-[-.02em] text-fg-bright">santree</h1>
+            <p className="max-w-[300px] text-center text-base leading-[1.5] text-muted-3">
               {!workspace
                 ? "Pick a worktree in the sidebar, or start one from a ticket."
                 : workspace.actionsOff
@@ -156,7 +156,7 @@ export function WelcomeSurface({
                 key={label}
                 className="flex items-center gap-3 border-t border-hairline py-2 first:border-t-0"
               >
-                <dt className="flex-1 text-[12.5px] text-muted-3">{label}</dt>
+                <dt className="flex-1 text-base text-muted-3">{label}</dt>
                 <dd className="flex flex-none gap-1">
                   {keys.map((k) => (
                     <Kbd key={k} token={k} />

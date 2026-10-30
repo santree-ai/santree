@@ -61,12 +61,12 @@ export function DaedalusProjectsDialog({ onClose }: { onClose: () => void }) {
         role="dialog"
         aria-modal
         aria-labelledby={TITLE_ID}
-        className="relative flex w-[480px] max-w-full flex-col gap-3 rounded-xl border border-line-3 bg-panel p-4 shadow-2xl"
+        className="relative flex w-[480px] max-w-full flex-col gap-3 rounded-2xl border border-line-2 bg-popover p-4 shadow-dialog"
         style={{ animation: "toastIn .16s ease-out" }}
       >
         <div className="flex items-center gap-2">
           <DaedalusLogo size={15} className="flex-none" />
-          <h2 id={TITLE_ID} className="flex-1 text-[13px] font-medium text-fg">
+          <h2 id={TITLE_ID} className="flex-1 text-base font-medium text-fg">
             Add from Daedalus
           </h2>
           <button
@@ -81,7 +81,7 @@ export function DaedalusProjectsDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        <p className="text-[12px] leading-[1.55] text-muted-2">
+        <p className="text-sm leading-[1.55] text-muted-2">
           The projects Daedalus keeps. Their shells, agents and git run on Daedalus.
         </p>
 
@@ -92,7 +92,7 @@ export function DaedalusProjectsDialog({ onClose }: { onClose: () => void }) {
             <ListSkeleton rows={3} className="p-2" />
           ) : rows.length === 0 ? (
             listed && (
-              <div className="px-3 py-3 text-[11.5px] text-muted-3">
+              <div className="px-3 py-3 text-sm text-muted-3">
                 Daedalus has no projects under its projects root.
               </div>
             )
@@ -141,7 +141,7 @@ function Unlisted({
       }
     : linkNotice(list.link);
   return (
-    <div className="flex items-start gap-2 rounded-lg border border-hairline bg-raised px-3 py-2.5 text-[11.5px]">
+    <div className="flex items-start gap-2 rounded-lg border border-hairline bg-raised px-3 py-2.5 text-sm">
       <DaedalusLogo size={14} className="mt-px flex-none" />
       <div className="min-w-0 flex-1 text-muted-3">
         <span className="font-medium text-fg-3">{title}</span> {detail}
@@ -149,7 +149,7 @@ function Unlisted({
       <button
         type="button"
         onClick={onOpenSettings}
-        className="flex-none cursor-pointer text-[11.5px] underline-offset-2 hover:underline"
+        className="flex-none cursor-pointer text-sm underline-offset-2 hover:underline"
         style={{ color: "var(--accent-text)" }}
       >
         Settings → Daedalus
@@ -170,12 +170,12 @@ function WorkspaceRow({
   return (
     <li className="flex items-center gap-2.5 border-t border-hairline px-3 py-2 first:border-t-0">
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12.5px] text-fg-2">{w.name}</span>
-        <span className="flex items-center gap-1.5 font-mono text-[10.5px] text-muted-4">
+        <span className="block truncate text-base text-fg-2">{w.name}</span>
+        <span className="flex items-center gap-1.5 text-xs text-muted-4 tabular-nums">
           {w.branch && (
             <span className="flex min-w-0 items-center gap-1">
               <BranchIcon size={10} className="flex-none" />
-              <span className="truncate">{w.branch}</span>
+              <span className="truncate font-mono">{w.branch}</span>
             </span>
           )}
           {w.dirty && <span className="text-status-amber">modified</span>}

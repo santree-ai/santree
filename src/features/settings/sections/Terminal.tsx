@@ -64,18 +64,18 @@ export function TerminalSection() {
       <div className="mb-3.5 rounded-xl border border-line-2 bg-raised px-4 py-4">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <div className="flex items-baseline gap-2 text-[13px] font-medium text-fg-2">
+            <div className="flex items-baseline gap-2 text-base font-medium text-fg-2">
               Terminal sessions
               {version && (
                 <span
-                  className="font-mono text-[11px] font-normal text-muted-4"
+                  className="text-xs font-normal text-muted-4"
                   title="This app's version. The server has its own revision, shown in the card above."
                 >
                   santree {version}
                 </span>
               )}
             </div>
-            <p className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+            <p className="mt-[3px] text-sm leading-[1.5] text-muted-3">
               Sessions outlive the window: closing a pane leaves the work running. Which process
               holds them, and whether they outlive the app, depends on the server above.
             </p>
@@ -94,7 +94,7 @@ export function TerminalSection() {
           </div>
         </div>
 
-        <div className="mt-3 flex items-center gap-2 text-[11.5px] text-muted-3">
+        <div className="mt-3 flex items-center gap-2 text-sm text-muted-3">
           <Dot color={running > 0 ? palette.green : palette.muted} />
           {rows.length === 0
             ? "No sessions running"
@@ -112,12 +112,12 @@ export function TerminalSection() {
         )}
 
         {orphans.size > 0 && (
-          <p role="note" className="mt-2 text-[11.5px] leading-[1.5] text-muted-3">
+          <p role="note" className="mt-2 text-sm leading-[1.5] text-muted-3">
             {orphans.size} session{orphans.size === 1 ? "" : "s"} marked "no tab": {ORPHAN_HINT}
           </p>
         )}
         {inventory && !inventory.complete && (
-          <p role="note" className="mt-2 text-[11.5px] leading-[1.5] text-muted-3">
+          <p role="note" className="mt-2 text-sm leading-[1.5] text-muted-3">
             This list may be missing sessions: a server that may hold more couldn't be asked.
           </p>
         )}

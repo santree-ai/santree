@@ -42,7 +42,7 @@ export function BinaryPathField({ name, hint }: { name: string; hint?: string })
 
   if (isLoading) {
     return (
-      <div className="flex items-center gap-2 px-3 py-2.5 text-[11.5px] text-muted-3">
+      <div className="flex items-center gap-2 px-3 py-2.5 text-sm text-muted-3">
         <Spinner size={10} /> Looking for {name}…
       </div>
     );
@@ -50,7 +50,7 @@ export function BinaryPathField({ name, hint }: { name: string; hint?: string })
 
   return (
     <div className="flex flex-col gap-2 border-t border-line px-3 py-2.5">
-      <label className="text-[11.5px] text-muted-3" htmlFor={`binpath-${name}`}>
+      <label className="text-sm text-muted-3" htmlFor={`binpath-${name}`}>
         Path to <span className="font-mono text-fg-3">{name}</span>
         {hint && <span className="text-muted-4"> — {hint}</span>}
       </label>
@@ -66,7 +66,7 @@ export function BinaryPathField({ name, hint }: { name: string; hint?: string })
           onKeyDown={(e) => {
             if (e.key === "Enter") submit(value.trim() || null);
           }}
-          className="min-w-[220px] flex-1 rounded-lg border border-line-3 bg-input px-[11px] py-1.5 font-mono text-[11.5px] text-fg-3"
+          className="min-w-[220px] flex-1 rounded-lg border border-line-3 bg-input px-[11px] py-1.5 font-mono text-sm text-fg-3"
         />
         <Button size="sm" disabled={isPending} onClick={() => submit(value.trim() || null)}>
           {isPending ? <Spinner size={10} /> : null}
@@ -89,12 +89,12 @@ export function BinaryPathField({ name, hint }: { name: string; hint?: string })
       </div>
 
       {error ? (
-        <div className="flex items-start gap-1.5 text-[11.5px] text-status-amber">
+        <div className="flex items-start gap-1.5 text-sm text-status-amber">
           <WarningIcon size={12} className="mt-px flex-none" />
           {error}
         </div>
       ) : status?.path ? (
-        <div className="flex items-start gap-1.5 text-[11.5px] text-muted-3">
+        <div className="flex items-start gap-1.5 text-sm text-muted-3">
           <CheckIcon size={12} className="mt-px flex-none text-status-green" />
           <span>
             Using <span className="font-mono text-fg-3">{status.path}</span>

@@ -146,7 +146,7 @@ export const PrFileDiff = memo(function PrFileDiff({
   if (!patch.trim()) return null;
 
   return (
-    <div ref={rootRef} className="diff-viewer selectable min-w-0 text-[12.5px]">
+    <div ref={rootRef} className="diff-viewer selectable min-w-0 text-base">
       <DiffViewWithMultiSelect<DiffAnnotation[]>
         data={data}
         extendData={extendData}

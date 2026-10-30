@@ -230,7 +230,7 @@ function NewTabMenu({
         >
           <AgentIcon kind={agent} size={13} />
           {agentProvider(agent).label}
-          <span className="ml-auto text-[10px] text-muted-4">{i + 1}</span>
+          <span className="ml-auto text-2xs text-muted-4">{i + 1}</span>
         </button>
       ))}
       <button
@@ -242,7 +242,7 @@ function NewTabMenu({
       >
         <TerminalIcon size={13} />
         Terminal
-        <span className="ml-auto text-[10px] text-muted-4">3</span>
+        <span className="ml-auto text-2xs text-muted-4">3</span>
       </button>
       <WebMenuRow off={webOff} digit={4} onAdd={() => add("web")} />
     </>

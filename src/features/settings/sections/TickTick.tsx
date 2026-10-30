@@ -23,7 +23,7 @@ import { CardRow, Heading } from "../widgets";
  *  on a white tile. Unlike Linear's and Jira's white-on-brand tiles, TickTick's
  *  colour lives in the mark itself. */
 export const ticktickBadge = (
-  <div className="flex h-[34px] w-[34px] flex-none items-center justify-center rounded-[9px] border border-line-2 bg-white">
+  <div className="flex h-[34px] w-[34px] flex-none items-center justify-center rounded-lg border border-line-2 bg-white">
     <TickTickLogo size={20} branded />
   </div>
 );
@@ -46,11 +46,11 @@ export function TickTickSection() {
           {ticktickBadge}
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span className="text-[13.5px] font-semibold text-fg-bright">TickTick</span>
+              <span className="text-md font-semibold text-fg-bright">TickTick</span>
               {connected && <Badge color="var(--color-status-green)">connected</Badge>}
               {connected && !status.canWrite && <Badge>read-only</Badge>}
             </div>
-            <div className="mt-[3px] text-[11.5px] text-muted-3">
+            <div className="mt-[3px] text-sm text-muted-3">
               {connected
                 ? status.via === "token"
                   ? "Connected with a personal API token"
@@ -122,7 +122,7 @@ export function TickTickTokenForm({ labelId }: { labelId?: string }) {
         spellCheck={false}
         aria-labelledby={labelId}
         aria-label={labelId ? undefined : "TickTick API token"}
-        className="w-[200px] rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-[11.5px] text-fg-3 placeholder:text-muted-4"
+        className="w-[200px] rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-sm text-fg-3 placeholder:text-muted-4"
       />
       <Button type="submit" disabled={!trimmed || connect.isPending}>
         {connect.isPending ? "Connecting…" : "Connect"}

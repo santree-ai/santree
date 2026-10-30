@@ -63,13 +63,12 @@ export function RepoTrackerSection({ repo }: { repo: string }) {
           hint={
             current?.connection ? (
               <>
-                Tickets for <span className="font-mono text-fg-3">{repo}</span> come from this
-                connection.
+                Tickets for <span className="text-fg-3">{repo}</span> come from this connection.
               </>
             ) : (
               <>
-                <span className="font-mono text-fg-3">{repo}</span> isn't linked to a tracker, so it
-                has no tickets. Choose one.
+                <span className="text-fg-3">{repo}</span> isn't linked to a tracker, so it has no
+                tickets. Choose one.
               </>
             )
           }
@@ -126,7 +125,7 @@ export function RepoTrackerSection({ repo }: { repo: string }) {
               connectLabel="Sign in"
               footer={
                 <>
-                  <span className="min-w-0 text-[11.5px] text-muted-3">
+                  <span className="min-w-0 text-sm text-muted-3">
                     {ticktick?.oauthAvailable ? "Or use" : "Use"} a personal API token: TickTick →
                     Settings → Account → API Token.
                   </span>
@@ -163,10 +162,10 @@ function TriageQueryCard({ repo }: { repo: string }) {
 
   return (
     <div className="mt-3 rounded-xl border border-line-2 bg-raised p-4">
-      <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+      <div id={labelId} className="mb-[3px] text-base font-medium text-fg-3">
         Triage query
       </div>
-      <div className="mb-3 text-[11.5px] text-muted-3">
+      <div className="mb-3 text-sm text-muted-3">
         The JQL that fills the Triage section while this repo is the one Triage reads. Left empty,
         it is your assigned issues that haven't started. Mine and All still apply: Mine shows the
         matches assigned to you.
@@ -187,11 +186,11 @@ function TriageQueryCard({ repo }: { repo: string }) {
         rows={3}
         spellCheck={false}
         aria-labelledby={labelId}
-        className="w-full resize-y rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-[11.5px] text-fg-3 placeholder:text-muted-4"
+        className="w-full resize-y rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-sm text-fg-3 placeholder:text-muted-4"
       />
       <div className="mt-2 flex items-center justify-between gap-2">
-        <span className="text-[10.5px] text-muted-4">
-          Saved when you leave the field (<span className="font-mono">⌘⏎</span>).
+        <span className="text-xs text-muted-4">
+          Saved when you leave the field (<span>⌘⏎</span>).
         </span>
         <Button
           disabled={!stored}
@@ -234,17 +233,17 @@ function TickTickListsCard({ repo }: { repo: string }) {
 
   return (
     <div className="mt-3 rounded-xl border border-line-2 bg-raised p-4">
-      <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+      <div id={labelId} className="mb-[3px] text-base font-medium text-fg-3">
         Lists
       </div>
-      <div className="mb-3 text-[11.5px] text-muted-3">
+      <div className="mb-3 text-sm text-muted-3">
         The TickTick lists this repo's tickets come from. With none picked, it reads every open
         list.
       </div>
       {isLoading ? (
-        <div className="text-[11.5px] text-muted-4">Loading lists…</div>
+        <div className="text-sm text-muted-4">Loading lists…</div>
       ) : open.length === 0 ? (
-        <div className="text-[11.5px] text-muted-4">TickTick returned no open lists.</div>
+        <div className="text-sm text-muted-4">TickTick returned no open lists.</div>
       ) : (
         <fieldset aria-labelledby={labelId} className="flex flex-col gap-0.5">
           <ListCheck checked={all} onChange={() => !all && write([])} label="All lists" />
@@ -289,7 +288,7 @@ function ListCheck({
   color?: string | null;
 }) {
   return (
-    <label className="flex cursor-pointer items-center gap-2 rounded-md px-1 py-1 text-[12px] text-fg-3 hover:bg-hover">
+    <label className="flex cursor-pointer items-center gap-2 rounded-md px-1 py-1 text-sm text-fg-3 hover:bg-hover">
       <input
         type="checkbox"
         checked={checked}
@@ -320,10 +319,10 @@ function PickerCard({
 }) {
   return (
     <div className="rounded-xl border border-line-2 bg-raised p-4">
-      <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+      <div id={labelId} className="mb-[3px] text-base font-medium text-fg-3">
         {title}
       </div>
-      <div className="mb-3 text-[11.5px] text-muted-3">{hint}</div>
+      <div className="mb-3 text-sm text-muted-3">{hint}</div>
       <div className="flex items-center gap-2">{children}</div>
     </div>
   );
@@ -353,8 +352,8 @@ function ConnectCard({
       <div className="flex items-center gap-[13px]">
         {badge}
         <div className="min-w-0 flex-1">
-          <div className="text-[12.5px] font-medium text-fg-3">{name} isn't connected</div>
-          <div className="mt-[3px] text-[11.5px] text-muted-3">
+          <div className="text-base font-medium text-fg-3">{name} isn't connected</div>
+          <div className="mt-[3px] text-sm text-muted-3">
             Connect it to pull assigned issues into your projects.
           </div>
         </div>

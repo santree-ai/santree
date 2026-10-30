@@ -9,10 +9,7 @@ export function PriorityPill({ priority, muted = false }: { priority: Priority; 
   if (priority === "None") return null;
   const color = muted ? "var(--color-muted-4)" : priorityColor[priority];
   return (
-    <Pill
-      color={color}
-      className="px-1.5 py-px font-mono text-[9px] font-semibold tracking-[.04em] uppercase"
-    >
+    <Pill color={color} className="px-1.5 py-px text-2xs font-semibold">
       {priority}
     </Pill>
   );

@@ -48,7 +48,7 @@ export function BudgetLine({
   nowMs: number;
 }) {
   return (
-    <span className="flex items-center gap-1.5 text-[10.5px]">
+    <span className="flex items-center gap-1.5 text-xs">
       {/* The one column allowed to give: a label is recoverable from its `hint`
           and from the row it sits under, a count and a countdown are not. */}
       <span className="w-[62px] flex-none truncate text-muted-4" title={hint}>
@@ -69,7 +69,7 @@ export function BudgetLine({
           hour, and a 5-hour window at 90% means something different an hour
           before it rolls than a minute before. Coarse here — the precise
           countdown is on the settings meters. */}
-      <span className="flex-none whitespace-nowrap text-[10px] text-muted-4">
+      <span className="flex-none whitespace-nowrap text-2xs text-muted-4">
         {resetsAtMs ? `resets in ${formatUntil(resetsAtMs, nowMs)}` : ""}
       </span>
     </span>

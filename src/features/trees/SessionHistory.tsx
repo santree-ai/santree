@@ -132,9 +132,9 @@ export function SessionHistory({
     <>
       <div className="flex flex-none items-start justify-between gap-2 border-b border-line px-3 py-2.5">
         <div className="min-w-0">
-          <div className="text-[12.5px] font-semibold text-fg">Session history</div>
+          <div className="text-base font-semibold text-fg">Session history</div>
           {/* No count until the read lands: "0 sessions" beside a skeleton is a claim. */}
-          <div className="text-[11px] text-muted-4">
+          <div className="text-xs text-muted-4">
             {sessions === undefined
               ? "\u00a0"
               : `${sessions.length} session${sessions.length === 1 ? "" : "s"}`}
@@ -224,9 +224,7 @@ function SessionRow({
           className="flex min-h-[72px] min-w-0 flex-1 cursor-pointer flex-col gap-1 py-3 pl-3 text-left"
         >
           <span className="flex min-w-0 items-center gap-1.5">
-            <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-fg-2">
-              {title}
-            </span>
+            <span className="min-w-0 flex-1 truncate text-base font-medium text-fg-2">{title}</span>
             {live?.state && (
               <span
                 className="flex-none rounded-full"
@@ -240,7 +238,7 @@ function SessionRow({
             )}
           </span>
           {s.lastMessage && (
-            <span className="line-clamp-2 text-[11px] leading-[1.4] text-muted-3">
+            <span className="line-clamp-2 text-xs leading-[1.4] text-muted-3">
               {/* Who said it, because the latest line can be your own unanswered
                   prompt — the one case where the session is waiting on nobody. */}
               {s.lastMessageFrom && (
@@ -251,7 +249,7 @@ function SessionRow({
               {s.lastMessage}
             </span>
           )}
-          <span className="flex min-w-0 items-center gap-1.5 font-mono text-[10px] text-muted-4">
+          <span className="flex min-w-0 items-center gap-1.5 text-2xs text-muted-4">
             <span className="flex flex-none" style={{ color: agentBrandColor(s.agentKind) }}>
               <AgentIcon kind={s.agentKind} size={11} />
             </span>
@@ -326,7 +324,7 @@ function Section({
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.05em] text-muted-4">
+      <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-4">
         <span className="flex flex-none">{icon}</span>
         <span className="font-medium">{title}</span>
         {action && <span className="ml-auto flex items-center">{action}</span>}
@@ -485,10 +483,10 @@ function SessionDetails({
       </div>
       {/* Only where the button it explains is on offer — a reason you can't press
           something that isn't there reads as a missing control. */}
-      {blocked && !openable && onResume && <p className="text-[11px] text-muted-3">{blocked}</p>}
+      {blocked && !openable && onResume && <p className="text-xs text-muted-3">{blocked}</p>}
 
       {s.messageCount === 0 ? (
-        <div className="rounded border border-dashed border-line-2 px-2.5 py-2 text-[11px] leading-[1.5] text-muted-3">
+        <div className="rounded border border-dashed border-line-2 px-2.5 py-2 text-xs leading-[1.5] text-muted-3">
           <span className="font-medium text-fg-3">Conversation not saved.</span> Nothing of this
           session's messages survives on disk
           {s.subagentCount > 0
@@ -509,14 +507,14 @@ function SessionDetails({
             }
           >
             {promptBody ? (
-              <p className="max-h-48 selectable overflow-y-auto whitespace-pre-wrap break-words rounded bg-input px-2.5 py-2 text-[11.5px] leading-[1.55] text-fg-3">
+              <p className="max-h-48 selectable overflow-y-auto whitespace-pre-wrap break-words rounded bg-input px-2.5 py-2 text-sm leading-[1.55] text-fg-3">
                 {promptBody}
                 {detail.data?.firstPromptTruncated && (
                   <span className="text-muted-4"> … (truncated)</span>
                 )}
               </p>
             ) : (
-              <p className="text-[11px] text-muted-4">No prompt recorded.</p>
+              <p className="text-xs text-muted-4">No prompt recorded.</p>
             )}
           </Section>
 
@@ -524,18 +522,11 @@ function SessionDetails({
             <Section icon={<ListIcon size={11} />} title="Latest turns">
               <div className="flex flex-col gap-1.5">
                 {turns.map((turn, i) => (
-                  <div
-                    key={`${turn.from}-${i}`}
-                    className="rounded border-l-2 py-0.5 pl-2"
-                    style={{
-                      borderColor:
-                        turn.from === "You" ? "var(--accent)" : "var(--color-line-strong)",
-                    }}
-                  >
-                    <div className="text-[10px] uppercase tracking-[0.05em] text-muted-4">
+                  <div key={`${turn.from}-${i}`} className="border-l-2 border-line-2 py-0.5 pl-2">
+                    <div className="text-xs font-semibold text-muted-4">
                       {turn.from === "You" ? "You" : "Agent"}
                     </div>
-                    <div className="line-clamp-3 selectable text-[11.5px] leading-[1.5] text-fg-3">
+                    <div className="line-clamp-3 selectable text-sm leading-[1.5] text-fg-3">
                       {turn.text}
                     </div>
                   </div>
@@ -546,14 +537,14 @@ function SessionDetails({
         </>
       )}
 
-      {s.sampled && <p className="text-[11px] leading-[1.5] text-muted-3">{SAMPLED_HINT}</p>}
+      {s.sampled && <p className="text-xs leading-[1.5] text-muted-3">{SAMPLED_HINT}</p>}
 
       {s.subagentCount > 0 && <SubagentSection count={s.subagentCount} rows={subagents.data} />}
 
       {s.spend && s.spend.models.length > 0 && (
         <Section icon={<BoltIcon size={11} />} title="Usage">
           <div className="flex flex-col gap-1">
-            <div className="flex items-baseline gap-1.5 font-mono text-[11.5px] text-fg-3">
+            <div className="flex items-baseline gap-1.5 text-sm text-fg-3">
               <span className="tabular-nums">{formatCompact(s.spend.totalTokens)}</span>
               <span className="text-muted-4">tokens</span>
               {formatCostPrecise(s.spend.costUsd) && (
@@ -573,7 +564,7 @@ function SessionDetails({
       )}
 
       <Section icon={<BranchIcon size={11} />} title="Where it ran">
-        <div className="flex flex-col gap-0.5 font-mono text-[11px] text-muted-3">
+        <div className="flex flex-col gap-0.5 font-mono text-xs text-muted-3">
           {cwd && (
             <span className="truncate" title={cwd}>
               {compactPath(cwd)}
@@ -603,7 +594,7 @@ function ModelSpendRow({
   const meta = modelMeta(model);
   const label = formatCostPrecise(cost);
   return (
-    <div className="flex items-center gap-1.5 font-mono text-[10.5px] text-muted-3">
+    <div className="flex items-center gap-1.5 text-xs text-muted-3">
       <Dot color={meta.color} size={6} />
       <span className="min-w-0 truncate" title={model}>
         {meta.label}
@@ -631,7 +622,7 @@ function SubagentSection({ count, rows }: { count: number; rows: SessionSubagent
       {tree === null ? (
         <ListSkeleton rows={2} />
       ) : tree.length === 0 ? (
-        <p className="text-[11px] text-muted-4">No subagent transcripts on disk.</p>
+        <p className="text-xs text-muted-4">No subagent transcripts on disk.</p>
       ) : (
         <div className="flex flex-col gap-px">
           {tree.map((node) => (
@@ -661,10 +652,7 @@ function SubagentRow({ agent, level }: { agent: SessionSubagent; level: number }
   const status = subagentStatusMeta[agent.status];
   const title = agent.description ?? agent.agentType ?? agent.agentId;
   return (
-    <div
-      className="flex items-center gap-1.5 py-0.5 text-[11px]"
-      style={{ paddingLeft: level * 12 }}
-    >
+    <div className="flex items-center gap-1.5 py-0.5 text-xs" style={{ paddingLeft: level * 12 }}>
       {/* An unrecorded outcome shows no dot — a dot would assert one. The slot
           is still reserved, so the titles line up down the tree. */}
       <span className="flex h-[7px] w-[7px] flex-none items-center justify-center">
@@ -674,7 +662,7 @@ function SubagentRow({ agent, level }: { agent: SessionSubagent; level: number }
         {title}
       </span>
       {agent.agentType && <Badge>{agent.agentType}</Badge>}
-      <span className="flex-none font-mono text-[10px] tabular-nums text-muted-4">
+      <span className="flex-none text-2xs tabular-nums text-muted-4">
         {msgs(agent.messageCount, agent.sampled)}
       </span>
     </div>

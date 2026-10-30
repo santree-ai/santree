@@ -59,7 +59,7 @@ export function DaedalusSection() {
           aria-label={`${collapsed ? "Expand" : "Collapse"} Daedalus`}
           aria-expanded={!collapsed}
           onClick={() => setCollapsed((value) => !value)}
-          className={`-ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-left uppercase transition-colors hover:text-fg-2 ${dim}`}
+          className={`-ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded px-1 py-1 text-left transition-colors hover:text-fg-2 ${dim}`}
         >
           <Chevron size={10} className="flex-none" />
           <DaedalusLogo size={12} className="flex-none" />
@@ -76,7 +76,7 @@ export function DaedalusSection() {
             onClick={() => navigate({ to: "/settings", search: { section: "daedalus" } })}
             aria-label={`${notice.title}. Open Settings, Daedalus`}
             title={notice.detail ?? undefined}
-            className="mx-2.5 mb-0.5 min-w-0 cursor-pointer truncate rounded px-1.5 py-(--density-compact) text-left text-[11px] text-muted-3 underline-offset-2 transition-colors hover:text-fg-2 hover:underline"
+            className="mx-2.5 mb-0.5 min-w-0 cursor-pointer truncate rounded px-1.5 py-(--density-compact) text-left text-xs text-muted-3 underline-offset-2 transition-colors hover:text-fg-2 hover:underline"
           >
             {notice.title}
           </button>

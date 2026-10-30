@@ -41,10 +41,10 @@ export function SuggestedChange({ text }: { text: string }) {
 
   return (
     <div className="my-2 overflow-hidden rounded-lg border border-line-2">
-      <div className="border-b border-line-2 bg-input px-2.5 py-1 text-[10.5px] font-medium text-muted-2">
+      <div className="border-b border-line-2 bg-input px-2.5 py-1 text-xs font-medium text-muted-2">
         Suggested change
       </div>
-      <div className="overflow-x-auto font-mono text-[11.5px] leading-[1.55] text-fg-3">
+      <div className="overflow-x-auto font-mono text-sm leading-[1.55] text-fg-3">
         {original?.map((line, i) => (
           <Row key={`o${i}-${line}`} sign="-" text={line} color={palette.red} />
         ))}

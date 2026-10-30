@@ -25,7 +25,7 @@ export function StatusPicker({
 }) {
   if (!detail) {
     return (
-      <span className="rounded border border-line-2 bg-input px-[7px] py-[1.5px] font-mono text-[9px] text-muted-2">
+      <span className="rounded border border-line-2 bg-input px-[7px] py-[1.5px] text-2xs text-muted-2">
         Triage
       </span>
     );
@@ -47,7 +47,7 @@ export function StatusPicker({
             type="button"
             onClick={() => !disabled && toggle()}
             disabled={disabled}
-            className="flex cursor-pointer items-center gap-1.5 rounded border border-line-2 bg-input px-[7px] py-[2.5px] text-[10.5px] text-fg-2 hover:border-line-strong disabled:cursor-default disabled:opacity-60"
+            className="flex cursor-pointer items-center gap-1.5 rounded border border-line-2 bg-input px-[7px] py-[2.5px] text-xs text-fg-2 hover:border-line-strong disabled:cursor-default disabled:opacity-60"
           >
             <span className="h-1.5 w-1.5 flex-none rounded-full" style={{ background: color }} />
             {label}
@@ -67,11 +67,11 @@ export function StatusPicker({
                 close();
                 if (!isCurrent) onSetState(s.id);
               }}
-              className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-fg-3 hover:bg-hover-2"
+              className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-fg-3 hover:bg-hover-2"
             >
               <span className="h-2 w-2 flex-none rounded-full" style={{ background: s.color }} />
               <span className="flex-1">{s.name}</span>
-              {isCurrent && <span className="text-[10px] text-[color:var(--accent-text)]">✓</span>}
+              {isCurrent && <span className="text-2xs text-[color:var(--accent-text)]">✓</span>}
             </button>
           );
         })

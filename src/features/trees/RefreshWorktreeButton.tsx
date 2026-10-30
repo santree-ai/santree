@@ -17,7 +17,7 @@ export function RefreshWorktreeButton({ repo, worktreeId }: { repo: string; work
       aria-busy={fetching}
       aria-label="Refresh files and git status"
       title="Refresh files and git status"
-      className="flex cursor-pointer items-center rounded-[5px] border border-transparent px-1.5 py-1 text-muted-3 transition-colors hover:bg-hover hover:text-fg-2"
+      className="flex cursor-pointer items-center rounded-sm border border-transparent px-1.5 py-1 text-muted-3 transition-colors hover:bg-hover hover:text-fg-2"
     >
       <RefreshIcon size={12} className={fetching ? "animate-spin" : ""} />
     </button>

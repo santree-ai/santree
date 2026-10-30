@@ -30,12 +30,12 @@ export function CheckLogBody({
   className?: string;
 }) {
   if (log.blocks.length === 0) {
-    return <div className="px-3 py-2 text-[11px] text-muted-3">No log output.</div>;
+    return <div className="px-3 py-2 text-xs text-muted-3">No log output.</div>;
   }
   return (
-    <div className={`overflow-auto py-1 font-mono text-[11px] leading-[1.55] ${className}`}>
+    <div className={`overflow-auto py-1 font-mono text-xs leading-[1.55] ${className}`}>
       {log.truncated && (
-        <div className="px-3 pb-1 text-[10px] text-muted-4">
+        <div className="px-3 pb-1 text-2xs text-muted-4">
           Earlier lines omitted.{" "}
           {url ? (
             <button

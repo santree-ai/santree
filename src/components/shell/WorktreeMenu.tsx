@@ -150,9 +150,9 @@ export function WorktreeMenu({
         confirmLabel="Delete"
         message={
           <>
-            Delete the worktree for <span className="font-mono text-fg-2">{worktree.id}</span> and
-            its branch <span className="font-mono text-fg-2">{worktree.branch}</span>? Any
-            uncommitted changes will be lost.
+            Delete the worktree for <span className="text-fg-2">{worktree.id}</span> and its branch{" "}
+            <span className="font-mono text-fg-2">{worktree.branch}</span>? Any uncommitted changes
+            will be lost.
           </>
         }
         // Optimistic + background: fire and close immediately — the row vanishes

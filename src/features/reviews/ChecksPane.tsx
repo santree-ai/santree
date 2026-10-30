@@ -74,7 +74,7 @@ export function ChecksPane({ pr }: { pr: ReviewPr }) {
                 type="button"
                 onClick={(e) => toggle(g.key, e.metaKey || e.ctrlKey)}
                 title={`${isCollapsed ? "Expand" : "Collapse"} (⌘-click for all)`}
-                className="mb-1.5 flex w-full cursor-pointer items-center gap-1.5 font-mono text-[10px] tracking-[.06em] uppercase hover:brightness-125"
+                className="mb-1.5 flex w-full cursor-pointer items-center gap-1.5 text-xs font-semibold hover:brightness-125"
                 style={{ color: g.color }}
               >
                 <ChevronDownIcon
@@ -126,14 +126,14 @@ function CheckRow({ check, owner, name }: { check: PrCheck; owner: string; name:
   const header = (
     <>
       <span
-        className="flex w-[1ch] flex-none items-center justify-center font-mono text-[12px]"
+        className="flex w-[1ch] flex-none items-center justify-center text-sm"
         style={{ color: m.color }}
       >
         {isRunning(check) ? <RunningDot label={m.label} /> : m.glyph}
       </span>
-      <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg-2">{check.name}</span>
+      <span className="min-w-0 flex-1 truncate text-base text-fg-2">{check.name}</span>
       {check.description && (
-        <span className="flex-none font-mono text-[10.5px] text-muted-4">{check.description}</span>
+        <span className="flex-none text-xs text-muted-4">{check.description}</span>
       )}
     </>
   );
@@ -199,8 +199,8 @@ function CheckDetail({ check, owner, name }: { check: PrCheck; owner: string; na
           {steps.map((s) => {
             const sm = checkStatusMeta[s.status];
             return (
-              <div key={s.number} className="flex items-center gap-2 text-[11.5px]">
-                <span className="flex-none font-mono text-[11px]" style={{ color: sm.color }}>
+              <div key={s.number} className="flex items-center gap-2 text-sm">
+                <span className="flex-none text-xs" style={{ color: sm.color }}>
                   {sm.glyph}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-muted-2">{s.name}</span>
@@ -215,25 +215,20 @@ function CheckDetail({ check, owner, name }: { check: PrCheck; owner: string; na
           <div
             key={`${a.path ?? ""}-${a.startLine ?? i}-${i}`}
             className="rounded-md border border-line-2 bg-app px-2.5 py-2"
-            style={{ borderLeft: `2px solid ${color}` }}
           >
-            <div className="mb-1 flex items-center gap-2 font-mono text-[10px]">
-              <span className="uppercase" style={{ color }}>
-                {a.level || "error"}
-              </span>
+            <div className="mb-1 flex items-center gap-2 text-2xs">
+              <span style={{ color }}>{a.level || "error"}</span>
               {a.path && (
-                <span className="min-w-0 truncate text-muted-3">
+                <span className="min-w-0 truncate font-mono text-muted-3">
                   {a.path}
                   {a.startLine != null && `:${a.startLine}`}
                 </span>
               )}
             </div>
-            {a.title && <div className="mb-0.5 text-[11.5px] font-medium text-fg-2">{a.title}</div>}
-            <div className="text-[11.5px] leading-snug whitespace-pre-wrap text-muted-2">
-              {a.message}
-            </div>
+            {a.title && <div className="mb-0.5 text-sm font-medium text-fg-2">{a.title}</div>}
+            <div className="text-sm leading-snug whitespace-pre-wrap text-muted-2">{a.message}</div>
             {a.rawDetails && (
-              <pre className="mt-1.5 overflow-x-auto rounded bg-input px-2 py-1.5 font-mono text-[10.5px] leading-snug text-muted-3">
+              <pre className="mt-1.5 overflow-x-auto rounded bg-input px-2 py-1.5 font-mono text-xs leading-snug text-muted-3">
                 {a.rawDetails}
               </pre>
             )}
@@ -268,7 +263,7 @@ function CheckLogSection({
       <button
         type="button"
         onClick={() => setShow((v) => !v)}
-        className="flex w-fit cursor-pointer items-center gap-1.5 font-mono text-[10px] tracking-[.06em] text-muted-3 uppercase hover:text-fg-2"
+        className="flex w-fit cursor-pointer items-center gap-1.5 text-xs font-semibold text-muted-3 hover:text-fg-2"
       >
         <ChevronDownIcon
           size={11}
@@ -279,11 +274,11 @@ function CheckLogSection({
       {show && (
         <div className="overflow-hidden rounded-md border border-line-2 bg-app">
           {isLoading ? (
-            <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted-3">
+            <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-3">
               <TerminalActivity label="Loading log…" />
             </div>
           ) : !log ? (
-            <div className="px-3 py-2 text-[11px] text-muted-3">No log output.</div>
+            <div className="px-3 py-2 text-xs text-muted-3">No log output.</div>
           ) : (
             <CheckLogBody log={log} url={url} />
           )}

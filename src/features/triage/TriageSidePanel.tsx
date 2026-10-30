@@ -208,20 +208,20 @@ function ProjectLine({
   onDetach: () => void;
 }) {
   return (
-    <div className="flex h-9 flex-none items-center gap-2 border-b border-hairline bg-raised px-3 text-[11px] text-muted-3">
+    <div className="flex h-9 flex-none items-center gap-2 border-b border-hairline bg-raised px-3 text-xs text-muted-3">
       <RepoAvatar repo={repo} size={14} bordered={false} />
       <span className="min-w-0 truncate" title={repo}>
         <span className="text-fg-3">{shortRepoName(repo)}</span>
         {branch && (
           <>
             {" · "}
-            <span className="font-mono text-[10.5px]">{branch}</span>
+            <span className="font-mono text-xs">{branch}</span>
           </>
         )}
       </span>
       {!attached && (
         <span
-          className="flex-none rounded border border-hairline px-1 text-[9px] tracking-[.06em] text-muted-4 uppercase"
+          className="flex-none rounded border border-hairline px-1 text-2xs text-muted-4"
           title="The triage default; this ticket has no project of its own"
         >
           default

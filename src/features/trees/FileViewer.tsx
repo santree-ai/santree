@@ -49,7 +49,7 @@ export function FileViewer() {
     <div ref={root} className="relative flex h-full min-w-0 flex-col bg-app">
       <FindBar find={find} />
       <div className="flex h-8 flex-none items-center gap-3 border-b border-line bg-deep px-3">
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted-2">
+        <span className="min-w-0 flex-1 truncate font-mono text-sm text-muted-2">
           {selectedFile}
         </span>
         {markdown && (

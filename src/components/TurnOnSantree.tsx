@@ -50,7 +50,7 @@ export function TurnOnSantree({ className }: { className?: string }) {
         <ExternalLinkIcon size={11} className="ml-1.5" />
       </Button>
       {line && (
-        <div role="status" className="mt-1.5 text-[11.5px] leading-[1.5] text-muted-3">
+        <div role="status" className="mt-1.5 text-sm leading-[1.5] text-muted-3">
           {line}
         </div>
       )}

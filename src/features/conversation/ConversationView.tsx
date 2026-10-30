@@ -270,7 +270,7 @@ export function ConversationView({
         />
         {journal && error && (
           <div className={`${COLUMN} flex-none pt-2`}>
-            <p className="text-[11.5px] text-muted-3">
+            <p className="text-sm text-muted-3">
               Couldn't refresh the conversation.{" "}
               <button
                 type="button"
@@ -311,7 +311,7 @@ export function ConversationView({
             {(keepPlace) => (
               <>
                 {journal.meta.truncated && (
-                  <p className="mb-5 text-center text-[11px] text-muted-4">
+                  <p className="mb-5 text-center text-xs text-muted-4">
                     The start of this conversation isn't shown: its record is larger than santree
                     reads.
                   </p>
@@ -368,7 +368,7 @@ export function ConversationView({
           </div>
         ) : !live ? (
           <div className="flex-none border-t border-hairline">
-            <p className={`${COLUMN} py-3 text-[11.5px] text-muted-4`}>
+            <p className={`${COLUMN} py-3 text-sm text-muted-4`}>
               A past session, read from its record.
             </p>
           </div>
@@ -434,7 +434,7 @@ function LiveReply({ text }: { text: string }) {
       <Markdown noRemote className={PROSE}>
         {shownText(text)}
       </Markdown>
-      <span className="flex items-center gap-1.5 text-[11.5px] text-muted-3">
+      <span className="flex items-center gap-1.5 text-sm text-muted-3">
         <span aria-hidden className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-green" />
         Writing…
       </span>
@@ -470,7 +470,7 @@ function PendingPrompt({
         />
       </div>
       {late ? (
-        <div className="flex items-center gap-2 pr-1 text-[11.5px] text-muted-3">
+        <div className="flex items-center gap-2 pr-1 text-sm text-muted-3">
           <span>Claude hasn't shown this yet.</span>
           <button
             type="button"
@@ -481,7 +481,7 @@ function PendingPrompt({
           </button>
         </div>
       ) : (
-        <span className="pr-1 text-[11px] text-muted-4">
+        <span className="pr-1 text-xs text-muted-4">
           {echo.queued ? "Queued: Claude reads it when it's done" : "Sent"}
         </span>
       )}
@@ -500,7 +500,7 @@ function SubagentConversation({ agentId, working }: { agentId: string; working: 
   });
   if (!data) {
     return error ? (
-      <p className="text-[11.5px] text-muted-3">
+      <p className="text-sm text-muted-3">
         Couldn't read its conversation.{" "}
         <button
           type="button"
@@ -515,7 +515,7 @@ function SubagentConversation({ agentId, working }: { agentId: string; working: 
     );
   }
   if (data.availability !== "Ready" || data.items.length === 0) {
-    return <p className="text-[11.5px] text-muted-4">Nothing of it is recorded.</p>;
+    return <p className="text-sm text-muted-4">Nothing of it is recorded.</p>;
   }
   return <TurnList nested turns={data.turns} working={working} />;
 }

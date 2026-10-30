@@ -120,17 +120,17 @@ export function ConversationHeader({
           <span className="flex flex-none" title="Claude Code">
             <ClaudeSparkIcon size={14} />
           </span>
-          <h2 className="min-w-0 truncate text-[14px] font-semibold text-fg-bright">
+          <h2 className="min-w-0 truncate text-md font-semibold text-fg-bright">
             {meta?.title ?? fallbackTitle}
           </h2>
           {live && (
-            <span className="ml-auto flex flex-none items-center gap-1.5 pl-3 text-[12px] text-muted-2">
+            <span className="ml-auto flex flex-none items-center gap-1.5 pl-3 text-sm text-muted-2">
               <AttentionDot level={live.level} size={7} />
               {stateLabel(live.level, live.entry, live.ask)}
             </span>
           )}
         </div>
-        <div className="mt-1.5 flex min-w-0 items-center gap-3 text-[11.5px] text-muted-3">
+        <div className="mt-1.5 flex min-w-0 items-center gap-3 text-sm text-muted-3">
           {settings.length > 0 && (
             <span className="flex flex-none items-center gap-1.5">
               {settings.flatMap((part, i) =>
@@ -148,10 +148,10 @@ export function ConversationHeader({
           {meta?.gitBranch && (
             <span className="flex min-w-0 items-center gap-1.5 text-muted-4" title={meta.gitBranch}>
               <BranchIcon size={11} className="flex-none" />
-              <span className="truncate font-mono text-[11px]">{meta.gitBranch}</span>
+              <span className="truncate font-mono text-xs">{meta.gitBranch}</span>
             </span>
           )}
-          <span className="ml-auto flex flex-none items-center gap-3 font-mono text-[11px] text-muted-3">
+          <span className="ml-auto flex flex-none items-center gap-3 text-xs text-muted-3 tabular-nums">
             <ContextReading meta={meta} usage={usage} />
             <CostReading meta={meta} usage={usage} />
           </span>
@@ -250,10 +250,10 @@ function TodoPin({ todos }: { todos: TodoItem[] }) {
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        className="-mx-2 flex w-[calc(100%+1rem)] min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-left text-[12px] text-muted-3 transition-colors hover:bg-hover hover:text-fg-2"
+        className="-mx-2 flex w-[calc(100%+1rem)] min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-left text-sm text-muted-3 transition-colors hover:bg-hover hover:text-fg-2"
       >
         <ListIcon size={12} className="flex-none" />
-        <span className="flex-none font-mono text-[11px] tabular-nums">
+        <span className="flex-none text-xs tabular-nums">
           {done}/{todos.length}
         </span>
         <span className="min-w-0 truncate">

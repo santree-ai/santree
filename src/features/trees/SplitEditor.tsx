@@ -14,8 +14,7 @@ import { toast } from "../../state/toast";
 import { invalidBranchReason } from "./createWorktree";
 import { useTrees } from "./model";
 
-const FIELD =
-  "w-full rounded border border-line bg-input px-2.5 py-1.5 text-xs text-fg-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
+const FIELD = "w-full rounded border border-line bg-input px-2.5 py-1.5 text-sm text-fg-2";
 
 export function SplitEditor({ repo, worktree }: { repo: string; worktree: Worktree }) {
   const preview = useMoveChangesPreview(repo, worktree.id);
@@ -32,7 +31,7 @@ export function SplitEditor({ repo, worktree }: { repo: string; worktree: Worktr
           refresh={() => void preview.refetch()}
         />
       ) : preview.isFetching ? (
-        <div role="status" className="flex items-center gap-3 p-5 text-sm text-muted-2">
+        <div role="status" className="flex items-center gap-3 p-5 text-md text-muted-2">
           <Spinner /> Reading uncommitted changes…
         </div>
       ) : (
@@ -101,12 +100,12 @@ function MoveForm({
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-3 p-3">
-      <p className="text-xs text-muted-2">
+      <p className="text-sm text-muted-2">
         Commit what belongs here, then move the rest to a child branch.
       </p>
       <section className="min-w-0 space-y-3">
         <fieldset disabled={move.isPending || resuming} className="min-w-0 space-y-3">
-          <label className="block text-xs text-fg-2">
+          <label className="block text-sm text-fg-2">
             Branch name
             <input
               autoComplete="off"
@@ -124,19 +123,19 @@ function MoveForm({
           />
         </fieldset>
         {preview.files.length > 0 && (
-          <p className="text-xs text-fg-2">
+          <p className="text-sm text-fg-2">
             {preview.files.length} {preview.files.length === 1 ? "file" : "files"} will move.
             Staging is preserved.
           </p>
         )}
         {resuming && (
-          <p className="text-xs text-fg-2">
+          <p className="text-sm text-fg-2">
             A previous move did not finish. Retry to continue the same move. Your recovery stash and
             any destination edits are preserved.
           </p>
         )}
         <label
-          className="flex cursor-pointer items-center gap-2 text-xs text-fg-2"
+          className="flex cursor-pointer items-center gap-2 text-sm text-fg-2"
           title={reach.runOff}
         >
           <input
@@ -148,7 +147,7 @@ function MoveForm({
           />
           Run setup in the child branch
         </label>
-        <p className="text-xs text-muted-2">
+        <p className="text-sm text-muted-2">
           Pause agents before moving. A recovery stash is kept.
         </p>
         <Failure error={previewError} />
@@ -197,7 +196,7 @@ function MoveForm({
             Refresh changes
           </Button>
         </div>
-        {reason && <p className="text-xs text-muted-2">{reason}</p>}
+        {reason && <p className="text-sm text-muted-2">{reason}</p>}
       </section>
     </div>
   );
@@ -205,7 +204,7 @@ function MoveForm({
 
 function Failure({ error }: { error: Error | null }) {
   return error ? (
-    <p role="alert" className="text-xs text-status-red">
+    <p role="alert" className="text-sm text-status-red">
       {error.message}
     </p>
   ) : null;
@@ -231,7 +230,7 @@ function TicketPicker({
   const selected = tasks.find((task) => task.id === value);
   return (
     <div className="min-w-0">
-      <span id={labelId} className="text-xs text-fg-2">
+      <span id={labelId} className="text-sm text-fg-2">
         Ticket
       </span>
       <Dropdown
@@ -301,8 +300,8 @@ function TicketPicker({
                     onClick={() => pick(task.id)}
                   >
                     <span className="min-w-0">
-                      <span className="block font-mono text-xs">{ticketHandle(task.id)}</span>
-                      <span className="block truncate text-xs text-muted-2">{task.title}</span>
+                      <span className="block text-sm tabular-nums">{ticketHandle(task.id)}</span>
+                      <span className="block truncate text-sm text-muted-2">{task.title}</span>
                     </span>
                   </button>
                 ))}

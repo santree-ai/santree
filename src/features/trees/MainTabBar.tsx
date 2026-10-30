@@ -215,7 +215,7 @@ export function MainTabBar({
               onClick={() => runSetup(active.id)}
               disabled={reach.runOff !== undefined}
               title={reach.runOff ?? "Run .santree/init.sh and watch its logs"}
-              className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded px-2 text-[11px] whitespace-nowrap text-muted-2 hover:bg-hover hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-2"
+              className="flex h-[22px] cursor-pointer items-center gap-1.5 rounded px-2 text-xs whitespace-nowrap text-muted-2 hover:bg-hover hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-2"
             >
               <PlayIcon size={10} />
               {active.setupRan ? "Re-run setup" : "Run setup"}
@@ -285,7 +285,7 @@ function NewTabMenu({
       >
         <AgentIcon kind="Codex" size={13} />
         Codex
-        <span className="ml-auto text-[10px] text-muted-4">1</span>
+        <span className="ml-auto text-2xs text-muted-4">1</span>
       </button>
       <button
         type="button"
@@ -296,12 +296,12 @@ function NewTabMenu({
       >
         <AgentIcon kind="Claude" size={13} />
         Claude Code
-        <span className="ml-auto text-[10px] text-muted-4">2</span>
+        <span className="ml-auto text-2xs text-muted-4">2</span>
       </button>
       <button type="button" onClick={() => add("terminal")} className={MENU_ITEM}>
         <TerminalIcon />
         Terminal
-        <span className="ml-auto text-[10px] text-muted-4">3</span>
+        <span className="ml-auto text-2xs text-muted-4">3</span>
       </button>
       <WebMenuRow off={webOff} digit={4} onAdd={() => add("web")} />
     </>

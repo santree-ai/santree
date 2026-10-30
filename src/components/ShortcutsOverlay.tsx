@@ -92,7 +92,7 @@ function buildSections(conversation: boolean): Section[] {
  *  chrome as the overlay it is teaching. */
 export function Kbd({ token }: { token: string }) {
   return (
-    <span className="flex h-[22px] min-w-[22px] items-center justify-center rounded-[5px] border border-line-2 bg-input px-1.5 font-mono text-[11px] text-fg-2">
+    <span className="flex h-[22px] min-w-[22px] items-center justify-center rounded-sm border border-line-2 bg-input px-1.5 text-xs text-fg-2">
       {token}
     </span>
   );
@@ -145,14 +145,14 @@ export function ShortcutsOverlay() {
         role="dialog"
         aria-modal
         aria-label="Keyboard shortcuts"
-        className="relative flex max-h-[76vh] w-[760px] max-w-full flex-col overflow-hidden rounded-2xl border border-line-3 bg-popover shadow-[0_30px_80px_-20px_rgba(0,0,0,.85)]"
+        className="relative flex max-h-[76vh] w-[760px] max-w-full flex-col overflow-hidden rounded-2xl border border-line-2 bg-popover shadow-dialog"
       >
         <div className="flex items-center gap-2.5 px-6 pt-5 pb-3">
-          <span className="font-mono text-[15px] text-muted-2">⌘</span>
-          <h2 className="text-[15px] font-semibold text-fg-bright">Keyboard shortcuts</h2>
+          <span className="text-lg text-muted-2">⌘</span>
+          <h2 className="text-lg font-semibold text-fg-bright">Keyboard shortcuts</h2>
         </div>
         <div className="px-6 pb-3">
-          <div className="flex items-center gap-2.5 rounded-lg border border-line-2 bg-input px-3 py-2 focus-within:border-[color:var(--accent)]">
+          <div className="flex items-center gap-2.5 rounded-lg field bg-input px-3 py-2">
             <span className="text-muted-3">
               <SearchIcon />
             </span>
@@ -161,27 +161,23 @@ export function ShortcutsOverlay() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search shortcuts…"
-              className="overlay-search-input w-full bg-transparent text-[13px] text-fg-2 outline-none placeholder:text-muted-4"
+              className="overlay-search-input w-full bg-transparent text-base text-fg-2 outline-none placeholder:text-muted-4"
             />
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-5">
           {sections.length === 0 ? (
-            <div className="py-10 text-center text-[12.5px] text-muted-3">
-              No matching shortcuts.
-            </div>
+            <div className="py-10 text-center text-base text-muted-3">No matching shortcuts.</div>
           ) : (
             sections.map((section) => (
               <div key={section.title} className="mb-5 last:mb-0">
-                <div className="mb-1.5 pt-2 text-[12px] font-medium text-muted-3">
-                  {section.title}
-                </div>
+                <div className="mb-1.5 pt-2 text-sm font-medium text-muted-3">{section.title}</div>
                 {section.items.map((item) => (
                   <div
                     key={item.label}
                     className="flex items-center justify-between rounded-md px-1 py-[7px]"
                   >
-                    <span className="text-[13px] text-fg-3">{item.label}</span>
+                    <span className="text-base text-fg-3">{item.label}</span>
                     <span className="flex items-center gap-1">
                       {item.keys.map((k, i) => (
                         <Kbd key={`${item.label}-${i}`} token={k} />

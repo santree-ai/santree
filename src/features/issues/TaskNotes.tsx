@@ -95,7 +95,7 @@ export function TaskNotes({
         aria-expanded={open}
       >
         <ChevronDownIcon size={11} className={open ? "" : "-rotate-90"} />
-        <span className="flex-none text-[11px] font-semibold tracking-[.01em]">Notes</span>
+        <span className="flex-none text-xs font-semibold tracking-[.01em]">Notes</span>
         {hasContent && (
           <span
             className="h-1.5 w-1.5 flex-none rounded-full"
@@ -104,7 +104,7 @@ export function TaskNotes({
           />
         )}
         {!open && (
-          <span className="min-w-0 flex-1 overflow-hidden text-[11px] text-ellipsis whitespace-nowrap text-muted-4">
+          <span className="min-w-0 flex-1 overflow-hidden text-xs text-ellipsis whitespace-nowrap text-muted-4">
             {hasContent ? saved : "Add context for this task…"}
           </span>
         )}
@@ -120,7 +120,7 @@ export function TaskNotes({
             if (draft !== saved) saveNote({ taskId, body: draft });
           }}
           placeholder="Context for this task. Stored locally, never synced to Linear. Agents get it as prompt context later."
-          className={`mt-1.5 max-h-[40vh] w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none ${
+          className={`mt-1.5 max-h-[40vh] w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-sm leading-[1.55] text-fg-2 placeholder:text-muted-4 ${
             embedded ? "min-h-[64px]" : "min-h-[88px]"
           }`}
         />

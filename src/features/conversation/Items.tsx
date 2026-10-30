@@ -16,7 +16,7 @@ import { durationLabel, firstLine } from "./scope";
 import type { ItemOf } from "./turns";
 
 /** Prose sizes, shared with the tool cards' text so the page reads as one. */
-export const PROSE = "text-[13.5px] leading-[1.7] text-fg-2";
+export const PROSE = "text-md leading-[1.7] text-fg-2";
 
 /** The bubble what the user sent is drawn in. */
 const BUBBLE = "max-w-[85%] rounded-lg px-3.5 py-2";
@@ -32,16 +32,16 @@ export const UserItem = memo(function UserItem({ item }: { item: ItemOf<"user"> 
   return (
     <div className="flex flex-col items-end gap-1">
       <div className={`${BUBBLE} bg-raised-2`}>
-        <Clamped text={text} lines={14} className="text-[13.5px] leading-[1.6] text-fg" />
+        <Clamped text={text} lines={14} className="text-md leading-[1.6] text-fg" />
         {images > 0 && (
-          <div className="mt-1 text-[11.5px] text-muted-3">
+          <div className="mt-1 text-sm text-muted-3">
             {images === 1 ? "1 image" : `${images} images`}
           </div>
         )}
       </div>
       {origin === "Queued" && (
         <span
-          className="pr-1 text-[11px] text-muted-4"
+          className="pr-1 text-xs text-muted-4"
           title="Typed while Claude was working, and sent when it was free"
         >
           Queued
@@ -58,7 +58,7 @@ function CommandItem({ text }: { text: string }) {
   if (command) {
     return (
       <div className="flex justify-end">
-        <code className="selectable max-w-[85%] truncate rounded-lg bg-raised-2 px-2.5 py-1 font-mono text-[12px] text-fg-2">
+        <code className="selectable max-w-[85%] truncate rounded-lg bg-raised-2 px-2.5 py-1 font-mono text-sm text-fg-2">
           {text.trim()}
         </code>
       </div>
@@ -68,7 +68,7 @@ function CommandItem({ text }: { text: string }) {
     <Clamped
       text={text}
       lines={6}
-      className="rounded-md border border-line bg-input px-3 py-2 font-mono text-[11.5px] leading-[1.6] text-muted-2"
+      className="rounded-md border border-line bg-input px-3 py-2 font-mono text-sm leading-[1.6] text-muted-2"
     />
   );
 }
@@ -106,7 +106,7 @@ function InjectedItem({ text }: { text: string }) {
           <Clamped
             text={plain.slice(plain.indexOf(preview) + preview.length).trim()}
             lines={40}
-            className="text-[12px] leading-[1.6] text-muted-3"
+            className="text-sm leading-[1.6] text-muted-3"
           />
         </div>
       )}
@@ -142,7 +142,7 @@ export const ReasoningItem = memo(function ReasoningItem({ item }: { item: ItemO
       </ActivityRow>
       {open && (
         <div className={`${STEP_INDENT} pt-1 pb-2`}>
-          <Markdown noRemote className="text-[12.5px] leading-[1.65] text-muted-3">
+          <Markdown noRemote className="text-base leading-[1.65] text-muted-3">
             {text}
           </Markdown>
         </div>
@@ -166,7 +166,7 @@ export const QueuedItem = memo(function QueuedItem({ item }: { item: ItemOf<"que
   const { text, status } = item.body;
   if (status !== "Pending") {
     return (
-      <div className="flex min-w-0 justify-end gap-2 text-[11.5px] text-muted-4">
+      <div className="flex min-w-0 justify-end gap-2 text-sm text-muted-4">
         <span className="flex-none">{QUEUE_STATE[status]}</span>
         <span className="min-w-0 truncate text-muted-3">{firstLine(text)}</span>
       </div>
@@ -175,9 +175,9 @@ export const QueuedItem = memo(function QueuedItem({ item }: { item: ItemOf<"que
   return (
     <div className="flex flex-col items-end gap-1">
       <div className={`${BUBBLE} border border-dashed border-line-3`}>
-        <Clamped text={text} lines={8} className="text-[13.5px] leading-[1.6] text-fg-3" />
+        <Clamped text={text} lines={8} className="text-md leading-[1.6] text-fg-3" />
       </div>
-      <span className="pr-1 text-[11px] text-muted-4">{QUEUE_STATE.Pending}</span>
+      <span className="pr-1 text-xs text-muted-4">{QUEUE_STATE.Pending}</span>
     </div>
   );
 });
@@ -188,7 +188,7 @@ export const NoticeItem = memo(function NoticeItem({ item }: { item: ItemOf<"not
   const { tone, text } = item.body;
   if (tone === "Error") return <ErrorNote text={text} />;
   return (
-    <div className="flex items-center gap-3 py-1 text-[11.5px] text-muted-4">
+    <div className="flex items-center gap-3 py-1 text-sm text-muted-4">
       <span aria-hidden className="h-px min-w-6 flex-1 bg-line" />
       <span className="selectable min-w-0 text-center">{text}</span>
       <span aria-hidden className="h-px min-w-6 flex-1 bg-line" />
@@ -202,7 +202,7 @@ export function ErrorNote({ text }: { text: string }) {
   return (
     <div
       role="note"
-      className="flex items-start gap-2.5 rounded-lg border px-3.5 py-2.5 text-[12.5px] leading-[1.55]"
+      className="flex items-start gap-2.5 rounded-lg border px-3.5 py-2.5 text-base leading-[1.55]"
       style={{ borderColor: alpha(28, red), background: alpha(6, red), color: red }}
     >
       <WarningIcon size={13} className="mt-[3px] flex-none" />

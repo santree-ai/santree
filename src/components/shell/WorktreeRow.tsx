@@ -133,7 +133,7 @@ export function WorktreeRow({
           // show — say what is happening instead of rendering blanks.
           <>
             <Spinner size={9} />
-            <span className="min-w-0 flex-1 truncate text-[12.5px] text-muted-3">
+            <span className="min-w-0 flex-1 truncate text-base text-muted-3">
               Creating {w.title || w.id}…
             </span>
           </>
@@ -150,7 +150,7 @@ export function WorktreeRow({
               <BranchIcon size={CARD_GLYPH} />
             </span>
             <MarkdownTitle
-              className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${
+              className={`min-w-0 flex-1 truncate text-base leading-5 ${
                 selected ? "font-medium text-fg" : "font-medium text-fg-2"
               }`}
             >

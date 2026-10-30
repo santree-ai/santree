@@ -289,7 +289,7 @@ function BarProvider({ p, nowMs }: { p: ProviderUsage; nowMs: number }) {
   // The bar shows only the login new sessions use, and names it only when it is
   // not the Default — the one-account bar reads exactly as it always has.
   const account = p.id !== null && p.account && (
-    <span className="text-[10.5px] whitespace-nowrap text-muted-4">{p.account}</span>
+    <span className="text-xs whitespace-nowrap text-muted-4">{p.account}</span>
   );
   if (p.windows.length === 0)
     return account ? (
@@ -306,7 +306,7 @@ function BarProvider({ p, nowMs }: { p: ProviderUsage; nowMs: number }) {
       <Mark kind={p.kind} />
       {account}
       <Meter pct={pct} />
-      <span className="flex items-center gap-1.5 text-[10.5px] tabular-nums whitespace-nowrap">
+      <span className="flex items-center gap-1.5 text-xs tabular-nums whitespace-nowrap">
         {p.windows.map((w, i) => (
           <span key={w.label} className="flex items-center gap-1.5">
             {i > 0 && <span className="text-muted-5">·</span>}
@@ -375,20 +375,20 @@ function ProviderRow({
         <span className="flex h-6 w-6 flex-none items-center justify-center rounded-full bg-raised-2">
           <Mark kind={p.kind} size={13} />
         </span>
-        <span className="text-[12.5px] font-semibold text-fg">{p.name}</span>
-        {p.account && <span className="flex-none text-[11.5px] text-muted-3">{p.account}</span>}
+        <span className="text-base font-semibold text-fg">{p.name}</span>
+        {p.account && <span className="flex-none text-sm text-muted-3">{p.account}</span>}
         {/* Titled as well as shown: a reason can be longer than the column (an
             HTTP code, a transport error), and truncating away the one actionable
             part of an empty row is how this went unexplained. Say why when the
             provider told us; "No usage data" alone leaves the user with nothing
             to do about it. */}
         {empty && (
-          <span className="min-w-0 truncate text-[11px] text-muted-4" title={p.note ?? undefined}>
+          <span className="min-w-0 truncate text-xs text-muted-4" title={p.note ?? undefined}>
             {p.signedOut ? "Signed out" : (p.note ?? "No usage data")}
           </span>
         )}
         {p.choosable ? (
-          <span className="ml-auto flex flex-none items-center gap-1.5 text-[11px] text-muted-3">
+          <span className="ml-auto flex flex-none items-center gap-1.5 text-xs text-muted-3">
             {mostRoom && <span>most room</span>}
             {p.current && (
               <>
@@ -427,7 +427,7 @@ function PanelLink({ label, onClick }: { label: string; onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] text-fg-2 hover:bg-hover"
+      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-base text-fg-2 hover:bg-hover"
     >
       <span className="flex-1">{label}</span>
       <ChevronRightIcon size={12} className="flex-none text-muted-4" />
@@ -476,10 +476,10 @@ function UsagePanel({
   return (
     <div className="flex flex-col">
       <div className="flex items-center gap-2 px-3 pt-2.5 pb-1.5">
-        <span className="text-[13px] font-semibold text-fg">Usage</span>
+        <span className="text-base font-semibold text-fg">Usage</span>
         {/* The scope note has to follow what is actually below it: with nothing
             connected this panel really is only the agents. */}
-        <span className="ml-auto text-[11px] text-muted-4">
+        <span className="ml-auto text-xs text-muted-4">
           {services.length > 0 ? "agents & services" : "all agents"}
         </span>
         <button
@@ -512,7 +512,7 @@ function UsagePanel({
       {/* The capture note explains the Claude row above it, so it stays next to
           it — the services follow. */}
       {offerCapture && (
-        <div className="border-t border-line px-3 py-2 text-[11px] leading-[1.45] text-muted-3">
+        <div className="border-t border-line px-3 py-2 text-xs leading-[1.45] text-muted-3">
           Claude reports its limits through the status line, so only sessions started from santree
           count until you{" "}
           <button

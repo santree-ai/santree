@@ -47,7 +47,7 @@ function ProviderChip({ group }: { group: AgentGroup }) {
       </span>
       {/* One agent is what a single mark already says; the number earns its
           space only from two. */}
-      {count > 1 && <span className="text-[10px] text-muted-2 tabular-nums">{count}</span>}
+      {count > 1 && <span className="text-2xs text-muted-2 tabular-nums">{count}</span>}
     </span>
   );
 }
@@ -88,7 +88,7 @@ export function AgentSummaryRow({
       style={{ paddingLeft: indent }}
     >
       {expanded ? (
-        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-muted-2">
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted-2">
           {agents.length} agents
         </span>
       ) : (
@@ -99,7 +99,7 @@ export function AgentSummaryRow({
           {/* The providers that didn't fit, as agents — a "+2" beside two chips
               means two more sessions, not two more tools. */}
           {hiddenAgents > 0 && (
-            <span className="flex-none text-[10px] text-muted-4 tabular-nums">+{hiddenAgents}</span>
+            <span className="flex-none text-2xs text-muted-4 tabular-nums">+{hiddenAgents}</span>
           )}
         </span>
       )}

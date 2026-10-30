@@ -36,7 +36,7 @@ export function primaryPr<T extends Pr>(prs: T[]): T | undefined {
 
 /** Shared size/type styling for the single chip and the multi-PR summary — only
  *  the color (via {@link Pill}) and gap differ between them. */
-const PILL_CLASS = "gap-1 px-[5px] py-px font-mono text-[9px] font-semibold tracking-wide";
+const PILL_CLASS = "gap-1 px-[5px] py-px text-2xs font-semibold tracking-wide tabular-nums";
 
 /** Whether the chip is clickable. `false` renders the identical pill as a plain
  *  `<span>` — for callers whose whole row is already one button (the Agents
@@ -93,7 +93,7 @@ export function PrChips({ prs, interactive = true }: { prs: Pr[] } & Interactive
           Hidden with opacity — not `invisible` — because visibility:hidden makes
           the chips unfocusable, which would make focus-within (the only keyboard
           way in: Tab onto a chip → the list appears) impossible to ever trigger. */}
-      <span className="pointer-events-none absolute top-full right-0 z-50 flex flex-col items-end gap-1 rounded-lg border border-line-3 bg-raised p-1.5 opacity-0 shadow-lg group-focus-within/prs:pointer-events-auto group-focus-within/prs:opacity-100 group-hover/prs:pointer-events-auto group-hover/prs:opacity-100">
+      <span className="pointer-events-none absolute top-full right-0 z-50 flex flex-col items-end gap-1 rounded-lg border border-line-2 bg-popover p-1.5 opacity-0 shadow-popover group-focus-within/prs:pointer-events-auto group-focus-within/prs:opacity-100 group-hover/prs:pointer-events-auto group-hover/prs:opacity-100">
         {prs.map((p) => (
           <PrChip key={p.number} {...p} interactive={interactive} />
         ))}

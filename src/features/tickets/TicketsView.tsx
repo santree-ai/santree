@@ -116,7 +116,7 @@ function TeamMenu({
           onClick={toggle}
           aria-label={`Teams: ${label}`}
           title="Which teams' tickets to show"
-          className="flex h-6 max-w-48 flex-none cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 text-[11px] whitespace-nowrap text-fg-2 transition-colors hover:border-line-strong"
+          className="flex h-6 max-w-48 flex-none cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 text-xs whitespace-nowrap text-fg-2 transition-colors hover:border-line-strong"
         >
           <span className="min-w-0 truncate">{label}</span>
           <ChevronDownIcon size={9} className="flex-none text-muted-3" />
@@ -141,7 +141,7 @@ function TeamMenu({
               {all && <CheckIcon size={11} />}
             </span>
             <span className={`min-w-0 flex-1 truncate ${all ? "text-fg" : ""}`}>All teams</span>
-            <span className="font-mono text-[10px] text-muted-4 tabular-nums">
+            <span className="text-2xs text-muted-4 tabular-nums">
               {teams.reduce((sum, t) => sum + t.count, 0)}
             </span>
           </button>
@@ -163,9 +163,7 @@ function TeamMenu({
                 <span className={`min-w-0 flex-1 truncate ${checked ? "text-fg" : ""}`}>
                   {team.name ?? team.key}
                 </span>
-                <span className="font-mono text-[10px] text-muted-4 tabular-nums">
-                  {team.count}
-                </span>
+                <span className="text-2xs text-muted-4 tabular-nums">{team.count}</span>
               </button>
             );
           })}
@@ -203,7 +201,7 @@ function SourceMenu({
           onClick={toggle}
           aria-label={`Source: ${label}`}
           title="Which connection's tickets to show"
-          className="flex h-6 max-w-56 flex-none cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 text-[11px] whitespace-nowrap text-fg-2 transition-colors hover:border-line-strong"
+          className="flex h-6 max-w-56 flex-none cursor-pointer items-center gap-1.5 rounded-md border border-line-2 bg-input px-2 text-xs whitespace-nowrap text-fg-2 transition-colors hover:border-line-strong"
         >
           {current && <TrackerLogo provider={current.provider} size={10} />}
           <span className="min-w-0 truncate">{label}</span>
@@ -235,7 +233,7 @@ function SourceMenu({
                   <span className={`min-w-0 flex-1 truncate ${checked ? "text-fg" : ""}`}>
                     {source.label}
                   </span>
-                  <span className="font-mono text-[10px] text-muted-4 tabular-nums">
+                  <span className="text-2xs text-muted-4 tabular-nums">
                     {source.count ?? sources.reduce((sum, s) => sum + s.count, 0)}
                   </span>
                 </button>
@@ -256,7 +254,7 @@ function UnlinkedNotice() {
   const navigate = useNavigate();
   if (unlinked.length === 0) return null;
   return (
-    <div className="flex flex-none items-center gap-2 border-b border-line bg-deep px-3 py-1.5 text-[11.5px] text-muted-3">
+    <div className="flex flex-none items-center gap-2 border-b border-line bg-deep px-3 py-1.5 text-sm text-muted-3">
       <span className="min-w-0 truncate">
         {unlinked.map((c) => c.label).join(", ")} {unlinked.length === 1 ? "has" : "have"} no
         project linked, so no tickets show here.
@@ -289,7 +287,7 @@ function ActionableSwitch({ on, onToggle }: { on: boolean; onToggle: () => void 
           ? "Showing only tickets you can act on (⌘⇧.). Turn off to reveal blockers owned by others or already done."
           : "Showing all related tickets (⌘⇧.). Turn on to hide the non-actionable ones."
       }
-      className={`flex h-6 flex-none cursor-pointer items-center gap-2 rounded-md border border-line-2 bg-input pr-1.5 pl-2.5 text-[11px] whitespace-nowrap transition-colors hover:border-line-strong ${
+      className={`flex h-6 flex-none cursor-pointer items-center gap-2 rounded-md border border-line-2 bg-input pr-1.5 pl-2.5 text-xs whitespace-nowrap transition-colors hover:border-line-strong ${
         on ? "text-fg-2" : "text-muted-2"
       }`}
     >
@@ -328,7 +326,7 @@ function SelectReadyButton() {
     >
       <Dot color={successColor} size={5} />
       Select Ready
-      <span className="font-mono text-[10px] tabular-nums opacity-70">{readyIds.length}</span>
+      <span className="text-2xs tabular-nums opacity-70">{readyIds.length}</span>
     </Button>
   );
 }
@@ -430,10 +428,10 @@ function TicketsPage({
           data-tauri-drag-region
           className={`flex ${CHROME.subBar} flex-none items-center gap-2.5 border-b border-line bg-deep pr-2 pl-3`}
         >
-          <span className="flex-none text-[13px] font-semibold text-fg">Tickets</span>
+          <span className="flex-none text-base font-semibold text-fg">Tickets</span>
           <SourceMenu sources={sources} picked={source} onChange={onSource} />
           <TeamMenu teams={teams} picked={picked} onChange={onTeams} />
-          <span className="min-w-0 truncate text-[11px] text-muted-4">{summaryLine(summary)}</span>
+          <span className="min-w-0 truncate text-xs text-muted-4">{summaryLine(summary)}</span>
           <div className="ml-auto flex flex-none items-center gap-2">
             <SelectReadyButton />
             <ActionableSwitch on={actionableOnly} onToggle={onToggleActionable} />

@@ -163,7 +163,7 @@ export function AiReviewSessionPane({
         subtitle={
           <>
             Its drafts and brief for{" "}
-            <span className="font-mono text-fg-3">
+            <span className="text-fg-3 tabular-nums">
               {pr.repo}#{pr.number}
             </span>{" "}
             are saved. Pick the session back up to revise them.
@@ -193,8 +193,8 @@ export function AiReviewSessionPane({
         ) : launch.isError ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
             <WarningIcon size={16} className="text-status-amber" />
-            <span className="text-[12px] text-fg-2">Couldn't start the AI review</span>
-            <span className="max-w-md text-[11px] leading-[1.5] text-muted-3">
+            <span className="text-sm text-fg-2">Couldn't start the AI review</span>
+            <span className="max-w-md text-xs leading-[1.5] text-muted-3">
               {launch.error instanceof Error ? launch.error.message : "Something went wrong."}
             </span>
             <Button size="sm" variant="ghost" onClick={() => void launch.refetch()}>
@@ -252,7 +252,7 @@ function AiReviewFooter({
             type="button"
             onClick={onShowDrafts}
             title="Show the drafts in the diff, where you can edit and send them"
-            className="flex flex-none cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] text-muted-2 transition-colors hover:bg-hover hover:text-fg-2"
+            className="flex flex-none cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-2 transition-colors hover:bg-hover hover:text-fg-2"
           >
             <AgentIcon kind={agentKind} size={10} />
             {count} draft{count === 1 ? "" : "s"}

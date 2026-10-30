@@ -199,8 +199,8 @@ function AppTriagePanel() {
     <div className="space-y-3.5">
       <div className="flex items-center gap-[13px] rounded-xl border border-line-2 bg-raised p-4">
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-fg-bright">Enable Triage</div>
-          <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+          <div className="text-base font-semibold text-fg-bright">Enable Triage</div>
+          <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">
             {linear
               ? "Show the Triage section in the sidebar and pull your tracker's issues into it."
               : "Connect Linear or Jira first (Settings → Integrations) to enable triage."}
@@ -229,9 +229,7 @@ function AppTriagePanel() {
         aria-disabled={!enabled}
       >
         <div>
-          <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
-            Project
-          </div>
+          <div className="mb-2 px-1 text-2xs text-muted-4">Project</div>
           <DefaultProjectField
             settingKey={TRIAGE_DEFAULT_REPO_KEY}
             hint="Where investigations and terminals run unless a ticket picks its own. Also the Linear workspace the triage queue is read from."
@@ -239,15 +237,11 @@ function AppTriagePanel() {
           />
         </div>
         <div>
-          <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
-            Teams
-          </div>
+          <div className="mb-2 px-1 text-2xs text-muted-4">Teams</div>
           <TriageTeamsCard disabled={!enabled} />
         </div>
         <div>
-          <div className="mb-2 px-1 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase">
-            Investigation
-          </div>
+          <div className="mb-2 px-1 text-2xs text-muted-4">Investigation</div>
           <div className="space-y-3.5">
             <ActionConfig descriptor={INVESTIGATE} disabled={!enabled} />
           </div>
@@ -289,7 +283,7 @@ function TriageTeamsCard({ disabled }: { disabled: boolean }) {
   return (
     <div className="space-y-3.5">
       {memberTeamsOnly && (
-        <p className="rounded-xl border border-line-2 bg-raised px-4 py-3 text-[11.5px] leading-[1.5] text-muted-3">
+        <p className="rounded-xl border border-line-2 bg-raised px-4 py-3 text-sm leading-[1.5] text-muted-3">
           This workspace is connected through Linear's MCP server, so Triage shows the triage
           inboxes of the teams you are a member of. The rules and “Always show” don't apply there;
           “Never show” still hides a team.
@@ -373,10 +367,10 @@ function TeamListRow({
   return (
     <div className="flex items-start gap-4 border-t border-line px-4 py-3 first:border-t-0">
       <div className="min-w-0 flex-none basis-40">
-        <div id={labelId} className="mb-[3px] text-[12.5px] font-medium text-fg-3">
+        <div id={labelId} className="mb-[3px] text-base font-medium text-fg-3">
           {label}
         </div>
-        <div className="text-[11.5px] text-muted-3">{hint}</div>
+        <div className="text-sm text-muted-3">{hint}</div>
       </div>
       {/* biome-ignore lint/a11y/useSemanticElements: a fieldset's own box breaks the row's flex layout; the role is all this needs. */}
       <div
@@ -384,11 +378,11 @@ function TeamListRow({
         aria-labelledby={labelId}
         className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5"
       >
-        {keys.length === 0 && <span className="text-[11.5px] text-muted-4">None</span>}
+        {keys.length === 0 && <span className="text-sm text-muted-4">None</span>}
         {keys.map((key) => (
           <span
             key={key}
-            className="flex h-6 items-center gap-1 rounded-md border border-line-2 bg-input pr-1 pl-2 text-[11.5px] text-fg-2"
+            className="flex h-6 items-center gap-1 rounded-md border border-line-2 bg-input pr-1 pl-2 text-sm text-fg-2"
             title={key}
           >
             <span className="max-w-40 truncate">{nameOf(key)}</span>
@@ -458,7 +452,7 @@ function TeamPicker({
           disabled={disabled}
           onClick={toggleMenu}
           aria-label={`Add a team to ${label}`}
-          className="flex h-6 cursor-pointer items-center gap-1 rounded-md border border-dashed border-line-3 px-2 text-[11.5px] text-muted-3 transition-colors hover:border-line-strong hover:text-fg-2 disabled:cursor-default disabled:opacity-50"
+          className="flex h-6 cursor-pointer items-center gap-1 rounded-md border border-dashed border-line-3 px-2 text-sm text-muted-3 transition-colors hover:border-line-strong hover:text-fg-2 disabled:cursor-default disabled:opacity-50"
         >
           <PlusIcon size={10} />
           Add team
@@ -476,12 +470,12 @@ function TeamPicker({
               placeholder="Filter teams"
               aria-label={`Filter teams for ${label}`}
               spellCheck={false}
-              className="w-full rounded bg-input px-2 py-1 text-[12px] text-fg-2 placeholder:text-muted-4"
+              className="w-full rounded bg-input px-2 py-1 text-sm text-fg-2 placeholder:text-muted-4"
             />
           </div>
           <div className="max-h-64 overflow-y-auto py-1">
             {matches.length === 0 && (
-              <div className="px-3 py-2 text-[11.5px] text-muted-4">
+              <div className="px-3 py-2 text-sm text-muted-4">
                 {teams.length === 0 ? "No teams. Connect Linear first." : "No team matches."}
               </div>
             )}
@@ -502,9 +496,9 @@ function TeamPicker({
                   <span className="flex min-w-0 flex-col">
                     <span className={checked ? "text-fg" : undefined}>
                       {team.name}{" "}
-                      <span className="font-mono text-[10px] text-muted-4">{team.key}</span>
+                      <span className="text-2xs text-muted-4 tabular-nums">{team.key}</span>
                     </span>
-                    <span className="text-[11px] text-muted-3">{teamFacts(team)}</span>
+                    <span className="text-xs text-muted-3">{teamFacts(team)}</span>
                   </span>
                 </button>
               );
@@ -746,8 +740,8 @@ function ActionConfig({
       {headlessProfiles.length > 0 && (
         <div className="rounded-xl border border-line-2 bg-raised px-4 py-0.5">
           <div className="pt-2.5 pb-3">
-            <div className="text-[13px] font-semibold text-fg-bright">Agent assignments</div>
-            <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+            <div className="text-base font-semibold text-fg-bright">Agent assignments</div>
+            <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">
               Choose which configured provider performs each job.
             </div>
           </div>

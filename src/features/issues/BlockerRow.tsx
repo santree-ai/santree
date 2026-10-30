@@ -84,15 +84,15 @@ export const BlockerRow = memo(function BlockerRow({
         style={grayed ? { borderStyle: "dashed" } : undefined}
       >
         <span className="h-2 w-2 flex-none rounded-full" style={{ background: color }} />
-        <span className="flex-none font-mono text-[10.5px] text-muted-2">{ticketHandle(id)}</span>
+        <span className="flex-none text-xs text-muted-2 tabular-nums">{ticketHandle(id)}</span>
         <MarkdownTitle
-          className={`min-w-0 flex-1 truncate text-[11.5px] ${grayed ? "text-muted-3" : "text-fg-3"}`}
+          className={`min-w-0 flex-1 truncate text-sm ${grayed ? "text-muted-3" : "text-fg-3"}`}
         >
           {title || ticketHandle(id)}
         </MarkdownTitle>
         {assignee && <Avatar name={assignee} src={assigneeAvatar} size={16} />}
         {foreignProject && (
-          <span className="flex-none truncate rounded border border-cross/40 bg-cross/[0.08] px-[5px] py-px font-mono text-[8.5px] text-cross">
+          <span className="flex-none truncate rounded border border-cross/40 bg-cross/[0.08] px-[5px] py-px text-2xs text-cross">
             ↗ {foreignProject}
           </span>
         )}
@@ -111,17 +111,17 @@ export const BlockerRow = memo(function BlockerRow({
             onMouseEnter={openCard}
             onMouseLeave={scheduleClose}
             style={{ position: "fixed", top: coords.top, right: coords.right }}
-            className="z-[100] w-72 rounded-xl border border-line-2 bg-popover p-3 shadow-xl"
+            className="z-[100] w-72 rounded-xl border border-line-2 bg-popover p-3 shadow-popover"
           >
             <div className="mb-2 flex items-center gap-2">
-              <span className="font-mono text-[10.5px] text-muted-2">{ticketHandle(id)}</span>
-              <Pill color={color} className="px-1.5 py-px text-[10px] font-medium">
+              <span className="text-xs text-muted-2 tabular-nums">{ticketHandle(id)}</span>
+              <Pill color={color} className="px-1.5 py-px text-2xs font-medium">
                 {state}
               </Pill>
-              {grayed && <span className="text-[10px] text-muted-4">not yours</span>}
+              {grayed && <span className="text-2xs text-muted-4">not yours</span>}
             </div>
 
-            <MarkdownTitle className="block text-[12.5px] leading-[1.35] font-medium text-fg-bright">
+            <MarkdownTitle className="block text-base leading-[1.35] font-medium text-fg-bright">
               {title || ticketHandle(id)}
             </MarkdownTitle>
 
@@ -129,15 +129,13 @@ export const BlockerRow = memo(function BlockerRow({
               {assignee ? (
                 <>
                   <Avatar name={assignee} src={assigneeAvatar} size={18} />
-                  <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-2">
-                    {assignee}
-                  </span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-muted-2">{assignee}</span>
                 </>
               ) : (
-                <span className="flex-1 text-[11px] text-muted-4 italic">Unassigned</span>
+                <span className="flex-1 text-xs text-muted-4 italic">Unassigned</span>
               )}
               {foreignProject && (
-                <span className="flex-none truncate rounded border border-cross/40 bg-cross/[0.08] px-[5px] py-px font-mono text-[9px] text-cross">
+                <span className="flex-none truncate rounded border border-cross/40 bg-cross/[0.08] px-[5px] py-px text-2xs text-cross">
                   ↗ {foreignProject}
                 </span>
               )}

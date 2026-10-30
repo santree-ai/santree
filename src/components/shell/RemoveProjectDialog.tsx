@@ -34,9 +34,9 @@ export function RemoveProjectDialog({
       confirmLabel="Remove"
       message={
         <>
-          Remove <span className="font-mono text-fg-2">{repo}</span> from santree? Its settings,
-          tabs and saved sessions here are forgotten. Files on disk are kept: the repository, its
-          worktrees and its <span className="font-mono text-fg-2">.santree</span> folder.
+          Remove <span className="text-fg-2">{repo}</span> from santree? Its settings, tabs and
+          saved sessions here are forgotten. Files on disk are kept: the repository, its worktrees
+          and its <span className="font-mono text-fg-2">.santree</span> folder.
         </>
       }
       onConfirm={() => {

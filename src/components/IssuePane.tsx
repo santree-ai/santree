@@ -81,7 +81,7 @@ export function IssuePane({
     <div className="flex min-h-0 flex-1 flex-col bg-app">
       <div className="flex-none border-b border-hairline px-3 pt-3 pb-3">
         <div className="mb-1.5 flex items-center gap-2">
-          <span className="font-mono text-[11px] text-muted-2">{ticketHandle(ticketId)}</span>
+          <span className="text-xs text-muted-2 tabular-nums">{ticketHandle(ticketId)}</span>
           {/* Both signals, because they answer different questions and the union
               is cheap: the dot's colour is the ticket's *priority* (how much it
               matters) and the label beside it is its workflow *state* (how far it
@@ -89,7 +89,7 @@ export function IssuePane({
               says nothing about whether it is already in review, and "In Review"
               nothing about whether it should have shipped last week. */}
           {ready && (
-            <span className="flex items-center gap-1.5 text-[11px] text-muted-2">
+            <span className="flex items-center gap-1.5 text-xs text-muted-2">
               <Dot color={priorityColor[ready.priority]} size={7} />
               {ready.state}
             </span>
@@ -116,7 +116,7 @@ export function IssuePane({
             )}
           </div>
         </div>
-        <MarkdownTitle className="block text-[13.5px] leading-[1.35] font-semibold text-fg-bright">
+        <MarkdownTitle className="block text-md leading-[1.35] font-semibold text-fg-bright">
           {ready?.title ?? fallbackTitle ?? ticketId}
         </MarkdownTitle>
         {ready && <IssueMeta detail={ready} dense className="mt-2" />}

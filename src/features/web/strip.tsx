@@ -46,7 +46,7 @@ export function WebMenuRow({
     >
       <GlobeIcon />
       Web
-      <span className="ml-auto text-[10px] text-muted-4">{digit}</span>
+      <span className="ml-auto text-2xs text-muted-4">{digit}</span>
     </button>
   );
 }

@@ -272,7 +272,7 @@ function OverflowTabsMenu<T extends string>({
           onClick={toggle}
           title={label}
           aria-label={label}
-          className="flex h-full cursor-pointer items-center gap-0.5 border-r border-line px-1.5 text-[11px] font-medium text-muted-2 hover:bg-hover hover:text-fg-2"
+          className="flex h-full cursor-pointer items-center gap-0.5 border-r border-line px-1.5 text-xs font-medium text-muted-2 hover:bg-hover hover:text-fg-2"
         >
           {tabs.length}
           <ChevronDownIcon size={11} />
@@ -398,7 +398,7 @@ function Tab<T extends string>({
     <div
       role="presentation"
       data-split-tab={tab}
-      className={`flex items-stretch border-r border-line text-[11.5px] font-medium ${
+      className={`flex items-stretch border-r border-line text-sm font-medium ${
         faded ? "opacity-40" : ""
       }`}
       // The floor and the cap the strip is fitted to (see `fitTabs`): a tab
@@ -459,7 +459,7 @@ function Tab<T extends string>({
             onClick={onClose}
             title="Close"
             aria-label={`Close ${label}`}
-            className="flex h-4 w-4 cursor-pointer items-center justify-center rounded text-[13px] leading-none text-muted-3 hover:bg-hover hover:text-fg-2"
+            className="flex h-4 w-4 cursor-pointer items-center justify-center rounded text-base leading-none text-muted-3 hover:bg-hover hover:text-fg-2"
           >
             <CloseIcon size={10} />
           </button>
@@ -509,7 +509,7 @@ function RenameInput({
       }}
       onBlur={() => finish(value.trim() || null)}
       aria-label="Tab name"
-      className="my-1 ml-2 rounded border border-line bg-app px-1.5 text-[11.5px] text-fg-2 outline-none focus-visible:border-accent"
+      className="my-1 ml-2 rounded border border-line bg-app px-1.5 text-sm text-fg-2 outline-none focus-visible:border-accent"
       style={{ width: `${Math.min(Math.max(value.length + 3, 10), 32)}ch` }}
     />
   );

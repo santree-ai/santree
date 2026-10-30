@@ -103,7 +103,7 @@ function ClaudeUsagePanel() {
           <PeriodCards data={data} />
           <ByModelCard models={data.byModel} />
           <SessionsCard sessions={data.sessions} />
-          <p className="px-1 text-[11px] leading-[1.5] text-muted-4">
+          <p className="px-1 text-xs leading-[1.5] text-muted-4">
             Token counts are exact, read from Claude's local session transcripts. Costs are
             estimated from published API prices (refreshed daily) and are approximate.
           </p>
@@ -171,7 +171,7 @@ function CodexUsagePanel() {
   return (
     <div className="flex flex-col gap-4">
       <Card title="Account">
-        <div className="grid grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-[12px]">
+        <div className="grid grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-sm">
           <span className="text-muted-3">Signed in with</span>
           <span className="text-fg-2">{account.data.authType || "Codex CLI"}</span>
           <span className="text-muted-3">Plan</span>
@@ -179,7 +179,7 @@ function CodexUsagePanel() {
         </div>
       </Card>
       <Card title="Rate limits">
-        <div className="flex flex-col gap-2 text-[12px]">
+        <div className="flex flex-col gap-2 text-sm">
           <div className="grid grid-cols-[7rem_1fr] gap-x-4">
             <span className="text-muted-3">Primary</span>
             <span className="text-fg-2">{formatCodexWindow(defaultLimits?.primary ?? null)}</span>
@@ -190,7 +190,7 @@ function CodexUsagePanel() {
           </div>
         </div>
       </Card>
-      <p className="px-1 text-[11px] leading-[1.5] text-muted-4">
+      <p className="px-1 text-xs leading-[1.5] text-muted-4">
         These are the windows Codex recorded on its last turn, read back from its own session
         history — they don't move until you run Codex again. Codex exposes no live usage source that
         doesn't require its credentials, and Santree never handles those. There is no durable
@@ -214,14 +214,14 @@ function UsageLoading({ progress }: { progress: { done: number; total: number } 
   const pct = Math.min(100, (progress.done / progress.total) * 100);
   return (
     <div className="flex flex-col items-center gap-2.5 py-12">
-      <div className="text-[12.5px] text-muted-2">Reading transcripts…</div>
+      <div className="text-base text-muted-2">Reading transcripts…</div>
       <div className="h-1.5 w-56 overflow-hidden rounded-full bg-surface">
         <div
           className="h-full rounded-full transition-[width] duration-150"
           style={{ width: `${pct}%`, background: "var(--accent)" }}
         />
       </div>
-      <div className="text-[11px] tabular-nums text-muted-4">
+      <div className="text-xs tabular-nums text-muted-4">
         {progress.done} / {progress.total}
       </div>
     </div>
@@ -232,7 +232,7 @@ function UsageLoading({ progress }: { progress: { done: number; total: number } 
 function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="rounded-xl border border-line-2 bg-raised px-4 py-3.5">
-      <div className="mb-3 text-[12px] font-medium text-muted-2">{title}</div>
+      <div className="mb-3 text-sm font-medium text-muted-2">{title}</div>
       {children}
     </div>
   );
@@ -253,11 +253,11 @@ function PeriodCards({
     <div className="grid grid-cols-3 gap-3">
       {tiles.map(([label, t]) => (
         <div key={label} className="rounded-xl border border-line-2 bg-raised px-4 py-3.5">
-          <div className="text-[11.5px] text-muted-3">{label}</div>
-          <div className="mt-1 text-[22px] font-semibold leading-none text-fg-bright tabular-nums">
+          <div className="text-sm text-muted-3">{label}</div>
+          <div className="mt-1 text-2xl font-semibold leading-none text-fg-bright tabular-nums">
             {formatCompact(workTokens(t))}
           </div>
-          <div className="mt-1.5 text-[11.5px] text-muted-3">
+          <div className="mt-1.5 text-sm text-muted-3">
             <span className="text-fg-3">{formatUsd(t.costUsd)}</span> · tokens
           </div>
         </div>
@@ -310,7 +310,7 @@ function shade(color: string, i: number): string {
 function ModelBar({ f, max }: { f: Family; max: number }) {
   return (
     <div className="flex items-center gap-3">
-      <div className="w-16 flex-none text-[12px] font-medium text-fg-3">{f.label}</div>
+      <div className="w-16 flex-none text-sm font-medium text-fg-3">{f.label}</div>
       <div className="group relative flex-1">
         <div className="h-2.5 overflow-hidden rounded-full bg-surface">
           <div
@@ -332,10 +332,10 @@ function ModelBar({ f, max }: { f: Family; max: number }) {
           </div>
         </div>
         {/* Hover tooltip over the whole bar — lists each version with its swatch. */}
-        <div className="pointer-events-none absolute bottom-full left-0 z-20 mb-1.5 hidden min-w-max rounded-lg border border-line-2 bg-raised px-2.5 py-1.5 shadow-lg group-hover:block">
+        <div className="pointer-events-none absolute bottom-full left-0 z-20 mb-1.5 hidden min-w-max rounded-lg border border-line-2 bg-popover px-2.5 py-1.5 shadow-popover group-hover:block">
           <div className="flex flex-col gap-1">
             {f.versions.map((v, i) => (
-              <div key={v.model} className="flex items-center gap-2 text-[11px]">
+              <div key={v.model} className="flex items-center gap-2 text-xs">
                 <span
                   className="h-2 w-2 flex-none rounded-full"
                   style={{ background: shade(f.color, i) }}
@@ -349,7 +349,7 @@ function ModelBar({ f, max }: { f: Family; max: number }) {
           </div>
         </div>
       </div>
-      <div className="w-28 flex-none text-right text-[11.5px] tabular-nums text-muted-2">
+      <div className="w-28 flex-none text-right text-sm tabular-nums text-muted-2">
         {formatCompact(f.tokens)}
         <span className="text-muted-4"> · {formatUsd(f.cost)}</span>
       </div>
@@ -489,10 +489,10 @@ function GroupSummary({
 }) {
   return (
     <>
-      <span className="flex-none rounded bg-surface px-1.5 py-px text-[10px] tabular-nums text-muted-3">
+      <span className="flex-none rounded bg-surface px-1.5 py-px text-2xs tabular-nums text-muted-3">
         {count}
       </span>
-      <span className="ml-auto flex-none pl-3 text-[11px] tabular-nums text-muted-3">
+      <span className="ml-auto flex-none pl-3 text-xs tabular-nums text-muted-3">
         {formatCompact(tokens)} · {formatUsd(cost)}
         {lastMs > 0 && ` · ${formatRelativeTime(lastMs, now)}`}
       </span>
@@ -524,7 +524,7 @@ function GroupHeader({
         <ChevronRightIcon size={11} />
       </span>
       <span
-        className={`truncate ${strong ? "text-[12.5px] font-medium text-fg-2" : "text-[12px] text-fg-3"}`}
+        className={`truncate ${strong ? "text-base font-medium text-fg-2" : "text-sm text-fg-3"}`}
       >
         {label}
       </span>
@@ -660,9 +660,9 @@ function SessionRow({ s, now, current }: { s: SessionUsage; now: number; current
     <div className="flex items-center gap-3 border-t border-line py-2 first:border-t-0">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="truncate text-[12px] text-fg-3">{label}</span>
+          <span className="truncate text-sm text-fg-3">{label}</span>
           {current && (
-            <span className="flex-none rounded bg-surface px-1 py-px text-[9.5px] uppercase tracking-wide text-muted-3">
+            <span className="flex-none rounded bg-surface px-1 py-px text-2xs text-muted-3">
               current
             </span>
           )}
@@ -672,8 +672,8 @@ function SessionRow({ s, now, current }: { s: SessionUsage; now: number; current
       {/* Total spent this session (all turns, cumulative — unaffected by compaction),
           with its cost. Distinct from the context-fill bar, which is live headroom. */}
       <div className="w-28 flex-none text-right tabular-nums">
-        <div className="text-[11.5px] text-fg-3">{formatCompact(workTokens(s.totals))}</div>
-        <div className="text-[10.5px] text-muted-4">{formatUsd(s.totals.costUsd)}</div>
+        <div className="text-sm text-fg-3">{formatCompact(workTokens(s.totals))}</div>
+        <div className="text-xs text-muted-4">{formatUsd(s.totals.costUsd)}</div>
       </div>
     </div>
   );
@@ -715,17 +715,17 @@ function SessionMeter({ s }: { s: SessionUsage }) {
           ))}
         </div>
       </div>
-      <span className="flex-none text-[10px] tabular-nums text-muted-4">
+      <span className="flex-none text-2xs tabular-nums text-muted-4">
         {formatCompact(s.contextTokens ?? 0)} / {formatCompact(limit)}
       </span>
-      <div className="pointer-events-none absolute left-0 top-full z-20 mt-1 hidden min-w-max rounded-lg border border-line-2 bg-raised px-2.5 py-1.5 shadow-lg group-hover:block">
+      <div className="pointer-events-none absolute left-0 top-full z-20 mt-1 hidden min-w-max rounded-lg border border-line-2 bg-popover px-2.5 py-1.5 shadow-popover group-hover:block">
         <div className="flex flex-col gap-1">
-          <div className="mb-0.5 flex items-center gap-3 border-b border-line pb-1 text-[10px] text-muted-4">
-            <span className="uppercase tracking-wide">Session</span>
+          <div className="mb-0.5 flex items-center gap-3 border-b border-line pb-1 text-2xs text-muted-4">
+            <span className="text-xs font-semibold">Session</span>
             <span className="ml-auto font-mono text-muted-3">{s.sessionId}</span>
           </div>
           {models.map((m) => (
-            <div key={m.model} className="flex items-center gap-2 text-[11px]">
+            <div key={m.model} className="flex items-center gap-2 text-xs">
               <span
                 className="h-2 w-2 flex-none rounded-full"
                 style={{ background: modelMeta(m.model).color }}
@@ -742,7 +742,7 @@ function SessionMeter({ s }: { s: SessionUsage }) {
             {classes.map(([label, value, isRead]) => (
               <div
                 key={label}
-                className={`flex items-center gap-3 text-[10.5px] ${
+                className={`flex items-center gap-3 text-xs ${
                   isRead ? "text-muted-4" : "text-muted-3"
                 }`}
               >

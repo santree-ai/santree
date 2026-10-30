@@ -53,7 +53,7 @@ export function RotationDialog({
         role="dialog"
         aria-modal
         aria-labelledby={titleId}
-        className="relative flex w-[380px] max-w-full flex-col rounded-xl border border-line-3 bg-panel shadow-2xl"
+        className="relative flex w-[380px] max-w-full flex-col rounded-2xl border border-line-2 bg-popover shadow-dialog"
         style={{ animation: "toastIn .16s ease-out" }}
       >
         <div className="flex items-start gap-3 px-4 pt-4 pb-3">
@@ -62,18 +62,18 @@ export function RotationDialog({
           ) : (
             <span
               aria-hidden
-              className="flex size-8 flex-none items-center justify-center rounded-full border border-line-strong font-mono text-[12px] text-muted-4"
+              className="flex size-8 flex-none items-center justify-center rounded-full border border-line-strong text-sm text-muted-4"
             >
               ?
             </span>
           )}
           <div className="min-w-0 flex-1">
-            <h2 id={titleId} className="truncate text-[13px] font-semibold text-fg-bright">
+            <h2 id={titleId} className="truncate text-base font-semibold text-fg-bright">
               {title}
             </h2>
-            <div className="mt-0.5 truncate text-[11.5px] text-muted-3">
+            <div className="mt-0.5 truncate text-sm text-muted-3">
               {schedule.scheduleName}
-              {current && <span className="font-mono"> · {rangeOf(current)}</span>}
+              {current && <span> · {rangeOf(current)}</span>}
             </div>
           </div>
           <button
@@ -98,7 +98,7 @@ export function RotationDialog({
             >
               <Avatar name={shift.name} src={shift.avatarUrl} size={18} />
               <span
-                className="min-w-0 flex-1 truncate text-[12px]"
+                className="min-w-0 flex-1 truncate text-sm"
                 style={{ color: shift.isMe ? "var(--accent-text)" : "var(--color-fg-2)" }}
               >
                 {shift.name}
@@ -107,7 +107,7 @@ export function RotationDialog({
               {shift.isCurrent && <span className="tree-tag">now</span>}
               {/* Days in the row; the tooltip says when in the day it changes hands. */}
               <span
-                className="flex-none font-mono text-[10.5px] whitespace-nowrap text-muted-3"
+                className="flex-none text-xs whitespace-nowrap text-muted-3"
                 title={formatShiftTimes(shift.startsAtMs, shift.endsAtMs)}
               >
                 {rangeOf(shift)}

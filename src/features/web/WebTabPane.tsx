@@ -172,7 +172,7 @@ export function WebTabPane({
           onFocus={(e) => e.target.select()}
           onBlur={() => setDraft(null)}
           onKeyDown={onAddressKey}
-          className="selectable mx-1 h-[24px] min-w-0 flex-1 rounded-md border border-line bg-panel px-2 font-mono text-[11.5px] text-fg-2 outline-none placeholder:text-muted-4 focus-visible:border-accent"
+          className="selectable mx-1 h-[24px] min-w-0 flex-1 rounded-md border border-line bg-panel px-2 text-sm text-fg-2 outline-none placeholder:text-muted-4 focus-visible:border-accent"
         />
         <button
           type="button"
@@ -276,8 +276,8 @@ function PageTrouble({
       <span className="text-status-amber">
         <WarningIcon size={18} />
       </span>
-      <div className="text-[13px] font-semibold text-fg-bright">{title}</div>
-      {detail && <div className="max-w-[420px] text-[12px] leading-[1.5] text-fg-3">{detail}</div>}
+      <div className="text-base font-semibold text-fg-bright">{title}</div>
+      {detail && <div className="max-w-[420px] text-sm leading-[1.5] text-fg-3">{detail}</div>}
       <Button size="sm" className="mt-1" disabled={retrying} onClick={onRetry}>
         <RefreshIcon size={10} />
         {retrying ? "Trying again…" : "Try again"}

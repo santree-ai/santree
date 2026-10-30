@@ -36,12 +36,13 @@ export type ButtonVariant = "primary" | "danger" | "tinted" | "outline" | "ghost
 
 export type ButtonSize = "sm" | "md" | "lg";
 
-/** One radius, one type scale — chips are `sm`, standalone actions `md`,
- *  full-width panel CTAs `lg`. */
+/** Fixed heights (24 · 28 · 32) so a button lines up with every other control
+ *  of its size — chips are `sm`, standalone actions `md`, full-width panel CTAs
+ *  `lg`. */
 const BUTTON_SIZE: Record<ButtonSize, string> = {
-  sm: "gap-1.5 rounded-md px-2.5 py-1 text-[11px]",
-  md: "gap-1.5 rounded-md px-3 py-1.5 text-[12px]",
-  lg: "gap-2 rounded-md px-3.5 py-2 text-[12.5px]",
+  sm: "h-6 gap-1.5 rounded-md px-2 text-xs",
+  md: "h-7 gap-1.5 rounded-md px-2.5 text-sm",
+  lg: "h-8 gap-2 rounded-lg px-3.5 text-base",
 };
 
 /** Class + style per variant. Every variant carries a border (transparent when
@@ -49,11 +50,11 @@ const BUTTON_SIZE: Record<ButtonSize, string> = {
  *  colors never rely on utility-order tiebreaks. */
 const BUTTON_VARIANT: Record<ButtonVariant, { cls: string; style?: CSSProperties }> = {
   primary: {
-    cls: "border-transparent bg-accent-fill font-semibold hover:opacity-90",
+    cls: "border-transparent bg-accent-fill font-semibold hover:brightness-110 disabled:hover:brightness-100",
     style: { color: "var(--on-accent)" },
   },
   danger: {
-    cls: "border-transparent font-semibold hover:opacity-90",
+    cls: "border-transparent font-semibold hover:brightness-110 disabled:hover:brightness-100",
     style: { background: "var(--color-status-red)", color: "var(--on-danger)" },
   },
   tinted: {
@@ -61,10 +62,10 @@ const BUTTON_VARIANT: Record<ButtonVariant, { cls: string; style?: CSSProperties
     style: { background: alpha(11), borderColor: alpha(30), color: "var(--accent-text)" },
   },
   outline: {
-    cls: "border-line-2 bg-input font-medium text-muted-2 hover:border-line-strong hover:text-fg-2",
+    cls: "border-line-2 bg-raised-2 font-medium text-fg-2 hover:border-line-3 hover:bg-hover-2 hover:text-fg",
   },
   ghost: {
-    cls: "border-transparent font-medium text-muted-2 hover:bg-hover hover:text-fg-2",
+    cls: "border-transparent font-medium text-muted hover:bg-hover-2 hover:text-fg",
   },
 };
 
@@ -272,13 +273,11 @@ export function RunningStatus({
       // screen reader learns the wait is still progressing rather than stuck.
       role="status"
       aria-live="polite"
-      className={`flex items-center gap-2 text-[11.5px] text-muted-3 ${className}`}
+      className={`flex items-center gap-2 text-sm text-muted-3 ${className}`}
     >
       <Spinner size={12} />
       <span className="min-w-0 flex-1">{slow ? (slowLabel ?? label) : label}</span>
-      <span className="flex-none font-mono text-[10.5px] text-muted-4 tabular-nums">
-        {formatElapsed(elapsed)}
-      </span>
+      <span className="flex-none text-xs text-muted-4 tabular-nums">{formatElapsed(elapsed)}</span>
     </div>
   );
 }
@@ -315,7 +314,7 @@ export function TerminalActivity({
     <span
       role="status"
       aria-label={label}
-      className={`inline-flex items-center gap-2 font-mono text-[10.5px] text-muted-3 ${className}`}
+      className={`inline-flex items-center gap-2 font-mono text-xs text-muted-3 ${className}`}
     >
       <span className="terminal-activity" aria-hidden />
       <span>{label}</span>
@@ -392,8 +391,8 @@ export function EmptyState({
       className={`flex flex-1 flex-col items-center justify-center gap-1.5 px-6 text-center ${className ?? ""}`}
     >
       {icon}
-      <div className="text-[12.5px] text-muted-2">{title}</div>
-      {subtitle && <div className="text-[11px] leading-[1.5] text-muted-4">{subtitle}</div>}
+      <div className="text-base text-muted-2">{title}</div>
+      {subtitle && <div className="text-xs leading-[1.5] text-muted-4">{subtitle}</div>}
     </div>
   );
 }
@@ -423,9 +422,6 @@ export function SwitchTrack({ on, size = "md" }: { on: boolean; size?: keyof typ
     <span
       aria-hidden
       className="relative block flex-none rounded-full transition-colors duration-150"
-      // The monochrome accent means the on-track is the inversion slab
-      // (--accent-fill), so the knob must invert with it (--on-accent) — a
-      // white knob on the dark theme's white fill is invisible.
       style={{
         width: m.w,
         height: m.h,
@@ -438,8 +434,8 @@ export function SwitchTrack({ on, size = "md" }: { on: boolean; size?: keyof typ
           width: m.knob,
           height: m.knob,
           left: on ? m.w - m.knob - 2 : 2,
-          background: on ? "var(--on-accent)" : "#fff",
-          boxShadow: "0 1px 2px rgba(0,0,0,.4)",
+          background: "#fff",
+          boxShadow: "0 1px 2px rgba(0,0,0,.35)",
         }}
       />
     </span>
@@ -558,7 +554,7 @@ export function Segmented<T extends string>({
       aria-orientation="horizontal"
       aria-label={ariaLabel}
       onKeyDown={onKeyDown}
-      className={`flex gap-1 rounded-lg border border-line-2 bg-input p-[2px] ${className ?? ""}`}
+      className={`flex gap-0.5 rounded-lg bg-(--interaction-hover) p-[2px] ${className ?? ""}`}
     >
       {options.map((opt, i) => {
         const active = opt.value === value;
@@ -587,7 +583,7 @@ export function Segmented<T extends string>({
             // `leading-none`: the inherited 1.5 line-height adds ~5px of invisible
             // box around an 11px label, which — doubled by this control's box-in-a-box
             // nesting — is most of why the pill used to tower over its own text.
-            className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md px-0.5 py-[3px] font-mono text-[11px] leading-none whitespace-nowrap transition-all"
+            className="flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-[4px] text-sm leading-none font-medium whitespace-nowrap transition-colors"
             style={style}
           >
             {opt.icon}
@@ -638,7 +634,8 @@ export type TabsVariant = "border" | "inset";
  *  - `tabs` — the tab items (label + optional icon / `badge` slot / `dimmed`).
  *  - `value` / `onChange` — controlled active tab.
  *  - `variant` — `border` (default) or `inset` underline (see {@link TabsVariant}).
- *  - `accent` — underline color; defaults to the live `--accent` token.
+ *  - `accent` — underline color; defaults to the foreground — a tab is a
+ *    place, not an action, so it doesn't take the interaction color.
  *  - `tabClassName` — extra classes applied to every tab button (so chrome
  *    callers can stretch tabs to the header height with e.g. `items-center`).
  *
@@ -654,7 +651,7 @@ export function Tabs<T extends string>({
   tabClassName,
   variant = "border",
   rule = true,
-  accent = "var(--accent)",
+  accent = "var(--color-fg)",
 }: {
   tabs: TabItem<T>[];
   value: T;
@@ -691,8 +688,8 @@ export function Tabs<T extends string>({
             ? { color: "var(--color-fg-bright)", borderColor: accent }
             : { color: inactiveColor, borderColor: "transparent" };
         const base = inset
-          ? "flex cursor-pointer items-center gap-1.5 px-3 text-[13px] transition-colors hover:text-fg-2"
-          : "-mb-px flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2 text-[13px] font-medium transition-colors hover:text-fg-2";
+          ? "flex cursor-pointer items-center gap-1.5 px-3 text-base transition-colors hover:text-fg-2"
+          : "-mb-px flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2 text-base font-medium transition-colors hover:text-fg-2";
         const tab = (
           <button
             key={t.value}
@@ -727,7 +724,9 @@ export function Tabs<T extends string>({
 }
 
 /**
- * A tinted chip: text in `color` over a faint `color` wash with a `color` border.
+ * A tinted chip: text in `color` over a faint `color` wash. No outline: an edge
+ * in the same hue doubles the ink without adding meaning, and a row of
+ * outlined chips is what makes a list read as a dashboard.
  * The single source for the soft color-coded pills (priority, status, badges)
  * that several views hand-rolled with the `${hex}15`/`${hex}40` suffix trick —
  * which silently broke for CSS-var colors. Uses `alpha()` so `var(--accent)`
@@ -754,8 +753,8 @@ export function Pill({
 } & Pick<ComponentProps<"button">, "aria-label" | "aria-haspopup" | "aria-expanded">) {
   const style: CSSProperties = {
     color,
-    background: alpha(12, color),
-    border: `1px solid ${alpha(34, color)}`,
+    background: alpha(14, color),
+    border: "1px solid transparent",
   };
   const classes = `inline-flex flex-none items-center rounded ${className ?? ""}`;
   if (onClick) {
@@ -792,7 +791,7 @@ export function Badge({
   return (
     <Pill
       color={color ?? "var(--accent)"}
-      className={`px-[5px] py-px font-mono text-[9px] font-semibold tracking-wide ${className ?? ""}`}
+      className={`px-1.5 text-2xs leading-4 font-medium ${className ?? ""}`}
     >
       {children}
     </Pill>
@@ -1036,7 +1035,7 @@ export function Dropdown({
             role="menu"
             onKeyDown={onMenuKeyDown}
             style={coords ?? { position: "fixed", visibility: "hidden" }}
-            className={`z-[200] rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${menuClassName}`}
+            className={`z-[200] rounded-xl border border-line-2 bg-popover p-1 shadow-popover ${menuClassName}`}
           >
             {children(() => setOpen(false))}
           </div>,
@@ -1048,7 +1047,7 @@ export function Dropdown({
 
 /** Shared row class for items inside a `Dropdown` menu. */
 export const MENU_ITEM =
-  "flex w-full cursor-pointer items-center gap-2.5 px-3 py-1.5 text-left text-[12px] text-fg-3 hover:bg-hover disabled:cursor-default disabled:text-muted-4 disabled:hover:bg-transparent";
+  "menu-item flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-[5px] text-left text-base text-fg disabled:cursor-default disabled:text-muted-4";
 
 /** One row of a {@link ContextMenu}: an action, a section heading, or a rule. */
 export type ContextMenuItem =
@@ -1065,6 +1064,18 @@ export type ContextMenuItem =
     }
   | { kind: "heading"; key: string; label: string }
   | { kind: "rule"; key: string };
+
+/** A rule only separates two groups: one that would open or close the menu, or
+ *  sit beside another, is what a conditional group leaves behind when it's
+ *  empty (a worktree with no editor to "Open in"). */
+function withoutStrayRules(items: ContextMenuItem[]): ContextMenuItem[] {
+  const kept = items.filter(
+    (item, i) => item.kind !== "rule" || (i > 0 && items[i - 1].kind !== "rule"),
+  );
+  while (kept[0]?.kind === "rule") kept.shift();
+  while (kept[kept.length - 1]?.kind === "rule") kept.pop();
+  return kept;
+}
 
 /**
  * A right-click menu on a region of the UI, opened at the pointer.
@@ -1201,16 +1212,13 @@ export function PositionedMenu({
         top: pos?.top ?? at.y,
         visibility: pos ? undefined : "hidden",
       }}
-      className={`z-[200] rounded-lg border border-line-3 bg-raised py-1 shadow-lg ${menuClassName}`}
+      className={`z-[200] rounded-xl border border-line-2 bg-popover p-1 shadow-popover ${menuClassName}`}
     >
-      {items.map((item) =>
+      {withoutStrayRules(items).map((item) =>
         item.kind === "rule" ? (
-          <div key={item.key} className="my-1 border-t border-line" />
+          <div key={item.key} className="mx-2 my-1 border-t border-line" />
         ) : item.kind === "heading" ? (
-          <div
-            key={item.key}
-            className="px-3 pt-1 pb-0.5 text-[10px] font-medium tracking-wide text-muted-4"
-          >
+          <div key={item.key} className="px-2 pt-1.5 pb-1 text-xs font-semibold text-muted-2">
             {item.label}
           </div>
         ) : (
@@ -1237,7 +1245,7 @@ export function PositionedMenu({
 }
 
 /** Active/inactive style for an "inset underline" tab (a `bg-app` fill with an
- *  `inset 0 -2px 0` accent rule) — shared by the main-area and file-picker tab
+ *  `inset 0 -2px 0` foreground rule) — shared by the main-area and file-picker tab
  *  bars so the look can't drift. */
 export function underlineTabStyle(active: boolean, muted = false): CSSProperties {
   return {
@@ -1246,7 +1254,7 @@ export function underlineTabStyle(active: boolean, muted = false): CSSProperties
     // `muted`: the selected tab of a split group that isn't the focused one —
     // still marked, but the accent belongs to the group being worked in.
     boxShadow: active
-      ? `inset 0 -2px 0 ${muted ? "var(--color-muted-5)" : "var(--accent)"}`
+      ? `inset 0 -2px 0 ${muted ? "var(--color-muted-5)" : "var(--color-fg)"}`
       : "none",
   };
 }
@@ -1396,14 +1404,14 @@ export function ConfirmDialog({
         role="dialog"
         aria-modal
         aria-label={title}
-        className="relative w-[380px] max-w-full rounded-xl border border-line-3 bg-panel p-4 shadow-2xl"
+        className="relative w-[380px] max-w-full rounded-2xl border border-line-2 bg-popover p-4 shadow-dialog"
         style={{ animation: "toastIn .16s ease-out" }}
       >
-        <div className="text-[13px] font-semibold text-fg-bright">{title}</div>
-        <div className="mt-1.5 text-[12px] leading-[1.5] text-fg-2">{message}</div>
+        <div className="text-base font-semibold text-fg-bright">{title}</div>
+        <div className="mt-1.5 text-sm leading-[1.5] text-fg-2">{message}</div>
         {error && (
           <div
-            className="selectable mt-2.5 rounded-md px-2.5 py-1.5 text-[11px] leading-[1.45]"
+            className="selectable mt-2.5 rounded-md px-2.5 py-1.5 text-xs leading-[1.45]"
             style={{
               color: "var(--color-status-red)",
               background: alpha(10, "var(--color-status-red)"),

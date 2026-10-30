@@ -80,7 +80,7 @@ function BudgetRow({ window: w, nowMs }: { window: ApiBudgetWindow; nowMs: numbe
 
   return (
     <div className="flex items-center gap-3 border-t border-line px-3 py-2 first:border-t-0">
-      <div className="w-[74px] flex-none text-[11.5px] text-fg-3" title={meta.hint}>
+      <div className="w-[74px] flex-none text-sm text-fg-3" title={meta.hint}>
         {meta.label}
       </div>
       {/* `bg-input`, not `bg-surface`: the card behind this row is already
@@ -94,14 +94,14 @@ function BudgetRow({ window: w, nowMs }: { window: ApiBudgetWindow; nowMs: numbe
       </div>
       {/* Exact, not compacted: "4.9k of 5k" and "4,982 of 5,000" answer different
           questions, and the one worth asking here is how much is actually left. */}
-      <div className="flex-none font-mono text-[11px] text-muted-3">
+      <div className="flex-none text-xs text-muted-3 tabular-nums">
         {Math.round(remaining).toLocaleString()}
         <span className="text-muted-4"> / {Math.round(limit).toLocaleString()}</span>
       </div>
       {/* The reset is the other half of the number: 12 search calls left is fine
           when the pool refills in 20 seconds and a wall when it refills in an
           hour. Ticks live off the shared clock rather than a refetch. */}
-      <div className="w-[92px] flex-none text-right text-[11px] text-muted-4">
+      <div className="w-[92px] flex-none text-right text-xs text-muted-4">
         {w.resetsAtMs ? `resets in ${formatUntilPrecise(w.resetsAtMs, nowMs)}` : ""}
       </div>
     </div>
@@ -125,7 +125,7 @@ export function ApiBudgetMeters({
       {windows.map((w) => (
         <BudgetRow key={w.kind} window={w} nowMs={nowMs} />
       ))}
-      <div className="border-t border-line px-3 py-2 text-[11px] text-muted-4">{caption}</div>
+      <div className="border-t border-line px-3 py-2 text-xs text-muted-4">{caption}</div>
     </div>
   );
 }

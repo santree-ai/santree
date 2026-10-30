@@ -8,7 +8,7 @@ import { PlusIcon } from "../icons";
 import { Spinner } from "../primitives";
 
 export const SECTION_HEADER =
-  "mt-2 flex h-8 flex-none items-center gap-1.5 px-4 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-5";
+  "mt-2 flex h-8 flex-none items-center gap-1.5 px-4 text-xs font-semibold text-muted-2";
 
 /** The section's add action. `pending` holds its place with a spinner while an
  *  add it started is still under way. */

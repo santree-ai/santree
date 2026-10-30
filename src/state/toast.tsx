@@ -156,15 +156,15 @@ function ToastCard({ toast: t }: { toast: Toast }) {
   const v = VARIANT[t.variant];
   return (
     <div
-      className="pointer-events-auto flex items-start gap-2.5 rounded-lg border border-line-2 bg-panel py-2.5 pr-2 pl-3 shadow-xl"
-      style={{ borderLeft: `2.5px solid ${v.color}`, animation: "toastIn .2s ease-out" }}
+      className="pointer-events-auto flex items-start gap-2.5 rounded-xl border border-line-2 bg-popover py-2.5 pr-2 pl-3 shadow-popover"
+      style={{ animation: "toastIn .2s ease-out" }}
     >
       <span className="mt-px flex-none" style={{ color: v.color }}>
         <v.Icon size={14} />
       </span>
       <div className="min-w-0 flex-1 pt-px">
-        <div className="text-[12px] font-semibold text-fg-bright">{t.title ?? v.label}</div>
-        <div className="selectable mt-0.5 text-[11.5px] leading-[1.45] break-words text-fg-2">
+        <div className="text-sm font-semibold text-fg-bright">{t.title ?? v.label}</div>
+        <div className="selectable mt-0.5 text-sm leading-[1.45] break-words text-fg-2">
           {t.message}
         </div>
       </div>
@@ -175,7 +175,7 @@ function ToastCard({ toast: t }: { toast: Toast }) {
             t.action?.onClick();
             dismissToast(t.id);
           }}
-          className="mt-0.5 flex-none cursor-pointer rounded-[var(--radius-sm)] border border-line-2 px-2 py-1 text-[10.5px] font-medium text-fg-2 transition-colors hover:bg-hover hover:text-fg-bright"
+          className="mt-0.5 flex-none cursor-pointer rounded-[var(--radius-sm)] border border-line-2 px-2 py-1 text-xs font-medium text-fg-2 transition-colors hover:bg-hover hover:text-fg-bright"
         >
           {t.action.label}
         </button>

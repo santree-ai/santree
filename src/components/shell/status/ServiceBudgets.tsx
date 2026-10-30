@@ -184,9 +184,9 @@ function ServiceRow({
         <span className="flex h-6 w-6 flex-none items-center justify-center rounded-full bg-raised-2 text-fg-2">
           <ServiceMark service={budget.service} size={13} />
         </span>
-        <span className="text-[12.5px] font-semibold text-fg">{budget.service}</span>
+        <span className="text-base font-semibold text-fg">{budget.service}</span>
         {budget.workspace && (
-          <span className="min-w-0 truncate text-[11px] text-muted-4">{budget.workspace}</span>
+          <span className="min-w-0 truncate text-xs text-muted-4">{budget.workspace}</span>
         )}
         <ChevronRightIcon size={12} className="ml-auto flex-none text-muted-4" />
       </span>

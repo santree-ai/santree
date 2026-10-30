@@ -23,7 +23,7 @@ import {
   PullIcon,
   PushIcon,
 } from "../../components/icons";
-import { Spinner } from "../../components/primitives";
+import { Button, Spinner } from "../../components/primitives";
 import {
   usePullRemoteWorktree,
   usePullWorktree,
@@ -36,7 +36,7 @@ import { BASE_ID, type FileScope } from "./model";
 
 /** Shared shape for the pane's small git actions. */
 const ACTION =
-  "flex h-[20px] flex-none cursor-pointer items-center gap-1 rounded px-1.5 font-mono text-[10.5px] whitespace-nowrap text-muted-2 transition-colors hover:bg-hover hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent";
+  "flex h-[20px] flex-none cursor-pointer items-center gap-1 rounded px-1.5 text-xs whitespace-nowrap text-muted-2 tabular-nums transition-colors hover:bg-hover hover:text-fg-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent";
 
 /** Opening a pull request for this branch — the one thing the pane cannot answer
  *  for itself, since only the host knows whether the branch already has one.
@@ -111,28 +111,28 @@ export function GitPanel({
         <div className="flex flex-none flex-col gap-1 border-b border-line px-3 py-2.5">
           {openPr && (
             <div className="mb-1 flex items-center">
-              <button
-                type="button"
+              <Button
+                variant="primary"
+                size="sm"
                 onClick={openPr}
                 disabled={actionsOff !== undefined}
                 title={actionsOff ?? "Open a pull request for this branch"}
-                className="flex h-6 cursor-pointer items-center gap-1.5 rounded-full bg-fg px-2.5 text-[11px] font-semibold text-app transition-opacity hover:opacity-85 disabled:cursor-default disabled:opacity-50"
               >
                 <PrIcon size={12} />
                 Create PR
-              </button>
+              </Button>
             </div>
           )}
           <div className="flex items-center gap-2">
             <span
-              className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2"
+              className="min-w-0 flex-1 truncate font-mono text-sm text-fg-2"
               title={worktree.branch}
             >
               {worktree.branch}
             </span>
             {size && (
               <span
-                className="flex flex-none items-center gap-1.5 font-mono text-[10.5px] tabular-nums"
+                className="flex flex-none items-center gap-1.5 text-xs tabular-nums"
                 title="Lines added and removed on this branch, against its base"
               >
                 <span className="text-status-green">+{size.add.toLocaleString()}</span>
@@ -155,7 +155,7 @@ export function GitPanel({
       )}
 
       {actionsOff ? (
-        <div className="flex-none border-b border-line px-3 py-2 text-[11px] leading-[1.5] text-muted-4">
+        <div className="flex-none border-b border-line px-3 py-2 text-xs leading-[1.5] text-muted-4">
           <span className="text-muted-3">Commit</span> · {actionsOff}
         </div>
       ) : (
@@ -192,7 +192,7 @@ export function GitPanel({
                 aria-controls={splitForm ? splitId : undefined}
                 onClick={splitForm ? onCloseSplit : onSplit}
                 disabled={actionsOff !== undefined}
-                className={`flex cursor-pointer items-center gap-2 rounded-md py-1.5 text-xs transition-colors hover:bg-hover hover:text-fg ${splitForm ? "w-full justify-between font-medium text-fg" : "px-2.5 text-muted-2"}`}
+                className={`flex cursor-pointer items-center gap-2 rounded-md py-1.5 text-sm transition-colors hover:bg-hover hover:text-fg ${splitForm ? "w-full justify-between font-medium text-fg" : "px-2.5 text-muted-2"}`}
                 title={
                   actionsOff ??
                   (splitForm ? "Collapse split branch" : "Move remaining changes to a child branch")

@@ -73,8 +73,8 @@ function TabFaceRow() {
   return (
     <div className="flex items-center gap-[13px] border-t border-line py-3.5">
       <div className="min-w-0 flex-1">
-        <div className="text-[12.5px] font-medium text-fg-3">Claude tabs open in</div>
-        <div className="mt-[3px] text-[11.5px] leading-[1.5] text-muted-3">
+        <div className="text-base font-medium text-fg-3">Claude tabs open in</div>
+        <div className="mt-[3px] text-sm leading-[1.5] text-muted-3">
           {VIEW_SHORTCUT} switches one tab, and a tab you switched keeps its choice.
         </div>
       </div>

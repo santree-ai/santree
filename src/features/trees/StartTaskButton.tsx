@@ -128,11 +128,9 @@ export function StartTaskButton({
     >
       {(close) => (
         <>
-          <div className="px-3 py-1.5 font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase">
-            Start a task
-          </div>
+          <div className="px-3 py-1.5 text-xs font-semibold text-muted-4">Start a task</div>
           {candidates.length === 0 ? (
-            <div className="px-3 py-3 text-[11.5px] text-muted-3">
+            <div className="px-3 py-3 text-sm text-muted-3">
               No startable issues without a worktree.
             </div>
           ) : (
@@ -146,8 +144,8 @@ export function StartTaskButton({
                 }}
                 className="flex w-full cursor-pointer flex-col items-start gap-0.5 px-3 py-1.5 text-left hover:bg-hover"
               >
-                <span className="font-mono text-[10.5px] text-muted-2">{ticketHandle(t.id)}</span>
-                <MarkdownTitle className="block line-clamp-2 text-[12px] text-fg-3">
+                <span className="text-xs text-muted-2 tabular-nums">{ticketHandle(t.id)}</span>
+                <MarkdownTitle className="block line-clamp-2 text-sm text-fg-3">
                   {t.title}
                 </MarkdownTitle>
               </button>

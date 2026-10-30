@@ -2,7 +2,7 @@
  * App-wide text size, as webview zoom.
  *
  * Deliberately *not* a font-size scale: this codebase sizes everything in
- * arbitrary pixel values (`text-[12.5px]`, `h-[21px]`, …), so changing the root
+ * arbitrary pixel values (`text-base`, `h-[21px]`, …), so changing the root
  * font-size would move the text and leave every box, icon and gutter behind.
  * Webview zoom scales the rendered page the way a browser's ⌘+/⌘- does, so
  * proportions hold — and xterm re-fits on its own, since the terminals already

@@ -52,10 +52,7 @@ export function PrCommitsPane({ pr }: { pr: ReviewPr }) {
             list does: a reviewer who believes they read every commit and did not
             has drawn a conclusion from a history that wasn't all there. */}
         {detail?.commitsTruncated && (
-          <div
-            className="mt-2 flex items-center gap-1.5 text-[11px]"
-            style={{ color: palette.amber }}
-          >
+          <div className="mt-2 flex items-center gap-1.5 text-xs" style={{ color: palette.amber }}>
             <WarningIcon size={11} />
             Showing the first {commits.length} commits. This PR has more.
           </div>
@@ -79,7 +76,7 @@ function CommitRow({ commit }: { commit: PrCommit }) {
               type="button"
               onClick={() => openUrl(commit.url)}
               title={`Open ${commit.abbreviatedOid} on GitHub`}
-              className="min-w-0 flex-1 cursor-pointer truncate text-left text-[12px] text-fg-2 hover:text-fg-bright hover:underline"
+              className="min-w-0 flex-1 cursor-pointer truncate text-left text-sm text-fg-2 hover:text-fg-bright hover:underline"
             >
               {commit.messageHeadline}
             </button>
@@ -99,10 +96,10 @@ function CommitRow({ commit }: { commit: PrCommit }) {
               </button>
             )}
           </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10.5px] text-muted-4">
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted-4">
             <span className="truncate">{commit.author}</span>
             <span aria-hidden>·</span>
-            <RelativeTime ms={isoMs(commit.committedDate)} className="font-mono" />
+            <RelativeTime ms={isoMs(commit.committedDate)} className="tabular-nums" />
           </div>
         </div>
         {/* The full OID, not the abbreviation on the button: what you paste into
@@ -114,14 +111,14 @@ function CommitRow({ commit }: { commit: PrCommit }) {
             toast.success("Commit copied.");
           }}
           title={`Copy ${commit.oid}`}
-          className="group flex flex-none cursor-pointer items-center gap-1.5 rounded border border-line-2 bg-input px-1.5 py-px font-mono text-[10.5px] text-muted-2 hover:border-line-strong"
+          className="group flex flex-none cursor-pointer items-center gap-1.5 rounded border border-line-2 bg-input px-1.5 py-px font-mono text-xs text-muted-2 hover:border-line-strong"
         >
           {commit.abbreviatedOid}
           <CopyIcon size={10} className="text-muted-3 group-hover:text-fg-2" />
         </button>
       </div>
       {expanded && body && (
-        <pre className="border-t border-hairline px-3 py-2 pl-[46px] font-mono text-[11px] leading-[1.55] whitespace-pre-wrap text-muted-2">
+        <pre className="border-t border-hairline px-3 py-2 pl-[46px] font-mono text-xs leading-[1.55] whitespace-pre-wrap text-muted-2">
           {body}
         </pre>
       )}

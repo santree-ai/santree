@@ -260,18 +260,18 @@ function AnchorRow({
         {icon}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-1 text-[10.5px] text-muted-3">
+        <span className="flex items-center gap-1 text-xs text-muted-3">
           {/* The whole path is one hover away: two directories can hold the same
               basename, and the row only has width for one of them. */}
           <span className="truncate font-mono">{basename(path)}</span>
           <span className="flex-none whitespace-pre"> · {anchor}</span>
         </span>
-        <MarkdownTitle className="mt-0.5 block line-clamp-2 text-[12px] leading-[1.35] text-muted-2">
+        <MarkdownTitle className="mt-0.5 block line-clamp-2 text-sm leading-[1.35] text-muted-2">
           {body}
         </MarkdownTitle>
       </span>
       {trailing && (
-        <span className="mt-px flex-none font-mono text-[10px] text-muted-4">{trailing}</span>
+        <span className="mt-px flex-none text-2xs text-muted-4 tabular-nums">{trailing}</span>
       )}
     </button>
   );
@@ -298,14 +298,14 @@ function PrDescription({
 }) {
   return (
     <section>
-      <div className="mb-2 flex items-center gap-2 text-[11px]">
+      <div className="mb-2 flex items-center gap-2 text-xs">
         <SectionLabel className="mb-0">Description</SectionLabel>
         <span className="min-w-0 truncate text-muted-3">
           <span className="font-medium text-fg-2">{pr.author}</span> opened this
         </span>
         <RelativeTime
           ms={isoMs(pr.createdAt)}
-          className="ml-auto flex-none font-mono text-[9.5px] text-muted-4"
+          className="ml-auto flex-none text-2xs text-muted-4 tabular-nums"
         />
       </div>
       <div className="rounded-lg border border-line-2 bg-raised px-4 py-3">
@@ -373,11 +373,7 @@ function SectionLabel({
   children: React.ReactNode;
   className?: string;
 }) {
-  return (
-    <div className={`font-mono text-[10px] tracking-[.06em] text-muted-4 uppercase ${className}`}>
-      {children}
-    </div>
-  );
+  return <div className={`text-xs font-semibold text-muted-4 ${className}`}>{children}</div>;
 }
 
 /** The verb's colour, where the entry is a verdict: GitHub's green for an
@@ -400,7 +396,7 @@ function TimelineCard({ entry }: { entry: TimelineEntry }) {
       <Avatar name={entry.author} src={entry.authorAvatarUrl} size={26} />
       <div className="min-w-0 flex-1 overflow-hidden rounded-lg border border-line-2 bg-raised">
         <div
-          className={`flex items-center gap-2 px-3 py-1.5 text-[11px] ${body ? "border-b border-line-2" : ""}`}
+          className={`flex items-center gap-2 px-3 py-1.5 text-xs ${body ? "border-b border-line-2" : ""}`}
         >
           <span className="min-w-0 truncate font-medium text-fg-2">{entry.author}</span>
           <span
@@ -410,13 +406,13 @@ function TimelineCard({ entry }: { entry: TimelineEntry }) {
             {entry.verb}
           </span>
           {entry.isBot && (
-            <Pill color={palette.slate} className="px-1 py-px text-[8.5px] font-medium uppercase">
+            <Pill color={palette.slate} className="px-1 py-px text-2xs font-medium">
               bot
             </Pill>
           )}
           <RelativeTime
             ms={isoMs(entry.createdAt)}
-            className="ml-auto flex-none font-mono text-[9.5px] text-muted-4"
+            className="ml-auto flex-none text-2xs text-muted-4 tabular-nums"
           />
         </div>
         {body && (

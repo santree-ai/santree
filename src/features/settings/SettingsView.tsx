@@ -370,7 +370,7 @@ export function SettingsView() {
     <button
       type="button"
       onClick={goBack}
-      className="flex h-7 cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] font-medium text-muted-2 transition-colors hover:bg-hover hover:text-fg-2"
+      className="flex h-7 cursor-pointer items-center gap-2 rounded-md px-2 text-base font-medium text-muted-2 transition-colors hover:bg-hover hover:text-fg-2"
     >
       <BackArrowIcon size={15} />
       Back to app
@@ -416,7 +416,7 @@ export function SettingsView() {
         onClick={() => setSection(s.key)}
         data-active={isActive}
         aria-current={isActive ? "page" : undefined}
-        className="selection-row mb-0.5 flex w-full cursor-pointer items-center gap-2.5 rounded-md px-3 py-[9px] text-left text-[12.5px]"
+        className="selection-row mb-0.5 flex w-full cursor-pointer items-center gap-2.5 rounded-md px-3 py-[9px] text-left text-base"
         style={style}
       >
         <span className="flex-none opacity-90">{s.icon}</span>
@@ -455,7 +455,7 @@ export function SettingsView() {
                 >
                   <h2
                     id={groupHeadingId(node.group)}
-                    className="mb-1 px-3 font-mono text-[10px] tracking-[.07em] text-muted-4 uppercase"
+                    className="mb-1 px-3 text-xs font-semibold text-muted-4"
                   >
                     {node.group}
                   </h2>
@@ -477,7 +477,7 @@ export function SettingsView() {
             <button
               type="button"
               onClick={() => setRemoving(settingsRepo)}
-              className="flex w-full cursor-pointer items-center rounded-md px-3 py-[7px] text-left text-[12px] text-muted-3 transition-colors hover:bg-hover hover:text-status-red"
+              className="flex w-full cursor-pointer items-center rounded-md px-3 py-[7px] text-left text-sm text-muted-3 transition-colors hover:bg-hover hover:text-status-red"
             >
               Remove project…
             </button>
@@ -542,7 +542,7 @@ function RepoScopePicker({
           style={{ borderColor: open ? accent : "var(--color-line-3)" }}
         >
           <RepoAvatar repo={value} size={16} />
-          <span className="min-w-0 flex-1 truncate text-left font-mono text-[12px] font-medium text-fg">
+          <span className="min-w-0 flex-1 truncate text-left text-sm font-medium text-fg">
             {value}
           </span>
           <ChevronDownIcon size={12} className="flex-none text-muted-3" />
@@ -551,7 +551,7 @@ function RepoScopePicker({
     >
       {(close) => (
         <>
-          <div className="px-[9px] pt-1.5 pb-[5px] font-mono text-[9px] tracking-[.07em] text-muted-4 uppercase">
+          <div className="px-[9px] pt-1.5 pb-[5px] text-xs font-semibold text-muted-4">
             Repositories
           </div>
           {repos.map((r) => {
@@ -568,11 +568,9 @@ function RepoScopePicker({
                 style={isActive ? { background: alpha(12, accent) } : undefined}
               >
                 <RepoAvatar repo={r.name} size={18} />
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg">
-                  {r.name}
-                </span>
+                <span className="min-w-0 flex-1 truncate text-sm text-fg">{r.name}</span>
                 {isActive && (
-                  <span className="flex-none text-[12px]" style={{ color: accent }}>
+                  <span className="flex-none text-sm" style={{ color: accent }}>
                     ✓
                   </span>
                 )}

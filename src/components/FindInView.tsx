@@ -313,7 +313,7 @@ export function FindBar({ find }: { find: FindState }) {
   return (
     <div
       data-find-bar=""
-      className="absolute top-2 right-3 z-50 flex items-center gap-1.5 rounded-lg border border-line-3 bg-raised px-2 py-1 shadow-lg"
+      className="absolute top-2 right-3 z-50 flex items-center gap-1.5 rounded-lg border border-line-2 bg-popover px-2 py-1 shadow-popover"
     >
       <SearchIcon size={11} className="flex-none text-muted-4" />
       <input
@@ -333,14 +333,14 @@ export function FindBar({ find }: { find: FindState }) {
         spellCheck={false}
         aria-label="Find in file"
         placeholder="Find"
-        className="overlay-search-input w-36 bg-transparent font-mono text-[11.5px] text-fg-2 outline-none placeholder:text-muted-4"
+        className="overlay-search-input w-36 bg-transparent text-sm text-fg-2 outline-none placeholder:text-muted-4"
       />
       {/* Reserved width, so stepping through matches doesn't shuffle the
           buttons beside it. Announced, since the number is the only feedback a
           query with no matches gets. */}
       <span
         aria-live="polite"
-        className="w-12 flex-none text-right font-mono text-[10.5px] text-muted-4 tabular-nums"
+        className="w-12 flex-none text-right text-xs text-muted-4 tabular-nums"
       >
         {query === "" ? "" : position}
       </span>

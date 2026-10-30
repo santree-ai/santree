@@ -37,7 +37,7 @@ import { CardRow, Heading } from "../widgets";
  *  a near-black tile (theme-independent, like the GitHub mark beside it). */
 export const linearBadge = (
   <div
-    className="flex h-[34px] w-[34px] flex-none items-center justify-center rounded-[9px] text-white"
+    className="flex h-[34px] w-[34px] flex-none items-center justify-center rounded-lg text-white"
     style={{ background: "#101113" }}
   >
     <LinearLogo size={19} />
@@ -47,7 +47,7 @@ export const linearBadge = (
 /** The dropdowns in the card's preference rows: label on the left, control on
  *  the right, so the two rows read as one column of choices. */
 const ROW_SELECT_CLASS =
-  "rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-[12px] text-fg-3";
+  "rounded-lg border border-line-3 bg-input py-2 pr-8 pl-[11px] text-sm text-fg-3";
 
 /** The sidebar nestings, in increasing depth. The labels are the user's words
  *  for the shape, not the stored discriminants. */
@@ -78,10 +78,10 @@ export function LinearSection() {
           {linearBadge}
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span className="text-[13.5px] font-semibold text-fg-bright">Linear</span>
+              <span className="text-md font-semibold text-fg-bright">Linear</span>
               {connected && <Badge color="var(--color-status-green)">connected</Badge>}
             </div>
-            <div className="mt-[3px] text-[11.5px] text-muted-3">
+            <div className="mt-[3px] text-sm text-muted-3">
               {connected
                 ? `${orgs.length} ${orgs.length === 1 ? "org" : "orgs"} connected, chosen per repo`
                 : "Connect to sync your assigned issues"}
@@ -129,8 +129,8 @@ export function LinearSection() {
             {orgs.map((org) => (
               <div key={org.slug} className="flex items-center gap-2 py-1.5">
                 <span className="h-1.5 w-1.5 rounded-full" style={{ background: LINEAR_BRAND }} />
-                <span className="text-[12px] text-fg-3">{org.name}</span>
-                <span className="font-mono text-[10.5px] text-muted-4">{org.slug}</span>
+                <span className="text-sm text-fg-3">{org.name}</span>
+                <span className="text-xs text-muted-4">{org.slug}</span>
                 {!org.canWrite && <Badge>read-only</Badge>}
                 {org.via === "Mcp" && <Badge>via MCP</Badge>}
               </div>
@@ -220,17 +220,15 @@ function LinearBudget() {
   return (
     <div className="mt-3 rounded-xl border border-line-2 bg-raised px-4 py-3.5">
       <div className="mb-2.5 flex items-baseline gap-2">
-        <span className="text-[12.5px] font-medium text-fg-3">API budget</span>
-        <span className="text-[11.5px] text-muted-3">
+        <span className="text-base font-medium text-fg-3">API budget</span>
+        <span className="text-sm text-muted-3">
           Per workspace, per hour. Throttling stops on whichever pool runs out first.
         </span>
       </div>
       <div className="flex flex-col gap-2.5">
         {budgets.map((budget) => (
           <div key={budget.slug}>
-            {budgets.length > 1 && (
-              <div className="mb-1.5 text-[11.5px] text-muted-2">{budget.name}</div>
-            )}
+            {budgets.length > 1 && <div className="mb-1.5 text-sm text-muted-2">{budget.name}</div>}
             <ApiBudgetMeters
               windows={budget.windows}
               caption={

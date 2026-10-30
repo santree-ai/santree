@@ -29,7 +29,7 @@ export function PrSyncNotice({
 
   return (
     <div
-      className="flex flex-none items-center gap-2 border-b px-3 py-1.5 text-[11px]"
+      className="flex flex-none items-center gap-2 border-b px-3 py-1.5 text-xs"
       style={{ borderColor: alpha(34, palette.amber), background: alpha(10, palette.amber) }}
     >
       <WarningIcon size={12} className="flex-none text-status-amber" />

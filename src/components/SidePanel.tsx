@@ -187,7 +187,7 @@ export function SidePanel<T extends string>({
                 {badge ? (
                   <span
                     aria-hidden
-                    className="absolute top-1 -right-0.5 rounded-full bg-fg px-1 font-mono text-[9px] leading-[13px] text-app tabular-nums"
+                    className="absolute top-1 -right-0.5 rounded-full bg-fg px-1 text-2xs leading-[13px] text-app tabular-nums"
                   >
                     {badge}
                   </span>

@@ -29,7 +29,7 @@ export const ProjectNode = memo(
       <div
         // No opacity transition — see IssueNode: animating it in WebKit promotes a
         // scaled GPU layer and leaves the canvas blurry. Dim applies instantly.
-        className="rounded-[14px] transition-colors duration-200"
+        className="rounded-2xl transition-colors duration-200"
         style={{
           width: data.width,
           height: data.height,
@@ -46,7 +46,7 @@ export const ProjectNode = memo(
         }}
       >
         <div
-          className="absolute top-[9px] left-[13px] flex items-center gap-[7px] text-[11px] font-semibold"
+          className="absolute top-[9px] left-[13px] flex items-center gap-[7px] text-xs font-semibold"
           style={{
             color: data.dim ? "var(--color-muted-4)" : data.color,
             maxWidth: data.width - 26,
@@ -56,7 +56,7 @@ export const ProjectNode = memo(
           <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
             {data.project}
           </span>
-          <span className="flex-none font-mono text-[9.5px] text-muted-4">{data.count}</span>
+          <span className="flex-none text-2xs text-muted-4 tabular-nums">{data.count}</span>
         </div>
       </div>
     );

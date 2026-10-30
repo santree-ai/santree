@@ -41,7 +41,7 @@ function Item({
       type="button"
       role="menuitem"
       onClick={onClick}
-      className="flex w-full cursor-pointer items-center gap-[11px] rounded-md px-2.5 py-2 text-left text-[13px] text-fg-3 hover:bg-input"
+      className="flex w-full cursor-pointer items-center gap-[11px] rounded-md px-2.5 py-2 text-left text-base text-fg-3 hover:bg-input"
     >
       <span className="flex w-4 flex-none items-center justify-center text-muted">{icon}</span>
       <span className="flex-1">{label}</span>
@@ -71,7 +71,7 @@ export function HelpMenu() {
         <button
           type="button"
           onClick={toggle}
-          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border transition-colors hover:!border-line-strong hover:!text-fg-2"
+          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md border transition-colors hover:!bg-hover-2 hover:!text-fg"
           style={iconButtonStyle(open)}
           aria-label="Help"
         >
@@ -90,7 +90,7 @@ export function HelpMenu() {
             <Item
               icon={<KbdIcon size={14} />}
               label="Keyboard shortcuts"
-              trailing={<span className="font-mono text-[11px] text-muted-3">⌘/</span>}
+              trailing={<span className="text-xs text-muted-3">⌘/</span>}
               onClick={run(() => setShortcutsOpen(true))}
             />
             <Item
@@ -119,7 +119,7 @@ export function HelpMenu() {
               label="Check for updates"
               onClick={run(() => check.mutate())}
             />
-            <div className="mt-1 border-t border-line-2 px-2.5 pt-2.5 pb-1 font-mono text-[10.5px] text-muted-4">
+            <div className="mt-1 border-t border-line-2 px-2.5 pt-2.5 pb-1 text-xs text-muted-4">
               santree {version ? `v${version}` : ""}
             </div>
           </>

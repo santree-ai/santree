@@ -65,11 +65,11 @@ function TeamHeading({
       aria-expanded={open}
       aria-label={`${open ? "Collapse" : "Expand"} team ${label}`}
       title={`${title}\n${BULK_TOGGLE_HINT}`}
-      className="tree-band flex w-full cursor-pointer items-center gap-1.5 px-2 pt-4 pb-1 text-left text-[12px] font-semibold text-fg-2 hover:text-fg"
+      className="tree-band flex w-full cursor-pointer items-center gap-1.5 px-2 pt-4 pb-1 text-left text-sm font-semibold text-fg-2 hover:text-fg"
     >
       <Chevron size={9} className="flex-none" />
       <span className="truncate">{label}</span>
-      <span className="font-mono text-[10px] font-normal text-muted-4 tabular-nums">{count}</span>
+      <span className="text-2xs font-normal text-muted-4 tabular-nums">{count}</span>
     </button>
   );
 }

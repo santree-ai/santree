@@ -1,17 +1,11 @@
 @import "tailwindcss";
-/* Bundled locally (not fetched from fonts.googleapis.com) so the app renders
- * correctly offline/behind a firewall and never phones Google on launch. */
-@import "@fontsource-variable/geist";
-@import "@fontsource-variable/geist-mono";
 
-/* Kill ligatures/contextual alternates app-wide. Geist Mono's `calt` merges
+/* Kill ligatures/contextual alternates app-wide. A mono face's `calt` merges
  * symbol runs (`##`, `--`, `->`, `{{`) into single wide glyphs, which breaks any
  * surface showing markdown/code text in WKWebView: caret drift in editors,
  * collapsed or misplaced glyph runs in textareas and read-only panes. This
- * recurred four times as per-component fixes (prompt editor, skill editor,
- * prompt preview, PR dialog) — so it's disabled once here. Form controls pick
- * it up through preflight's `font: inherit`/`font-feature-settings: inherit`;
- * the xterm canvas renderer is unaffected either way. Never re-enable
+ * recurred four times as per-component fixes, so it's disabled once here. Form
+ * controls pick it up through preflight's `font: inherit`. Never re-enable
  * per-component. */
 :root {
   font-variant-ligatures: none;
@@ -25,16 +19,56 @@
  * (there is no accent picker — Appearance only chooses light/dark/auto).
  * ------------------------------------------------------------------ */
 @theme {
-  --font-sans: "Geist Variable", system-ui, -apple-system, sans-serif;
-  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+  /* The platform's own faces: SF Pro (with its automatic Text/Display optical
+     sizes) and SF Mono, the face the terminals already draw in. A native Mac
+     tool set in a web font is the first thing that reads as "a website". Mono
+     is for what a person would type or copy — code, paths, branches, hashes —
+     never for labels, counts or times. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+
+  /* THE type scale. Every size in the app is one of these — no arbitrary
+     `text-[Npx]`. 13px is the macOS body size; one step down for secondary
+     text, two for captions, and `2xs` only for glyph-sized marks (a badge in a
+     row, a keycap). Line heights are what the inherited 1.5 produced, so
+     moving a size onto the scale doesn't move the layout around it. */
+  --text-2xs: 10px;
+  --text-2xs--line-height: 14px;
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --text-sm: 12px;
+  --text-sm--line-height: 18px;
+  --text-base: 13px;
+  --text-base--line-height: 19px;
+  --text-md: 14px;
+  --text-md--line-height: 20px;
+  --text-lg: 15px;
+  --text-lg--line-height: 21px;
+  --text-xl: 18px;
+  --text-xl--line-height: 24px;
+  --text-2xl: 22px;
+  --text-2xl--line-height: 28px;
+  --text-3xl: 26px;
+  --text-3xl--line-height: 32px;
+
+  /* THE radius scale: marks (badges, keycaps) · controls (buttons, fields,
+     rows) · containers (cards, groups) · surfaces that float (menus,
+     popovers) · dialogs. Nested shapes step down one so their corners stay
+     concentric. */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-2xl: 12px;
 
   /* Surfaces (darkest → lightest) */
   --color-app: #0a0b0e;
   --color-panel: #0c0d10;
   --color-surface: #0d0e11;
   --color-titlebar: #141417;
-  --color-raised: #101114;
-  --color-raised-alt: #101216;
+  --color-raised: #111215;
+  --color-raised-alt: var(--color-raised);
   --color-raised-2: #1a1a1f;
   --color-input: #141417;
   --color-input-alt: #161619;
@@ -61,18 +95,20 @@
   --color-line-3: #2a2a31;
   --color-line-strong: #34343c;
 
-  /* Foreground / text */
-  --color-fg: #e6e6ea;
-  --color-fg-bright: #ededf2;
-  --color-fg-2: #cfcfd6;
-  --color-fg-3: #dadae0;
-  --color-muted: #9b9ba3;
-  --color-muted-2: #8b8b94;
-  /* muted-3/4 are used for real text (settings hints, empty-state subtitles,
-     timestamps, count badges) at small sizes, so they're tuned to clear WCAG
-     AA (4.5:1) against --color-app rather than sit purely decorative. */
-  --color-muted-3: #85858d;
-  --color-muted-4: #7b7b83;
+  /* Foreground / text — four steps, not nine. The extra names are kept as
+     aliases so call sites don't churn, but they resolve onto the ramp:
+     primary (fg, fg-bright, fg-3) · secondary (fg-2) · muted (muted) ·
+     tertiary (muted-2/3/4, tuned to clear WCAG AA on --color-app at small
+     sizes) · disabled (muted-5). Shades a few units apart read as noise,
+     not hierarchy. */
+  --color-fg: #e8e8ec;
+  --color-fg-bright: var(--color-fg);
+  --color-fg-3: var(--color-fg);
+  --color-fg-2: #c6c6cd;
+  --color-muted: #9d9da6;
+  --color-muted-2: #83838c;
+  --color-muted-3: var(--color-muted-2);
+  --color-muted-4: var(--color-muted-2);
   --color-muted-5: #4a4a52;
 
   /* Status / semantic */
@@ -100,9 +136,6 @@
   --density-compact: 6px;
   --density-standard: 10px;
   --density-roomy: 16px;
-  --radius-sm: 5px;
-  --radius-md: 9px;
-  --radius-lg: 14px;
   /* Two border strengths only: structure and emphasis. */
   --border-subtle: var(--color-line-2);
   --border-defined: var(--color-line-strong);
@@ -110,72 +143,55 @@
      border at rest, not a third semantic strength; hover restores the full
      subtle edge and selected/attention states use the defined edge. */
   --border-resting: color-mix(in srgb, var(--border-subtle) 48%, transparent);
-  /* The accent is monochrome, and it is a VALUE rather than a hue: white on
-     dark, near-black on light. That is deliberate — a neutral bright enough to
-     clear AA against the surface necessarily lands within ~1.2:1 of body text,
-     so "accent as tinted text" is not a signal that survives. What the accent
-     has instead is (1) inversion — the solid fill is the only inverted patch on
-     screen; (2) hairline geometry — the 2px card spine, the tab underline, the
-     focus ring; (3) weight; and (4) a monotonic opacity ladder for fills, since
-     every state fill is now the same "hue". Each theme declares its own literal
-     (see `:root[data-theme="light"]`) rather than deriving one from the other:
-     with no hue left there is nothing to derive from. */
-  --accent: #ffffff;
-  /* Interaction states are intentionally separate from semantic status colors.
-     Accent means "this is the current destination" everywhere; green/amber/red
-     remain available for success, activity, urgency, and failure only. */
-  --interaction-hover: color-mix(in srgb, var(--color-hover) 72%, transparent);
-  /* Hover and selected used to be separated by hue; now they differ only in
-     value, so the ladder has to stay monotonic and legible —
-     hover (#121317) < selected (#222326) is the entire distinction. Do not
-     lower the selection percentage without re-checking that step. */
-  --selection-fill: color-mix(in srgb, var(--accent) 10%, transparent);
-  --selection-border: color-mix(in srgb, var(--accent) 45%, transparent);
-  --selection-text: var(--accent-text);
-  /* Find-in-view (⌘F, `components/FindInView`). Amber rather than the accent:
-     the accent means "this is the current destination" everywhere, and a find
-     hit is not a destination — it is a result. One pair for both themes, since
-     the amber they mix from is defined once. */
+  /* The accent is santree's emerald — the app icon's and the website's — so
+     the product reads as one thing. It is an INTERACTION color: the primary
+     action, a switch that's on, the focus ring, a link.
+     Selection is not interaction, so it stays neutral (below), and status
+     keeps its own hues: green/amber/red mean success/activity/failure, never
+     "you are here". */
+  --accent: #2dd4a7;
+  /* Hover: one value step below selection, from the same foreground mix. */
+  --interaction-hover: color-mix(in srgb, var(--color-fg) 5%, transparent);
+  /* Selection is a neutral fill — a list on screen all day with one row lit
+     shouldn't be painted in the interaction color. Hover < selected is a value
+     step only, mixed from the foreground so one pair works in both themes. No
+     edge stripe: a colored bar down one side of the selected row is the most
+     recognisable tell of a generated UI, and the fill already says it. */
+  --selection-fill: color-mix(in srgb, var(--color-fg) 9%, transparent);
+  --selection-border: color-mix(in srgb, var(--color-fg) 14%, transparent);
+  --selection-text: var(--color-fg);
+  /* Find-in-view (⌘F, `components/FindInView`). Amber, the system's own find
+     highlight: a hit is a result, not an action. One pair for both themes. */
   --find-match: color-mix(in srgb, var(--color-status-amber) 32%, transparent);
   --find-current: var(--color-status-amber);
   --on-find-current: #17181c;
-  /* THE focus ring's color — see the `:focus-visible` rule below for why it is a
-     hairline of --accent-text rather than a slab of --accent. Named separately so
-     the ring can be re-tuned in one place without touching what "accent" means. */
-  --focus-ring: var(--accent-text);
+  /* THE focus ring: the accent, softened so it marks the control without
+     out-shouting it — the way the system draws one. See `:focus-visible`. */
+  --focus-ring: color-mix(in srgb, var(--accent) 65%, transparent);
+  /* A text field's border while it holds the caret. */
+  --field-focus: color-mix(in srgb, var(--accent) 55%, var(--color-line-strong));
   /* The sidebar tree's two steps (see `.tree-card`). Mixed from the foreground
      so one pair works in both themes — it lightens on dark surfaces and darkens
      on light ones — and translucent so nested rows composite instead of
      replacing the card beneath them. */
-  --tree-hover: color-mix(in srgb, var(--color-fg) 5%, transparent);
-  --tree-selected: color-mix(in srgb, var(--color-fg) 10%, transparent);
+  --tree-hover: var(--interaction-hover);
+  --tree-selected: var(--selection-fill);
   /* The fill behind a tag in the rail (see `.tree-tag`) — the `primary` label on
      the repo's own checkout. Mixed from the foreground like the two fills above,
      for the same reason: one value reads in both themes, and translucent it sits
      ON whatever fill the card already has instead of fighting it. Deliberately
      NOT tinted: hue in this tree is reserved for state. */
   --tree-tag-fill: color-mix(in srgb, var(--color-fg) 9%, transparent);
-  /* A text-safe accent — the accent used AS text or an icon on an ordinary
-     (untinted) surface. Kept as its own token so a text use can be re-tuned
-     without moving what the fill means; both themes declare it as a literal
-     alongside --accent. Because it sits within ~1.2:1 of body text, a text-only
-     accent needs a second signal (weight, a dot, a hairline) to read as
-     emphasis — see PrCommentsSection. */
-  --accent-text: #ffffff;
-  /* The SOLID accent fill (primary buttons, launch checkboxes). Inversion is
-     what the accent has instead of hue: on dark this slab is the brightest
-     thing on screen, on light the darkest, and it should stay the only inverted
-     patch in a view. */
-  --accent-fill: #ffffff;
-  /* Text/icon color for content sitting ON --accent-fill. Near-black on the
-     dark theme's bright fill; flipped to white on the light theme's deep fill.
-     Distinct from --accent-text, which is the accent used AS text on ordinary
-     surfaces. NOTE: on dark this is byte-identical to --color-app, so it must
-     only ever sit on the fill — anywhere else it is invisible. */
-  --on-accent: #0a0b0e;
+  /* The accent used AS text or an icon on an ordinary surface — tuned per
+     theme to clear AA, so it can differ from the fill. */
+  --accent-text: #3ddbb0;
+  /* The SOLID accent fill (primary buttons, a switch that's on, checkboxes). */
+  --accent-fill: #2dd4a7;
+  /* Ink on --accent-fill: the brand's deep green, not black, so the fill
+     reads as one material with its label. */
+  --on-accent: #04261c;
   /* Text/icon color for content sitting ON the solid danger (red) fill — white
-     in both themes since the danger red is shared. The dark --on-accent is the
-     app background, so destructive buttons need their own token. */
+     in both themes since the danger red is shared. */
   --on-danger: #ffffff;
   /* Linear's brand color (logo tint, connected badge). Single source for the
      `LINEAR_BRAND` token in theme/colors and the `text-[color:var(--linear-brand)]`
@@ -207,6 +223,36 @@
   color-scheme: light dark;
 }
 
+/* Elevation — two levels, one per kind of floating thing. A hairline of
+   shadow tightens the edge; the soft drop below it is what lifts the surface.
+   Defined per theme (light needs far less ink). */
+:root {
+  --elev-popover: 0 0 0 0.5px rgb(0 0 0 / 0.5), 0 2px 4px rgb(0 0 0 / 0.24),
+    0 12px 28px -6px rgb(0 0 0 / 0.55);
+  --elev-dialog: 0 0 0 0.5px rgb(0 0 0 / 0.6), 0 4px 12px rgb(0 0 0 / 0.3),
+    0 28px 72px -12px rgb(0 0 0 / 0.75);
+}
+:root[data-theme="light"] {
+  --elev-popover: 0 0 0 0.5px rgb(0 0 0 / 0.06), 0 2px 4px rgb(0 0 0 / 0.04),
+    0 12px 28px -6px rgb(0 0 0 / 0.14);
+  --elev-dialog: 0 0 0 0.5px rgb(0 0 0 / 0.08), 0 4px 12px rgb(0 0 0 / 0.06),
+    0 28px 72px -12px rgb(0 0 0 / 0.24);
+}
+@utility shadow-popover {
+  box-shadow: var(--elev-popover);
+}
+@utility shadow-dialog {
+  box-shadow: var(--elev-dialog);
+}
+
+/* A menu row (`MENU_ITEM`): highlighted, not ringed — keyboard focus and
+   pointer hover are the same "this is the row Return will run". */
+.menu-item:not(:disabled):hover,
+.menu-item:not(:disabled):focus-visible {
+  background: var(--selection-fill);
+  outline: none;
+}
+
 /* Selectable entities own a boundary. Metadata and status use ledger rows with
    dividers instead, keeping nested boxes from turning panes into dashboards. */
 .entity-card {
@@ -230,7 +276,6 @@
 .entity-card[data-active="true"] {
   border-color: var(--selection-border);
   background: var(--selection-fill);
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* Borderless ledger/menu/file rows use the same state vocabulary as cards.
@@ -246,7 +291,6 @@
 
 .selection-row[data-active="true"] {
   background: var(--selection-fill);
-  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* Find-in-view's matches (⌘F). The Highlight API paints ranges, not elements,
@@ -353,15 +397,11 @@
  * intentionally shared across both themes; the accent is NOT — it inverts.
  * ------------------------------------------------------------------ */
 :root[data-theme="light"] {
-  /* The mirror of the dark accent: near-black on white instead of white on
-     near-black, so the fill is still the one inverted patch in a view. Written
-     as literals, not derived from the dark value: the accent is two values, one
-     per theme, not one hue with two derivations. The --selection-* percentages
-     in :root need no override — 10% of #16171b over white is #e8e8e9 against a
-     #f4f5f7 hover, the same ~1.16:1 step the dark ladder has. */
-  --accent: #16171b;
-  --accent-text: #0c0d11;
-  --accent-fill: #17181c;
+  /* The same emerald, deepened until white sits on the fill at AA and the
+     text form clears AA on white. */
+  --accent: #0d8a6a;
+  --accent-text: #0a7559;
+  --accent-fill: #0c7f62;
   --on-accent: #ffffff;
 
   /* Surfaces */
@@ -370,7 +410,6 @@
   --color-surface: #fbfbfc;
   --color-titlebar: #eef0f3;
   --color-raised: #ffffff;
-  --color-raised-alt: #f7f8fa;
   --color-raised-2: #f2f3f5;
   --color-input: #f0f1f4;
   --color-input-alt: #e9ebee;
@@ -387,16 +426,11 @@
   --color-line-3: #cdd0d6;
   --color-line-strong: #b9bcc4;
 
-  /* Foreground / text */
-  --color-fg: #1b1c20;
-  --color-fg-bright: #0c0d11;
-  --color-fg-2: #2b2c31;
-  --color-fg-3: #232429;
-  --color-muted: #595a62;
-  --color-muted-2: #696a72;
-  /* See dark-theme comment above: muted-3/4 are real text, tuned for AA. */
-  --color-muted-3: #6b6b73;
-  --color-muted-4: #6e6e76;
+  /* Foreground / text — the same ramp as dark; aliases follow it. */
+  --color-fg: #1a1b1f;
+  --color-fg-2: #3b3c42;
+  --color-muted: #5b5c64;
+  --color-muted-2: #6b6c74;
   --color-muted-5: #b2b3ba;
 
   /* Loading / dot / branch-label tones, retuned for light surfaces. */
@@ -489,24 +523,48 @@ button:focus:not(:focus-visible) {
 
 /* THE focus ring. One rule, one mechanism — an `outline`, never a `ring-*`
    box-shadow: the pointer gate below can only take back what it can see, and a
-   component that rolls its own ring escapes it and leaves an accent box behind
-   on a plain click. Add roles here rather than styling focus in a component.
-
-   A hairline, not a slab: 2px of full accent read as a highlight on the control
-   rather than a marker beside it, and on a dense surface (a status bar, a row of
-   icon buttons) several of them turn the chrome into a light show. A 1px line
-   held two pixels clear of the control is unmistakable when you tab onto it and
-   takes up almost no ink. The color is --accent-text, not --accent, so the ring
-   can be re-tuned for legibility against a surface without moving what the fill
-   means; both are per-theme literals, so it inverts with the app. */
-input:focus-visible,
+   component that rolls its own ring escapes it. Add roles here rather than
+   styling focus in a component. Two pixels of softened accent held one pixel
+   clear of the control, with the control's own radius: it reads as the
+   system's ring, not as a box drawn around the thing. */
 select:focus-visible,
-textarea:focus-visible,
 button:focus-visible,
+a:focus-visible,
 [role="button"]:focus-visible,
-[role="tab"]:focus-visible {
-  outline: 1px solid var(--focus-ring);
-  outline-offset: 2px;
+[role="tab"]:focus-visible,
+[role="menuitem"]:focus-visible,
+[role="option"]:focus-visible,
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible,
+input[type="range"]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* A text field never gets the ring. It already has the strongest focus signal
+   there is — a blinking caret — and a rectangle drawn around a field that sits
+   inside a rounded container (the composer, a search bar) is the box-in-a-box
+   that makes a screen look unfinished. A field that owns a border tints it
+   instead; a field inside a container hands the signal to the container
+   (`.field:focus-within`). Unlayered on purpose, so it wins over a
+   component's own border-color utility. */
+:where(input:not([type="checkbox"], [type="radio"], [type="range"]), textarea):focus,
+:where(input:not([type="checkbox"], [type="radio"], [type="range"]), textarea):focus-visible {
+  outline: none;
+  border-color: var(--field-focus);
+}
+
+/* A container that holds a borderless field and draws the field's edge
+   itself — the composer, a search bar, a commit box. */
+.field {
+  border: 1px solid var(--color-line-2);
+  transition: border-color 120ms ease;
+}
+.field:hover {
+  border-color: var(--color-line-3);
+}
+.field:focus-within {
+  border-color: var(--field-focus);
 }
 
 /* While the user is driving with a pointer, no focus ring — see
@@ -519,28 +577,16 @@ button:focus-visible,
    made every textbox flash accent on a plain click. Tab to the same field and it
    rings, because the mark is gone by then. */
 :root[data-pointer-nav]
-  :where(input, select, textarea, button, [role="button"], [role="tab"]):focus-visible {
+  :where(select, button, a, [role="button"], [role="tab"], [role="menuitem"], [role="option"], input[type="checkbox"], input[type="radio"]):focus-visible {
   outline: none;
 }
 
 /* The code editors (react-simple-code-editor) lay a transparent textarea over the
-   highlighted layer, filling a wrapper that clips (Trees) or scrolls (Prompts) —
-   so the textarea's own ring would be cropped away, or scroll out of view with the
-   content. Draw it on the wrapper, inset. */
-.prompt-editor textarea:focus-visible,
-.shell-editor textarea:focus-visible {
-  outline: none;
-}
-.prompt-editor:has(textarea:focus-visible),
-.shell-editor:has(textarea:focus-visible) {
-  outline: 1px solid var(--focus-ring);
-  outline-offset: -1px;
-}
-/* …and the pointer gate has to reach the wrapper too, since the textarea it is
-   standing in for is one of the elements the gate suppresses. */
-:root[data-pointer-nav] .prompt-editor:has(textarea:focus-visible),
-:root[data-pointer-nav] .shell-editor:has(textarea:focus-visible) {
-  outline: none;
+   highlighted layer, filling a wrapper — so the focus edge belongs to the
+   wrapper, like any other `.field`. */
+.prompt-editor:has(textarea:focus),
+.shell-editor:has(textarea:focus) {
+  border-color: var(--field-focus);
 }
 
 /* Thin dark scrollbars to match the design.

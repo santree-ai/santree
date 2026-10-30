@@ -106,14 +106,14 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
             style={{ borderColor: alpha(45), background: alpha(7) }}
           >
             <CliIcon size={20} className="text-fg-2" />
-            <span className="text-[12px] font-medium text-fg-2">CLI</span>
+            <span className="text-sm font-medium text-fg-2">CLI</span>
             <span className="absolute top-2.5 right-2.5" style={{ color: "var(--accent)" }}>
               <CheckIcon size={14} />
             </span>
           </div>
           <div className="flex flex-col items-center justify-center gap-1.5 rounded-xl border border-line-3 py-5 opacity-55">
             <KeyIcon size={20} className="text-muted-2" />
-            <span className="text-[12px] font-medium text-muted-2">API key</span>
+            <span className="text-sm font-medium text-muted-2">API key</span>
             <span className="mt-0.5">
               <Badge color="var(--color-muted-2)">WIP</Badge>
             </span>
@@ -140,7 +140,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
                   void authQ.refetch();
                   if (kind === "Claude") void cli.refetch();
                 }}
-                className="flex cursor-pointer items-center gap-1.5 text-[11.5px] text-muted-2 transition-colors hover:text-fg-2"
+                className="flex cursor-pointer items-center gap-1.5 text-sm text-muted-2 transition-colors hover:text-fg-2"
               >
                 <RefreshIcon
                   size={12}
@@ -201,7 +201,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
               if (e.key === "Enter") e.currentTarget.blur();
             }}
             placeholder={auth?.detectedExec || `path to ${def.short}`}
-            className="w-full flex-1 rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-[11.5px] text-fg-3 placeholder:text-muted-4"
+            className="w-full flex-1 rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-sm text-fg-3 placeholder:text-muted-4"
           />
           {execValue.trim() && (
             <Button
@@ -216,7 +216,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
           )}
         </div>
         {!execValue.trim() && !auth?.detectedExec && (
-          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-status-amber">
+          <div className="mt-1.5 flex items-center gap-1.5 text-xs text-status-amber">
             <WarningIcon size={12} />
             Couldn't find {def.short} on your PATH. Set the path manually.
           </div>
@@ -226,7 +226,7 @@ function HarnessPanel({ kind }: { kind: AgentKind }) {
       {auth && (
         <Block title={`${def.label} settings`}>
           <div className="flex items-center justify-between rounded-lg border border-line-3 bg-surface px-3 py-2.5">
-            <span className="font-mono text-[11.5px] text-muted-2">{auth.settingsPath}</span>
+            <span className="font-mono text-sm text-muted-2">{auth.settingsPath}</span>
           </div>
         </Block>
       )}
@@ -279,7 +279,7 @@ function CodexPanel() {
             type="button"
             onClick={() => health.refetch()}
             aria-label="Refresh Codex CLI status"
-            className="cursor-pointer text-[11px] text-muted-2 hover:text-fg-2"
+            className="cursor-pointer text-xs text-muted-2 hover:text-fg-2"
           >
             <RefreshIcon size={12} className={health.isFetching ? "animate-spin" : ""} />
           </button>
@@ -289,7 +289,7 @@ function CodexPanel() {
           <KvRow label="Executable" value={health.data?.executable || "Not found"} />
         </div>
         {health.data?.error && (
-          <div className="mt-2 text-[11px] text-status-amber">{health.data.error}</div>
+          <div className="mt-2 text-xs text-status-amber">{health.data.error}</div>
         )}
       </Block>
 
@@ -302,10 +302,10 @@ function CodexPanel() {
           <KvRow label="Method" value={account.data?.authType || "—"} />
         </div>
         {account.error && (
-          <div className="mt-2 text-[11px] text-status-amber">{account.error.message}</div>
+          <div className="mt-2 text-xs text-status-amber">{account.error.message}</div>
         )}
         {!account.data?.connected && (
-          <div className="mt-2 text-[11px] leading-[1.55] text-muted-3">
+          <div className="mt-2 text-xs leading-[1.55] text-muted-3">
             Sign in with <code className="font-mono text-fg-2">codex login</code> in a terminal. It
             opens a browser and finishes in the CLI; Santree watches for it and updates here.
           </div>
@@ -339,7 +339,7 @@ function CodexPanel() {
           <KvRow label="Secondary" value={formatWindow(defaultLimits?.secondary ?? null)} />
         </div>
         {limits.error && (
-          <div className="mt-2 text-[11px] text-status-amber">{limits.error.message}</div>
+          <div className="mt-2 text-xs text-status-amber">{limits.error.message}</div>
         )}
       </Block>
 
@@ -354,7 +354,7 @@ function CodexPanel() {
           onBlur={commitExec}
           onKeyDown={(event) => event.key === "Enter" && event.currentTarget.blur()}
           placeholder={health.data?.executable || "path to codex"}
-          className="w-full rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-[11.5px]"
+          className="w-full rounded-lg border border-line-3 bg-input px-[11px] py-2 font-mono text-sm"
         />
       </Block>
 
@@ -383,7 +383,7 @@ function CodexSandboxBlock() {
               Let commands Codex runs in a work or address-review session reach the network. This
               lifts <em>all</em> outbound access, not just GitHub — Codex has no host allowlist, so
               anything the model runs can reach anything. Santree's own fetches run outside the
-              sandbox, so <span className="font-mono">Update base</span> already keeps{" "}
+              sandbox, so <span>Update base</span> already keeps{" "}
               <span className="font-mono">origin/*</span> fresh with this off. Applies to sessions
               started after the change.
             </>
@@ -430,7 +430,7 @@ function ClaudeVersionBlock() {
           type="button"
           onClick={() => versions.refetch()}
           aria-label="Refresh Claude Code checks"
-          className="cursor-pointer text-[11px] text-muted-2 hover:text-fg-2"
+          className="cursor-pointer text-xs text-muted-2 hover:text-fg-2"
         >
           <RefreshIcon size={12} className={versions.isFetching ? "animate-spin" : ""} />
         </button>
@@ -441,7 +441,7 @@ function ClaudeVersionBlock() {
         <KvRow label="Latest" value={latest} />
       </div>
       {(versions.data?.error || versions.error) && (
-        <p role="alert" className="mt-3 break-words text-[11.5px] text-status-amber">
+        <p role="alert" className="mt-3 break-words text-sm text-status-amber">
           {versions.data?.error ?? String(versions.error)}
         </p>
       )}

@@ -207,7 +207,7 @@ export function HeaderCount({
   srLabel: string;
 }) {
   return (
-    <span className="pointer-events-none flex flex-none items-center gap-1 font-mono text-[10px] text-fg-2 tabular-nums">
+    <span className="pointer-events-none flex flex-none items-center gap-1 text-2xs text-fg-2 tabular-nums">
       <span className="flex flex-none text-muted-4">{icon}</span>
       <span className="min-w-[13px]">{count}</span>
       <span className="sr-only"> {srLabel}</span>
@@ -304,14 +304,14 @@ export function ProjectReviewsSection({
         />
         <Chevron size={9} className="pointer-events-none flex-none text-muted-4" />
         <GitHubLogo size={11} className="pointer-events-none flex-none text-muted-4" />
-        <span className="pointer-events-none min-w-0 flex-1 truncate text-[12px] leading-4 text-muted-2">
+        <span className="pointer-events-none min-w-0 flex-1 truncate text-sm leading-4 text-muted-2">
           Reviews
         </span>
         {/* Folded, the number is the only thing left of the section, so it carries
             it. Open, each block below carries its own count and says more than a
             total can. */}
         {!open && reviews.connected && (
-          <span className="pointer-events-none flex-none font-mono text-[10px] text-fg-2 tabular-nums">
+          <span className="pointer-events-none flex-none text-2xs text-fg-2 tabular-nums">
             {reviews.counts.total}
           </span>
         )}
@@ -356,7 +356,7 @@ export function ProjectReviewsSection({
           leaving an expanded section that looks like it failed to load. */}
       {open && reviews.groups.length === 0 && (
         <div
-          className="py-(--density-compact) text-[11px] text-muted-4"
+          className="py-(--density-compact) text-xs text-muted-4"
           style={{ paddingLeft: rowsUnder(blockGutter, BAND_LABEL_X) }}
         >
           {reviews.connected ? "Nothing waiting on you" : "Sign in to GitHub to see reviews"}
@@ -405,10 +405,8 @@ function MergeQueueRow({
         className="tree-row flex w-full cursor-pointer items-center gap-1.5 px-2 py-(--density-compact) text-left"
       >
         <MergeQueueIcon size={11} className="flex-none text-muted-4" />
-        <span className="min-w-0 flex-1 truncate text-[12px] leading-4 text-muted-2">
-          Merge queue
-        </span>
-        <span className="flex-none font-mono text-[10px] text-fg-2 tabular-nums">{count}</span>
+        <span className="min-w-0 flex-1 truncate text-sm leading-4 text-muted-2">Merge queue</span>
+        <span className="flex-none text-2xs text-fg-2 tabular-nums">{count}</span>
       </button>
     </div>
   );
@@ -754,7 +752,7 @@ function ReviewPrRow({
             >
               <ChangeSizeBars size={size} />
             </span>
-            <MarkdownTitle className="min-w-0 flex-1 truncate text-[13px] leading-5 font-medium text-fg-2">
+            <MarkdownTitle className="min-w-0 flex-1 truncate text-base leading-5 font-medium text-fg-2">
               {pr.title}
             </MarkdownTitle>
             {/* Decorative: the row's name and tooltip say it in words. A filled

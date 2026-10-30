@@ -42,8 +42,8 @@ import {
 /** Slow-changing shared data — the part most `useApp()` consumers read. */
 interface AppData {
   /** The theme accent, as a CSS value (`var(--accent)`) for inline styles.
-   *  Deliberately NOT a hex: the accent inverts per theme (white on dark,
-   *  near-black on light) and only the cascade knows which one is live. */
+   *  Deliberately NOT a hex: the accent is tuned per theme and only the
+   *  cascade knows which one is live. */
   accent: string;
 
   /** Live settings (null until the backend seed loads). Edits persist via

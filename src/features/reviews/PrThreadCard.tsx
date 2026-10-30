@@ -100,21 +100,21 @@ export function PrThreadCard({
           className={`flex-none text-muted-4 transition-transform ${open ? "" : "-rotate-90"}`}
         />
         {thread.isResolved && <CheckIcon size={12} className="flex-none text-status-green" />}
-        <span className="font-mono text-[10.5px] text-muted-3">{anchor}</span>
+        <span className="font-mono text-xs text-muted-3">{anchor}</span>
         {isDraft && (
           <Pill
             color={palette.amber}
-            className="px-1 py-px text-[9.5px] font-medium"
+            className="px-1 py-px text-2xs font-medium"
             title="In your unsubmitted review. Nobody else can see this yet"
           >
             Draft
           </Pill>
         )}
-        {thread.isResolved && <span className="text-[10px] text-status-green">Resolved</span>}
+        {thread.isResolved && <span className="text-2xs text-status-green">Resolved</span>}
         {thread.isOutdated && (
-          <span className="rounded bg-input px-1 py-px text-[9.5px] text-muted-4">Outdated</span>
+          <span className="rounded bg-input px-1 py-px text-2xs text-muted-4">Outdated</span>
         )}
-        <span className="ml-auto flex-none text-[10.5px] text-muted-4">
+        <span className="ml-auto flex-none text-xs text-muted-4">
           {count} comment{count === 1 ? "" : "s"}
         </span>
       </button>
@@ -125,13 +125,13 @@ export function PrThreadCard({
               <Avatar name={c.author} src={c.authorAvatarUrl} size={18} />
               <div className="min-w-0 flex-1">
                 <div className="mb-0.5 flex items-center gap-1.5">
-                  <span className="text-[11px] font-medium text-fg-2">{c.author}</span>
+                  <span className="text-xs font-medium text-fg-2">{c.author}</span>
                   <RelativeTime
                     ms={isoMs(c.createdAt)}
-                    className="font-mono text-[9.5px] text-muted-4"
+                    className="text-2xs text-muted-4 tabular-nums"
                   />
                 </div>
-                <div className="text-[12px]">
+                <div className="text-sm">
                   <SuggestionOriginal value={original}>
                     <Markdown>{c.body}</Markdown>
                   </SuggestionOriginal>

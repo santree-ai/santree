@@ -144,10 +144,10 @@ export function CommentComposer({
         }}
         placeholder={placeholder}
         rows={rows}
-        className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-[12px] leading-[1.55] text-fg-2 placeholder:text-muted-4 focus:border-line-strong focus:outline-none"
+        className="w-full resize-y rounded-lg border border-line-2 bg-input px-3 py-2 text-sm leading-[1.55] text-fg-2 placeholder:text-muted-4"
       />
       <div className="mt-1.5 flex flex-wrap items-center justify-end gap-2">
-        <span className="mr-auto font-mono text-[9px] text-muted-4">⌘⏎ to send</span>
+        <span className="mr-auto text-2xs text-muted-4">⌘⏎ to send</span>
         {onCancel && (
           <Button variant="ghost" size="sm" onClick={onCancel} disabled={pending}>
             Cancel

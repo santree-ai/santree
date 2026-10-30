@@ -24,10 +24,10 @@ export function CheckLogView({ log }: { log: OpenCheckLog }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-app">
       <div className="flex h-9 flex-none items-center gap-2 border-b border-line px-3">
-        <span className="min-w-0 flex-1 truncate text-[12px] text-fg-2" title={log.name}>
+        <span className="min-w-0 flex-1 truncate text-sm text-fg-2" title={log.name}>
           {log.name}
         </span>
-        <span className="flex-none font-mono text-[10px] text-muted-4">job #{log.jobId}</span>
+        <span className="flex-none text-2xs text-muted-4 tabular-nums">job #{log.jobId}</span>
         {log.url && (
           <button
             type="button"

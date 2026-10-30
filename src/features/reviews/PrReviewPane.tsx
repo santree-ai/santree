@@ -181,8 +181,8 @@ export function PrReviewPane({
           <FilesSkeleton />
         ) : files.length > 0 ? (
           <>
-            <div className="flex items-center gap-2 border-b border-hairline px-4 py-2 font-mono text-[10.5px] text-muted-3">
-              <span className="tracking-[.04em] uppercase">
+            <div className="flex items-center gap-2 border-b border-hairline px-4 py-2 text-xs text-muted-3 tabular-nums">
+              <span className="text-xs font-semibold">
                 {reviewedCount} / {files.length} files viewed
               </span>
               <span
@@ -359,18 +359,16 @@ const PrFileCard = memo(function PrFileCard({
           />
         </button>
         <span
-          className="flex-none font-mono text-[10px] font-semibold"
+          className="flex-none text-2xs font-semibold"
           style={{ color: meta.color }}
           title={file.status}
         >
           {meta.letter}
         </span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg-2">
-          {file.path}
-        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-sm text-fg-2">{file.path}</span>
         {threads.length > 0 && (
           <span
-            className="flex flex-none items-center gap-1 font-mono text-[10px] text-muted-4"
+            className="flex flex-none items-center gap-1 text-2xs text-muted-4 tabular-nums"
             title={`${threads.length} review comment${threads.length === 1 ? "" : "s"}`}
           >
             <MessageSquareIcon size={10} />
@@ -379,7 +377,7 @@ const PrFileCard = memo(function PrFileCard({
         )}
         {drafts.length > 0 && (
           <span
-            className="flex flex-none items-center gap-0.5 font-mono text-[10px]"
+            className="flex flex-none items-center gap-0.5 text-2xs tabular-nums"
             style={{ color: palette.purple }}
             title={`${drafts.length} AI draft${drafts.length === 1 ? "" : "s"} on this file`}
           >
@@ -389,12 +387,12 @@ const PrFileCard = memo(function PrFileCard({
             {drafts.length}
           </span>
         )}
-        <span className="flex-none font-mono text-[10.5px]">
+        <span className="flex-none text-xs tabular-nums">
           <span className="text-status-green">+{file.additions}</span>{" "}
           <span className="text-status-red">−{file.deletions}</span>
         </span>
         <label
-          className="flex flex-none cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[10.5px] text-muted-3 select-none hover:bg-hover hover:text-fg-2"
+          className="flex flex-none cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-muted-3 select-none hover:bg-hover hover:text-fg-2"
           title="Mark this file as reviewed. It re-opens automatically when a new commit changes it."
           style={reviewed ? { color: "var(--accent)" } : undefined}
         >

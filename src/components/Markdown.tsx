@@ -108,7 +108,7 @@ function BodyImage({ src, alt }: { src: string | undefined; alt: string | undefi
   if (id && !resolved) {
     return (
       <span
-        className="my-2.5 flex items-center gap-1.5 rounded-lg border border-dashed border-line-3 px-2.5 py-2 text-[11px] text-muted-4"
+        className="my-2.5 flex items-center gap-1.5 rounded-lg border border-dashed border-line-3 px-2.5 py-2 text-xs text-muted-4"
         title="This attachment is private to the repository, and its signed link hasn't arrived yet."
       >
         {alt || "Attachment"}
@@ -141,7 +141,7 @@ function InertImage({ src, alt }: { src: string | undefined; alt: string | undef
   }
   return (
     <span
-      className="my-2.5 flex min-w-0 flex-col gap-0.5 rounded-lg border border-dashed border-line-3 px-2.5 py-2 text-[11px] text-muted-3"
+      className="my-2.5 flex min-w-0 flex-col gap-0.5 rounded-lg border border-dashed border-line-3 px-2.5 py-2 text-xs text-muted-3"
       title="Images from the network aren't loaded here."
     >
       <span>{alt || "Image"}</span>
@@ -189,7 +189,7 @@ function codeFence(node: unknown): Fence | null {
 }
 
 const FENCE_CLASS =
-  "mb-2.5 overflow-x-auto rounded-lg border border-line-2 bg-input p-3 font-mono text-[11.5px] leading-[1.55] whitespace-pre text-fg-3";
+  "mb-2.5 overflow-x-auto rounded-lg border border-line-2 bg-input p-3 font-mono text-sm leading-[1.55] whitespace-pre text-fg-3";
 
 /** A fenced code block, tokenized when its info string names a language we know.
  *  Falls back to react-markdown's own children for a `<pre>` that isn't a fence,
@@ -208,14 +208,12 @@ function CodeFence({ fence, children }: { fence: Fence | null; children?: ReactN
 const components: Components = {
   p: ({ children }) => <p className="mb-2.5 last:mb-0">{children}</p>,
   h1: ({ children }) => (
-    <h1 className="mt-3 mb-1.5 text-[14px] font-semibold text-fg-bright">{children}</h1>
+    <h1 className="mt-3 mb-1.5 text-md font-semibold text-fg-bright">{children}</h1>
   ),
   h2: ({ children }) => (
-    <h2 className="mt-3 mb-1.5 text-[13px] font-semibold text-fg-bright">{children}</h2>
+    <h2 className="mt-3 mb-1.5 text-base font-semibold text-fg-bright">{children}</h2>
   ),
-  h3: ({ children }) => (
-    <h3 className="mt-2.5 mb-1 text-[12px] font-semibold text-fg-2">{children}</h3>
-  ),
+  h3: ({ children }) => <h3 className="mt-2.5 mb-1 text-sm font-semibold text-fg-2">{children}</h3>,
   ul: ({ children }) => <ul className="mb-2.5 ml-1 space-y-1">{children}</ul>,
   ol: ({ children }) => (
     <ol className="mb-2.5 ml-4 list-decimal space-y-1 marker:text-muted-4">{children}</ol>
@@ -255,7 +253,7 @@ const components: Components = {
     const block = (className ?? "").includes("language-") || text.includes("\n");
     if (block) return <code className="font-mono">{children}</code>;
     return (
-      <code className="rounded border border-line-2 bg-input px-1 py-px font-mono text-[11px] text-fg-2">
+      <code className="rounded border border-line-2 bg-input px-1 py-px font-mono text-xs text-fg-2">
         {children}
       </code>
     );
@@ -291,7 +289,7 @@ const components: Components = {
   // as bare, borderless cells (just runs of text); style them to match Linear.
   table: ({ children }) => (
     <div className="mb-2.5 overflow-x-auto rounded-lg border border-line-2">
-      <table className="w-full border-collapse text-[11.5px]">{children}</table>
+      <table className="w-full border-collapse text-sm">{children}</table>
     </div>
   ),
   thead: ({ children }) => <thead className="bg-input">{children}</thead>,
@@ -448,7 +446,7 @@ export const Markdown = memo(function Markdown({
     // code block, list, table or `<details>` — which is most bot output — left its
     // block margin sitting inside the card's own padding.
     <div
-      className={`selectable [overflow-wrap:anywhere] [&>*:last-child]:mb-0 ${className ?? "text-[12.5px] leading-[1.6] text-fg-2"}`}
+      className={`selectable [overflow-wrap:anywhere] [&>*:last-child]:mb-0 ${className ?? "text-base leading-[1.6] text-fg-2"}`}
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, literalizeUnknownHtml]}
@@ -486,20 +484,18 @@ export const Markdown = memo(function Markdown({
 const documentComponents: Components = {
   ...components,
   h1: ({ children }) => (
-    <h1 className="mt-5 mb-2.5 border-b border-line pb-1.5 text-[19px] font-semibold tracking-[-.01em] text-fg-bright first:mt-0">
+    <h1 className="mt-5 mb-2.5 border-b border-line pb-1.5 text-xl font-semibold tracking-[-.01em] text-fg-bright first:mt-0">
       {children}
     </h1>
   ),
   h2: ({ children }) => (
-    <h2 className="mt-5 mb-2 border-b border-line pb-1.5 text-[15.5px] font-semibold text-fg-bright first:mt-0">
+    <h2 className="mt-5 mb-2 border-b border-line pb-1.5 text-lg font-semibold text-fg-bright first:mt-0">
       {children}
     </h2>
   ),
-  h3: ({ children }) => (
-    <h3 className="mt-4 mb-1.5 text-[13.5px] font-semibold text-fg-2">{children}</h3>
-  ),
+  h3: ({ children }) => <h3 className="mt-4 mb-1.5 text-md font-semibold text-fg-2">{children}</h3>,
   h4: ({ children }) => (
-    <h4 className="mt-3.5 mb-1 text-[12.5px] font-semibold text-fg-2">{children}</h4>
+    <h4 className="mt-3.5 mb-1 text-base font-semibold text-fg-2">{children}</h4>
   ),
   hr: () => <hr className="my-4 border-t border-line" />,
   pre: ({ children, node }) => {
@@ -531,7 +527,7 @@ export const MarkdownDocument = memo(function MarkdownDocument({
 }) {
   return (
     <div
-      className={`selectable [overflow-wrap:anywhere] [&>*:last-child]:mb-0 ${className ?? "text-[13px] leading-[1.65] text-fg-2"}`}
+      className={`selectable [overflow-wrap:anywhere] [&>*:last-child]:mb-0 ${className ?? "text-base leading-[1.65] text-fg-2"}`}
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, literalizeUnknownHtml]}

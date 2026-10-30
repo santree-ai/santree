@@ -14,7 +14,7 @@ import { Heading } from "../widgets";
 /** Jira's app-icon treatment — the white mark on its brand blue tile. */
 export const jiraBadge = (
   <div
-    className="flex h-[34px] w-[34px] flex-none items-center justify-center rounded-[9px] text-white"
+    className="flex h-[34px] w-[34px] flex-none items-center justify-center rounded-lg text-white"
     style={{ background: JIRA_BRAND }}
   >
     <JiraLogo size={18} />
@@ -47,10 +47,10 @@ export function JiraSection() {
           {jiraBadge}
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span className="text-[13.5px] font-semibold text-fg-bright">Jira Cloud</span>
+              <span className="text-md font-semibold text-fg-bright">Jira Cloud</span>
               {connected && <Badge color="var(--color-status-green)">connected</Badge>}
             </div>
-            <div className="mt-[3px] text-[11.5px] text-muted-3">
+            <div className="mt-[3px] text-sm text-muted-3">
               {connected
                 ? `${sites.length} ${sites.length === 1 ? "site" : "sites"} connected, chosen per repo`
                 : "Connect to sync your assigned issues"}
@@ -73,8 +73,8 @@ export function JiraSection() {
             {sites.map((site) => (
               <div key={site.cloudId} className="flex items-center gap-2 py-1.5">
                 <span className="h-1.5 w-1.5 rounded-full" style={{ background: JIRA_BRAND }} />
-                <span className="text-[12px] text-fg-3">{site.siteName}</span>
-                <span className="font-mono text-[10.5px] text-muted-4">{hostOf(site.siteUrl)}</span>
+                <span className="text-sm text-fg-3">{site.siteName}</span>
+                <span className="text-xs text-muted-4">{hostOf(site.siteUrl)}</span>
                 {!site.canWrite && <Badge>read-only</Badge>}
               </div>
             ))}

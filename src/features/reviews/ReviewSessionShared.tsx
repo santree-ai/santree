@@ -42,8 +42,8 @@ export function ReviewFooter({
 
   return (
     <div className="flex-none border-t border-hairline bg-raised">
-      {note && <p className="px-3 pt-1.5 text-[10px] leading-[1.45] text-muted-4">{note}</p>}
-      <div className="flex items-center gap-2 px-3 py-1.5 text-[10.5px] text-muted-3">
+      {note && <p className="px-3 pt-1.5 text-2xs leading-[1.45] text-muted-4">{note}</p>}
+      <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted-3">
         <AgentIcon kind={agentKind} size={11} className="flex-none" />
         <span className="min-w-0 flex-1 truncate">{message}</span>
         {extra}

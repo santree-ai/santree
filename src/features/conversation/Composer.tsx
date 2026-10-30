@@ -585,11 +585,11 @@ export function Composer({
         className="rounded-lg border px-4 py-3"
         style={{ borderColor: alpha(35, red), background: alpha(6, red) }}
       >
-        <div className="text-[12.5px] font-medium text-fg-2">{copy.title}</div>
+        <div className="text-base font-medium text-fg-2">{copy.title}</div>
         {copy.detail && (
-          <p className="selectable mt-0.5 text-[12px] leading-[1.5] text-fg-3">{copy.detail}</p>
+          <p className="selectable mt-0.5 text-sm leading-[1.5] text-fg-3">{copy.detail}</p>
         )}
-        <p className="mt-0.5 text-[12px] leading-[1.5] text-muted-3">
+        <p className="mt-0.5 text-sm leading-[1.5] text-muted-3">
           Answer it in the terminal: switch to Terminal above, or press {VIEW_SHORTCUT}.
         </p>
       </div>
@@ -611,12 +611,10 @@ export function Composer({
         >
           <WarningIcon size={13} className="flex-none text-status-amber" />
           <div className="min-w-0 flex-1">
-            <div className="text-[12px] font-medium text-fg-2">{notice.title}</div>
-            <div className="text-[11px] leading-[1.5] text-muted-3">{notice.detail}</div>
+            <div className="text-sm font-medium text-fg-2">{notice.title}</div>
+            <div className="text-xs leading-[1.5] text-muted-3">{notice.detail}</div>
             {phase === "lost" && lost?.resume && lost.resumeBlocked && (
-              <div className="mt-0.5 text-[11px] leading-[1.5] text-muted-2">
-                {lost.resumeBlocked}
-              </div>
+              <div className="mt-0.5 text-xs leading-[1.5] text-muted-2">{lost.resumeBlocked}</div>
             )}
           </div>
           {phase === "lost" && lost?.resume && (
@@ -638,7 +636,7 @@ export function Composer({
           )}
         </div>
       )}
-      <div className="flex items-end gap-2 rounded-lg border border-line-2 bg-input py-2 pr-2 pl-3.5 transition-colors focus-within:border-line-strong">
+      <div className="field flex items-end gap-2 rounded-xl bg-input py-2 pr-2 pl-3.5">
         <textarea
           ref={box}
           rows={1}
@@ -654,7 +652,7 @@ export function Composer({
           disabled={phase === "ended" || phase === "offline"}
           aria-label="Message Claude Code"
           placeholder="Message Claude Code"
-          className="max-h-[220px] min-h-[22px] flex-1 resize-none bg-transparent py-1 text-[13.5px] leading-[1.6] text-fg placeholder:text-muted-4 focus:outline-none disabled:opacity-60"
+          className="max-h-[220px] min-h-[22px] flex-1 resize-none bg-transparent py-1 text-md leading-[1.6] text-fg placeholder:text-muted-4 disabled:opacity-60"
         />
         {/* Gone once a Stop goes unheard: a second Esc would open Claude's
             rewind menu, not stop anything. */}
@@ -684,7 +682,7 @@ export function Composer({
       </div>
       {/* One line, one thing: what became of the last send, or why Send is
           off, or — when it is on — how to use it. */}
-      <div role="status" className="mt-2 px-1 text-[11px] leading-[1.5] text-muted-4">
+      <div role="status" className="mt-2 px-1 text-xs leading-[1.5] text-muted-4">
         {hint || "Enter to send · Shift+Enter for a new line"}
       </div>
     </div>
