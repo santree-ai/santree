@@ -7,6 +7,13 @@ markdown, because the app renders them as text. A stable tag fails the
 release guard without an entry here; a beta without one falls back to a
 commit-compare link.
 
+## 0.1.19-beta.9 — 2026-10-29
+
+- New and experimental: read a Claude tab as a conversation. Turn on Settings, Experimental, Conversation view, open a new Claude tab, and press ⌘J or use the switch at the top to flip between the conversation and the terminal. Claude keeps running in its terminal the whole time.
+- From the conversation you can follow each step Claude takes, send it messages, stop it, and answer its permission prompts and questions. It types into the terminal only what you could type there yourself.
+- Settings has a new Experimental section. Daedalus and the English tutor moved there and are switched off after this update, so if you use either, turn it back on there.
+- A tab whose subagent is waiting for permission keeps saying it needs you until that request is answered.
+
 ## 0.1.19-beta.8 — 2026-10-27
 
 - Bring your sign-ins into Web tabs. Settings, Web imports cookies from another browser on this Mac — Chrome, Arc, Brave, Edge, Vivaldi, Opera, Chromium or Firefox — so a page opens already signed in.
